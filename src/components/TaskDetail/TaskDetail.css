@@ -1,0 +1,336 @@
+.task-detail {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  box-sizing: border-box;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+.task-detail__header {
+  padding: 14px 18px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.task-detail__title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.task-detail__title-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.task-detail__title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.task-detail__ticket {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--bg-pill);
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  flex: none;
+}
+
+.task-detail__branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-pill);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  max-width: 260px;
+}
+.task-detail__branch-value {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.task-detail__branch-icon {
+  color: var(--text-faint);
+}
+
+.task-detail__based {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.task-detail__based-value {
+  color: var(--text-muted);
+}
+
+.task-detail__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.task-detail__finish-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.task-detail__path {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.task-detail__finish-error {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--red);
+}
+
+/* ── State badge ────────────────────────────────────────────────────────── */
+.state-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 4px 9px;
+  border-radius: var(--radius-pill);
+}
+.state-badge--running,
+.state-badge--done {
+  background: var(--green-soft);
+  color: var(--green-strong);
+}
+.state-badge--working {
+  background: rgba(76, 141, 255, 0.16);
+  color: #7aa8ff;
+}
+.state-badge--attention {
+  background: rgba(227, 160, 8, 0.16);
+  color: #e3b340;
+}
+.state-badge--error {
+  background: var(--red-soft);
+  color: #ff8a98;
+}
+.state-badge--idle {
+  background: var(--bg-pill);
+  color: var(--text-muted);
+}
+
+/* ── Empty state ────────────────────────────────────────────────────────── */
+.task-detail__empty {
+  padding: 28px 18px;
+  color: var(--text-faint);
+  font-size: 13px;
+}
+
+/* ── Body split (terminal | review) ─────────────────────────────────────── */
+.task-detail__body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.task-detail__body--bottom {
+  flex-direction: column;
+}
+
+.task-detail__terminal-area {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+}
+
+.task-detail__diff-area {
+  width: 480px;
+  min-width: 320px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+}
+
+.task-detail__body--bottom .task-detail__diff-area {
+  width: auto;
+  min-width: 0;
+  height: 40%;
+  min-height: 160px;
+  border-left: none;
+  border-top: 1px solid var(--border);
+}
+
+/* ── Spec/Docs maximized: review area fills the body, terminal collapses to
+   zero. The terminal-area is NOT unmounted — it stays in the DOM at zero size,
+   preserving the KEEP-ALIVE invariant (the PTY lives in <TerminalHost/>). On
+   restore it regains flex:1 and the terminal's ResizeObserver re-fits the PTY. */
+.task-detail__body--spec-max .task-detail__terminal-area {
+  flex: 0 0 0;
+  width: 0;
+  min-width: 0;
+  height: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.task-detail__body--spec-max .task-detail__diff-area {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  height: auto;
+  min-height: 0;
+}
+
+/* ── Terminal pane header ───────────────────────────────────────────────── */
+.terminal-pane__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 34px;
+  padding: 0 12px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.terminal-pane__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.terminal-pane__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 6px rgba(63, 185, 80, 0.7);
+}
+
+.terminal-pane__model {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.terminal-pane__body {
+  flex: 1;
+  min-height: 0;
+  background: var(--bg-app);
+  position: relative;
+}
+
+/* ── Tab strip ──────────────────────────────────────────────────────────── */
+.terminal-pane__tabs { display: flex; align-items: stretch; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; }
+.terminal-tab { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; background: transparent; border: none; border-bottom: 2px solid transparent; color: var(--text-muted, #9aa); cursor: pointer; white-space: nowrap; }
+.terminal-tab--active { color: var(--text, #fff); border-bottom-color: var(--accent, #7c6cf0); }
+.terminal-tab__icon { font-weight: 600; opacity: .8; }
+.terminal-tab__dot { width: 6px; height: 6px; border-radius: 50%; background: transparent; }
+.terminal-tab__dot--live { background: #3ecf8e; }
+.terminal-tab__close { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; padding: 0; background: transparent; border: none; color: inherit; font-size: 13px; line-height: 1; opacity: .5; border-radius: 3px; cursor: pointer; }
+.terminal-tab__close:hover { opacity: 1; background: rgba(255,255,255,.12); }
+.terminal-tab--add { color: var(--text-muted, #9aa); font-size: 15px; }
+.terminal-pane__header-actions { flex-shrink: 0; display: flex; align-items: center; padding-right: 8px; }
+.terminal-pane__placeholder { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--text-muted, #9aa); z-index: 1; }
+.terminal-pane__placeholder-actions { display: flex; gap: 10px; }
+
+.task-detail__changes-rail { writing-mode: vertical-rl; transform: rotate(180deg); padding: 12px 6px; background: transparent; border: none; border-left: 1px solid var(--border, #333); color: var(--text-muted, #9aa); cursor: pointer; letter-spacing: .04em; }
+.task-detail__changes-rail:hover { color: var(--text, #fff); }
+
+.task-detail__setup {
+  margin: 6px 0;
+  border-radius: 6px;
+  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+}
+.task-detail__setup-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.task-detail__setup-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.task-detail__setup-dot--running {
+  background: #3b82f6;
+  animation: task-detail-setup-pulse 1s ease-in-out infinite;
+}
+.task-detail__setup-dot--failed { background: #ef4444; }
+@keyframes task-detail-setup-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.task-detail__setup-label { flex: 1; min-width: 0; }
+.task-detail__setup-toggle,
+.task-detail__setup-close {
+  flex: none;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: inherit;
+  opacity: 0.7;
+  font-size: 11px;
+  padding: 2px 4px;
+  line-height: 1;
+}
+.task-detail__setup-toggle:hover,
+.task-detail__setup-close:hover { opacity: 1; }
+.task-detail__setup-log {
+  margin: 0;
+  padding: 0 8px 6px;
+  max-height: 160px;
+  overflow: auto;
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+/* Subtle drop-target feedback while dragging a file over the terminal pane.
+   Inset outline so it never shifts the terminal layout (keep-alive safe). */
+/* Drop-target feedback: an overlay border drawn ABOVE the terminal. An inset
+   outline/box-shadow on the body itself gets painted over by the opaque xterm
+   child that fills the pane (only the empty strip below it would show). The
+   absolutely-positioned ::after sits above all children; pointer-events:none so
+   it never intercepts the drop or terminal input. (.terminal-pane__body is
+   already position:relative.) */
+.terminal-pane__body--drop-active::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 2px solid #4a9eff;
+  pointer-events: none;
+  z-index: 10;
+}

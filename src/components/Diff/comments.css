@@ -1,0 +1,150 @@
+.comment-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #5a4fd0, #8b7bf5);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.comment-composer,
+.inline-comment {
+  display: flex;
+  gap: 10px;
+  margin: 8px 12px;
+  padding: 10px;
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  font-family: var(--font-ui);
+}
+.comment-composer {
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.comment-composer__main,
+.inline-comment__main {
+  flex: 1;
+  min-width: 0;
+}
+
+.comment-composer__input {
+  width: 100%;
+  min-height: 52px;
+  resize: vertical;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+}
+.comment-composer__input:focus {
+  outline: none;
+  border-color: var(--accent-border);
+}
+
+.comment-composer__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+}
+.comment-composer__hint {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+}
+.comment-composer__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.inline-comment__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.inline-comment__author {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+}
+.inline-comment__loc {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.inline-comment__actions {
+  margin-left: auto;
+  display: flex;
+  gap: 10px;
+}
+.inline-comment__action {
+  font: inherit;
+  font-size: 12px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0;
+}
+.inline-comment__action:hover {
+  color: var(--text);
+}
+.inline-comment__body {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+/* ── Review footer ──────────────────────────────────────────────────────── */
+.review-footer {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.review-footer__bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 12px;
+}
+.review-footer__count {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.review-footer__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+}
+.review-footer__spacer {
+  flex: 1;
+}
+.review-footer__error {
+  margin: 0;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--red);
+}

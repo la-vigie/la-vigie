@@ -1,0 +1,150 @@
+/* ── AgentModelPicker — Option B combined Agent·Model control ─────────────── */
+
+.amp {
+  position: relative;
+  display: inline-block;
+}
+
+/* Trigger button */
+.amp__trigger {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.amp__trigger:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.amp__model {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.amp__caret {
+  color: var(--text-muted);
+  font-size: 10px;
+  margin-left: 2px;
+}
+
+/* Popover */
+.amp__popover {
+  /* Portaled to <body> and positioned in viewport space (see AgentModelPicker.tsx)
+     so it is never clipped by an ancestor's overflow (e.g. the new-task modal). */
+  position: fixed;
+  z-index: 1000;
+  display: flex;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-pop);
+  min-width: 180px;
+  overflow: hidden;
+}
+
+/* Agents pane (left) */
+.amp__agents {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  min-width: 160px;
+  flex-shrink: 0;
+  max-height: min(60vh, 360px);
+  overflow-y: auto;
+}
+
+.amp__agent-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 12px;
+  transition: background 0.1s ease;
+}
+
+.amp__agent-row:hover,
+.amp__agent-row.is-hovered {
+  background: var(--bg-hover);
+}
+
+.amp__agent-row.is-hovered {
+  background: var(--bg-selected);
+  color: var(--accent);
+}
+
+.amp__chevron {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.amp__check {
+  color: var(--accent);
+  font-size: 11px;
+  margin-left: auto;
+}
+
+/* Models pane (right) */
+.amp__models {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  min-width: 200px;
+  border-left: 1px solid var(--border-strong);
+  flex-shrink: 0;
+  max-height: min(60vh, 360px);
+  overflow-y: auto;
+}
+
+.amp__models-head {
+  padding: 5px 12px 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.amp__model-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  transition: background 0.1s ease;
+}
+
+.amp__model-row:hover {
+  background: var(--bg-hover);
+}
+
+.amp__model-row.is-selected {
+  background: var(--bg-selected);
+  color: var(--accent);
+}
+
+.amp__model-empty {
+  padding: 6px 12px;
+  color: var(--text-faint);
+  font-size: 11px;
+  cursor: default;
+}

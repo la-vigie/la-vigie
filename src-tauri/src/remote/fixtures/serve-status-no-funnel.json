@@ -1,0 +1,1 @@
+{ "TCP": { "443": { "HTTPS": true } }, "Web": { "mac-studio.tail-scale.ts.net:443": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:51234" } } } }, "AllowFunnel": {} }

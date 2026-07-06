@@ -1,0 +1,35 @@
+/* App shell: title bar on top, then the sidebar + detail row fills the rest. */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--bg-app);
+  color: var(--text);
+}
+
+.app-layout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ── Resizable pane dividers ─────────────────────────────────────────────── */
+.resize-handle {
+  flex: 0 0 auto;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+
+.resize-handle--x {
+  width: 6px;
+  cursor: col-resize;
+}
+
+.resize-handle--y {
+  height: 6px;
+  cursor: row-resize;
+}
+
+.resize-handle:hover {
+  background: var(--accent-border);
+}

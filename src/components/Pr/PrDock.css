@@ -1,0 +1,142 @@
+/* ── Collapsed: one-line status bar ─────────────────────────────────────── */
+.pr-dock__bar {
+  font: inherit;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 34px;
+  padding: 0 12px;
+  flex-shrink: 0;
+  background: var(--bg-elevated);
+  border: none;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s ease;
+}
+.pr-dock__bar:hover {
+  background: var(--bg-hover);
+}
+
+.pr-dock__bar-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.pr-dock__num {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.pr-dock__sep {
+  color: var(--text-faint);
+}
+
+.pr-dock__mergeable {
+  font-size: 12px;
+}
+
+.pr-dock__muted {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.pr-dock__spacer {
+  flex: 1;
+}
+
+.pr-dock__chevron {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* ── PR state pill ──────────────────────────────────────────────────────── */
+.pr-dock__state {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: var(--radius-pill);
+  color: #fff;
+}
+.pr-dock__state--open {
+  background: var(--pr-open);
+}
+.pr-dock__state--merged {
+  background: var(--pr-merged);
+}
+.pr-dock__state--closed {
+  background: var(--pr-closed);
+}
+
+/* ── Checks glance ──────────────────────────────────────────────────────── */
+.pr-dock__checks {
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.pr-dock__checks--ok {
+  color: var(--green-strong);
+}
+.pr-dock__checks--fail {
+  color: #ff8a98;
+}
+.pr-dock__checks--pending {
+  color: #e3b340;
+}
+
+/* ── Expanded dock ──────────────────────────────────────────────────────── */
+.pr-dock {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.pr-dock__grip {
+  height: 9px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: row-resize;
+}
+.pr-dock__grip-handle {
+  width: 34px;
+  height: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--border-strong);
+  transition: background 0.12s ease;
+}
+.pr-dock__grip:hover .pr-dock__grip-handle {
+  background: var(--accent);
+}
+
+.pr-dock__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 8px 0 12px;
+  flex-shrink: 0;
+}
+
+.pr-dock__branches {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.pr-dock__body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border-top: 1px solid var(--border);
+}

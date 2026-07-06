@@ -1,0 +1,139 @@
+.titlebar {
+  height: var(--titlebar-h);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-left: var(--traffic-light-pad);
+  padding-right: 12px;
+  background: var(--bg-titlebar);
+  border-bottom: 1px solid var(--border);
+}
+
+/*
+ * Drag behaviour is driven entirely by the `data-tauri-drag-region` attribute
+ * (set on the non-interactive elements in TitleBar.tsx). Tauri/wry does not
+ * honor `-webkit-app-region`, so there's no CSS opt-out needed here:
+ * interactive controls drag-opt-out simply by not carrying the attribute.
+ */
+
+.titlebar__brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.titlebar__logo {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  object-fit: contain;
+  box-shadow: 0 1px 3px rgba(79, 63, 214, 0.5);
+}
+
+.titlebar__wordmark {
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.01em;
+  color: var(--text);
+}
+
+.titlebar__right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.titlebar__crumbs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  max-width: 320px;
+  overflow: hidden;
+}
+
+.titlebar__crumb {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.titlebar__crumb--current {
+  color: var(--text);
+}
+.titlebar__crumb-sep {
+  color: var(--text-faint);
+}
+
+/* Segmented control (also reused elsewhere). */
+.segmented {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.segmented__option {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 3px 12px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.segmented__option:hover {
+  color: var(--text);
+}
+.segmented__option--active {
+  background: var(--bg-app);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+.titlebar__theme {
+  font: inherit;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.titlebar__theme:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.titlebar__icon-btn {
+  font: inherit;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 8px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.titlebar__icon-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.titlebar__remote-dot { font-size: 14px; line-height: 1; margin-right: 4px; filter: saturate(1.2); }

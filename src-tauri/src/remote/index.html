@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>La Vigie — Remote</title>
+  <style>
+    :root { --bg:#15171c; --panel:#1d2027; --border:#2c303a; --fg:#e8e8ea; --muted:#a9adb6; --accent:#3b82f6; }
+    * { box-sizing: border-box; }
+    body { font: 16px -apple-system, system-ui, sans-serif; margin: 0; background: var(--bg); color: var(--fg); }
+    main { max-width: 560px; margin: 0 auto; padding: 16px 20px 40px; }
+    h1 { font-size: 18px; margin: 8px 0 4px; }
+    h2 { font-size: 16px; margin: 0; }
+    a { color: inherit; text-decoration: none; }
+    label { display: block; margin: 14px 0 4px; color: var(--muted); font-size: 14px; }
+    input, textarea, button { width: 100%; box-sizing: border-box; padding: 12px; font-size: 16px;
+      border-radius: 10px; border: 1px solid var(--border); background: var(--panel); color: var(--fg); }
+    button, .btn { margin-top: 18px; background: var(--accent); border: none; color: #fff; font-weight: 600;
+      display: block; text-align: center; }
+    button:disabled { opacity: .5; }
+    .err { color: #f87171; margin-top: 12px; font-size: 14px; }
+    .muted { color: var(--muted); }
+    .linkbtn { cursor: pointer; }
+    .back { display: inline-block; color: var(--muted); font-size: 14px; margin-bottom: 8px; cursor: pointer; }
+    .row { display: block; padding: 14px; margin: 8px 0; border: 1px solid var(--border); border-radius: 12px;
+      background: var(--panel); }
+    .row.done { opacity: .55; }
+    .row .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 4px 0 8px; }
+    .head .btn { margin: 0; width: auto; padding: 8px 14px; border-radius: 10px; font-size: 14px; }
+    .chip { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px;
+      border: 1px solid var(--border); color: var(--muted); margin-left: 6px; }
+    .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; background: var(--muted); }
+    .dot.working { background: #f59e0b; } .dot.idle { background: #6b7280; }
+    .dot.needs_attention { background: #ef4444; } .dot.done { background: #22c55e; } .dot.error { background: #ef4444; }
+    .badge { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px;
+      background: #14304d; color: #7db4ff; margin-left: 6px; }
+    .seam { margin-top: 20px; padding: 24px; text-align: center; color: var(--muted);
+      border: 1px dashed var(--border); border-radius: 12px; }
+    /* status pill (live working/idle + elapsed) */
+    .pill { display: inline-flex; align-items: center; gap: 7px; font-size: 13px;
+      padding: 5px 11px 5px 10px; border-radius: 999px; border: 1px solid var(--border);
+      background: var(--panel); color: var(--fg); }
+    .pill .dot { margin: 0; }
+    .pill[data-status="working"] { border-color: #4a3a1a; background: #221a0d; color: #f5c878; }
+    .pill[data-status="working"] .dot { box-shadow: 0 0 0 0 rgba(245,158,11,.6); animation: pulse 1.8s infinite; }
+    .pill[data-status="needs_attention"], .pill[data-status="error"] {
+      border-color: #4d2222; background: #2a1414; color: #f4a3a3; }
+    .pill[data-status="done"] { border-color: #1f4029; background: #112318; color: #7fdca0; }
+    .pelapsed { font-variant-numeric: tabular-nums; opacity: .85; }
+    @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(245,158,11,.5); }
+      70% { box-shadow: 0 0 0 6px rgba(245,158,11,0); } 100% { box-shadow: 0 0 0 0 rgba(245,158,11,0); } }
+    .meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 10px 0 2px; }
+    .meta .branch { color: var(--muted); font-size: 13px; }
+
+    /* chat transcript as bubbles */
+    .chatwrap { position: relative; margin-top: 14px; }
+    .chatlog { display: flex; flex-direction: column; gap: 10px; max-height: 56vh;
+      overflow-y: auto; padding: 2px; scroll-behavior: smooth; -webkit-overflow-scrolling: touch; }
+    .chatlog > .muted { align-self: center; margin: 24px 0; }
+    .bubble { max-width: 85%; padding: 10px 13px; border-radius: 16px; font-size: 15px;
+      line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .bubble.assistant { align-self: flex-start; background: var(--panel);
+      border: 1px solid var(--border); border-bottom-left-radius: 5px; }
+    .bubble.user { align-self: flex-end; background: #1c3454; border: 1px solid #2b4f7d;
+      color: #eaf2ff; border-bottom-right-radius: 5px; }
+    .bubble code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+      background: rgba(255,255,255,.08); padding: 1px 5px; border-radius: 5px; }
+    .bubble pre.code { background: #0f1115; border: 1px solid var(--border); border-radius: 8px;
+      padding: 10px; margin: 6px 0; overflow-x: auto; white-space: pre; }
+    .bubble pre.code code { background: none; padding: 0; }
+    .tool { align-self: flex-start; display: inline-flex; align-items: center; gap: 6px;
+      max-width: 85%; font-size: 12.5px; color: var(--muted); background: #181b21;
+      border: 1px solid var(--border); padding: 4px 11px; border-radius: 999px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+
+    .jump { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+      width: auto; margin: 0; padding: 6px 14px; font-size: 13px; font-weight: 600;
+      border-radius: 999px; box-shadow: 0 3px 10px rgba(0,0,0,.45);
+      opacity: 0; pointer-events: none; transition: opacity .15s; }
+    .jump.show { opacity: 1; pointer-events: auto; }
+
+    .replybar { display: flex; gap: 8px; align-items: flex-end; margin-top: 12px;
+      position: sticky; bottom: 0; background: var(--bg); padding: 10px 0 8px;
+      border-top: 1px solid var(--border); }
+    .replybar textarea { margin: 0; resize: none; max-height: 120px; line-height: 1.4; }
+    .replybar button { margin: 0; width: auto; padding: 12px 18px; white-space: nowrap; }
+    .replybar button:disabled { opacity: .6; }
+    .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+      background: #222732; border: 1px solid var(--border); color: var(--fg); padding: 10px 16px;
+      border-radius: 10px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+    .toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <main id="app"></main>
+  <div id="toast" class="toast"></div>
+  <script>
+    // ---- token (sessionStorage: survives reload, cleared on tab/browser close) ----
+    const TOKEN_KEY = "lavigie_remote_token";
+    const getToken = () => sessionStorage.getItem(TOKEN_KEY) || "";
+    const setToken = (t) => sessionStorage.setItem(TOKEN_KEY, t);
+    const clearToken = () => sessionStorage.removeItem(TOKEN_KEY);
+
+    const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
+      (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    const app = () => document.getElementById("app");
+
+    let toastTimer = null;
+    function toast(msg) {
+      const t = document.getElementById("toast");
+      t.textContent = msg; t.classList.add("show");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => t.classList.remove("show"), 2500);
+    }
+
+    // ---- authed fetch: Bearer + no-store; 401/403 → drop token, re-pair ----
+    async function apiFetch(path, opts = {}) {
+      const res = await fetch(path, {
+        ...opts,
+        cache: "no-store",
+        headers: { ...(opts.headers || {}), Authorization: "Bearer " + getToken() },
+      });
+      if (res.status === 401 || res.status === 403) {
+        clearToken();
+        toast("Invalid or expired token");
+        if (location.hash) location.hash = ""; else render();
+        throw new Error("unauthorized");
+      }
+      return res;
+    }
+
+    // ---- snapshot + polling (list views only; paused when tab hidden) ----
+    let snapshot = { repos: [], tasks: [] };
+    let pollTimer = null;
+
+    async function fetchState() {
+      if (!getToken()) return;
+      try {
+        const res = await apiFetch("/api/state");
+        if (!res.ok) return;
+        snapshot = await res.json();
+        // The task view owns its own (chat) polling; a full re-render here would
+        // wipe the chat log, reset the cursor, and clear the reply box — so only
+        // patch its live status pill in place. Forms (new) must not be clobbered.
+        const rn = parseRoute(location.hash).name;
+        if (rn === "task") refreshTaskMeta();
+        else if (rn !== "new") render();
+      } catch (e) { /* auth handled in apiFetch; ignore */ }
+    }
+    function startPolling() {
+      if (pollTimer) return;
+      pollTimer = setInterval(() => { if (!document.hidden) fetchState(); }, 4000);
+    }
+    function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+    // ---- agent-session chat (AC2-108): poll the transcript, post replies ----
+    let chatTimer = null, chatCursor = 0, chatTaskId = null;
+    function stopChat() {
+      if (chatTimer) { clearInterval(chatTimer); chatTimer = null; }
+      stopPill();
+      chatTaskId = null;
+    }
+    // Minimal, XSS-safe markdown: escape first, then format the escaped text so the
+    // markers (`backticks`, **bold**) survive but no raw HTML can. Fenced ``` blocks
+    // become <pre>; an unterminated fence (streaming) renders as a trailing block.
+    function mdInline(s) {
+      return s.replace(/`([^`]+)`/g, "<code>$1</code>")
+              .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    }
+    function formatBody(text) {
+      return esc(text).split("```").map((part, i) =>
+        i % 2 === 1
+          ? '<pre class="code"><code>' + part.replace(/^\n/, "") + "</code></pre>"
+          : mdInline(part)
+      ).join("");
+    }
+    function renderMsg(m) {
+      if (m.role === "tool") return '<div class="tool">⏵ ' + esc(m.tool || "tool") + "</div>";
+      const role = m.role === "user" ? "user" : "assistant";
+      return '<div class="bubble ' + role + '">' + formatBody(m.text || "") + "</div>";
+    }
+
+    // ---- live status pill (working/idle + elapsed, driven off task.updatedAt) ----
+    let pillTimer = null;
+    const cap = (s) => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+    function fmtElapsed(s) {
+      const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+      const mm = h ? String(m).padStart(2, "0") : String(m);
+      return (h ? h + ":" : "") + mm + ":" + String(ss).padStart(2, "0");
+    }
+    function statusPill(t) {
+      const s = statusInfo(t);
+      const label = t.status === "working" ? "Working" : cap(s.label);
+      return '<span class="pill" id="statuspill" data-status="' + esc(t.status) +
+        '" data-since="' + esc(t.updatedAt || 0) + '">' +
+        '<span class="dot ' + esc(s.cls) + '"></span>' +
+        '<span class="plabel">' + esc(label) + "</span>" +
+        '<span class="pelapsed" id="pelapsed"></span></span>';
+    }
+    function tickPill() {
+      const el = document.getElementById("statuspill");
+      const out = document.getElementById("pelapsed");
+      if (!el || !out) return;
+      const since = Number(el.dataset.since) || 0;
+      if (el.dataset.status === "working" && since) {
+        out.textContent = " · " + fmtElapsed(Math.max(0, Math.floor(Date.now() / 1000) - since));
+      } else { out.textContent = ""; }
+    }
+    function startPill() { stopPill(); tickPill(); pillTimer = setInterval(tickPill, 1000); }
+    function stopPill() { if (pillTimer) { clearInterval(pillTimer); pillTimer = null; } }
+    // Refresh just the pill + branch from a fresh snapshot without re-rendering the
+    // task view (a full render would wipe the chat log, cursor, and reply box).
+    function refreshTaskMeta() {
+      const el = document.getElementById("statuspill");
+      if (!el || !chatTaskId) return;
+      const t = (snapshot.tasks || []).find((x) => x.id === chatTaskId);
+      if (!t) return;
+      const s = statusInfo(t);
+      el.dataset.status = t.status;
+      el.dataset.since = String(t.updatedAt || 0);
+      el.querySelector(".dot").className = "dot " + s.cls;
+      el.querySelector(".plabel").textContent = t.status === "working" ? "Working" : cap(s.label);
+      tickPill();
+    }
+    function updateJump() {
+      const log = document.getElementById("chatlog"), j = document.getElementById("jump");
+      if (!log || !j) return;
+      j.classList.toggle("show", log.scrollHeight - log.scrollTop - log.clientHeight > 80);
+    }
+    async function pollChat(taskId) {
+      try {
+        const res = await apiFetch("/api/tasks/" + encodeURIComponent(taskId) + "/session?since=" + chatCursor);
+        if (!res.ok) return;
+        const data = await res.json();
+        const log = document.getElementById("chatlog");
+        if (!log || chatTaskId !== taskId) return; // navigated away mid-flight
+        const msgs = data.messages || [];
+        if (msgs.length) {
+          if (log.dataset.state !== "msgs") { log.innerHTML = ""; log.dataset.state = "msgs"; }
+          const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+          log.insertAdjacentHTML("beforeend", msgs.map(renderMsg).join(""));
+          if (atBottom) log.scrollTop = log.scrollHeight;
+          updateJump();
+        } else if (chatCursor === 0 && log.dataset.state !== "empty") {
+          log.innerHTML = '<p class="muted">No conversation yet.</p>';
+          log.dataset.state = "empty";
+        }
+        if (typeof data.cursor === "number") chatCursor = data.cursor;
+      } catch (e) { /* auth handled in apiFetch; ignore transient errors */ }
+    }
+    function startChat(taskId) {
+      stopChat();
+      chatTaskId = taskId; chatCursor = 0;
+      startPill();
+      pollChat(taskId);
+      chatTimer = setInterval(() => { if (!document.hidden) pollChat(taskId); }, 2000);
+    }
+    async function sendReply(taskId) {
+      const ta = document.getElementById("reply");
+      const text = ta.value;
+      if (!text.trim()) return;
+      const btn = document.getElementById("send");
+      const label = btn.textContent;
+      btn.disabled = true; ta.disabled = true; btn.textContent = "Sending…";
+      try {
+        const res = await apiFetch("/api/tasks/" + encodeURIComponent(taskId) + "/reply",
+          { method: "POST", body: text });
+        if (res.status === 409) toast("No running agent for this task");
+        else if (!res.ok) toast("Reply failed (" + res.status + ")");
+        else { ta.value = ""; autogrow(ta); pollChat(taskId); }
+      } catch (e) { /* auth handled in apiFetch */ }
+      finally { btn.disabled = false; ta.disabled = false; btn.textContent = label; ta.focus(); }
+    }
+    function autogrow(ta) {
+      ta.style.height = "auto";
+      ta.style.height = Math.min(ta.scrollHeight, 120) + "px";
+    }
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) return;
+      const r = parseRoute(location.hash);
+      if (r.name === "task") { if (chatTaskId) pollChat(chatTaskId); fetchState(); } // catch up chat + pill
+      else if (r.name !== "new") fetchState();
+    });
+
+    // ---- routing ----
+    function parseRoute(hash) {
+      const h = (hash || "").replace(/^#/, "") || "/";
+      let m;
+      if ((m = /^\/repo\/([^/]+)\/new$/.exec(h))) return { name: "new", repoId: decodeURIComponent(m[1]) };
+      if ((m = /^\/repo\/([^/]+)$/.exec(h))) return { name: "tasks", repoId: decodeURIComponent(m[1]) };
+      if ((m = /^\/task\/([^/]+)$/.exec(h))) return { name: "task", taskId: decodeURIComponent(m[1]) };
+      return { name: "repos" };
+    }
+
+    function render() {
+      if (!getToken()) { stopPolling(); stopChat(); return renderPair(); }
+      const r = parseRoute(location.hash);
+      stopChat();
+      if (r.name === "tasks") renderTasks(r.repoId);
+      else if (r.name === "new") renderNew(r.repoId);
+      else if (r.name === "task") renderTask(r.taskId);
+      else renderRepos();
+      // Poll state on the task screen too, so the status pill stays live (the chat
+      // owns its own faster poll; fetchState only patches the pill there).
+      if (r.name === "repos" || r.name === "tasks" || r.name === "task") startPolling();
+      else stopPolling();
+    }
+
+    // Forms don't want a background refresh that would clobber typed input.
+    function onRoute() {
+      render();
+      if (parseRoute(location.hash).name !== "new") fetchState();
+    }
+    window.addEventListener("hashchange", onRoute);
+
+    // ---- pair screen (manual token entry; QR is the boot fast-path) ----
+    function renderPair() {
+      app().innerHTML =
+        '<h1>La Vigie — Remote</h1>' +
+        '<label for="token">Pairing token</label>' +
+        '<input id="token" type="password" autocomplete="off" placeholder="paste token from the Mac" />' +
+        '<button id="connect">Connect</button>' +
+        '<div id="perr" class="err"></div>';
+      document.getElementById("connect").addEventListener("click", () => {
+        const v = document.getElementById("token").value.trim();
+        if (!v) { document.getElementById("perr").textContent = "Enter the token shown on the Mac."; return; }
+        setToken(v);
+        location.hash = "";
+        render(); fetchState();
+      });
+    }
+
+    function rollup(tasks) {
+      return {
+        total: tasks.length,
+        working: tasks.filter((t) => t.status === "working").length,
+        review: tasks.filter((t) => t.prNumber).length, // "in review" = has a PR
+      };
+    }
+    function rollupText(r) {
+      const parts = [r.total + (r.total === 1 ? " task" : " tasks")];
+      if (r.working) parts.push(r.working + " working");
+      if (r.review) parts.push(r.review + " in review");
+      return parts.join(" · ");
+    }
+
+    function statusInfo(t) {
+      const labels = { idle: "idle", working: "working", needs_attention: "needs attention",
+        done: "done", error: "error" };
+      return { cls: t.status, label: labels[t.status] || t.status };
+    }
+
+    // ---- view stubs (replaced in Tasks 2–5) ----
+    function renderRepos() {
+      const repos = snapshot.repos || [];
+      const tasksFor = (id) => (snapshot.tasks || []).filter((t) => t.repoId === id);
+      const rows = repos.map((repo) =>
+        '<a class="row" href="#/repo/' + encodeURIComponent(repo.id) + '">' +
+          '<h2>' + esc(repo.name) + '</h2>' +
+          '<div class="sub">' + esc(rollupText(rollup(tasksFor(repo.id)))) + '</div>' +
+        '</a>'
+      ).join("");
+      app().innerHTML =
+        '<div class="head"><h1>Repositories</h1>' +
+        '<span class="back linkbtn" id="disconnect">Disconnect</span></div>' +
+        (rows || '<p class="muted">No repositories.</p>');
+      document.getElementById("disconnect").addEventListener("click", () => {
+        clearToken(); stopPolling(); location.hash = ""; render();
+      });
+    }
+    function renderTasks(repoId) {
+      const repo = (snapshot.repos || []).find((r) => r.id === repoId);
+      const tasks = (snapshot.tasks || []).filter((t) => t.repoId === repoId);
+      const rows = tasks.map((t) => {
+        const s = statusInfo(t);
+        const chip = t.ticketKey ? '<span class="chip">' + esc(t.ticketKey) + '</span>' : "";
+        const badge = t.prNumber ? '<span class="badge">PR #' + esc(t.prNumber) + '</span>' : "";
+        return '<a class="row ' + (t.status === "done" ? "done" : "") + '" href="#/task/' +
+            encodeURIComponent(t.id) + '">' +
+          '<div><span class="dot ' + esc(s.cls) + '"></span>' + esc(t.title) + chip + badge + '</div>' +
+          '<div class="sub">' + esc(s.label) + '</div>' +
+        '</a>';
+      }).join("");
+      app().innerHTML =
+        '<a class="back" href="#/">‹ Repositories</a>' +
+        '<div class="head"><h1>' + esc(repo ? repo.name : "Tasks") + '</h1>' +
+        '<a class="btn" href="#/repo/' + encodeURIComponent(repoId) + '/new">+ New</a></div>' +
+        (rows || '<p class="muted">No tasks yet — tap + New.</p>');
+    }
+    function renderNew(repoId) {
+      const repo = (snapshot.repos || []).find((r) => r.id === repoId);
+      app().innerHTML =
+        '<a class="back" href="#/repo/' + encodeURIComponent(repoId) + '">‹ Back</a>' +
+        '<h1>New task' + (repo ? ' — ' + esc(repo.name) : "") + '</h1>' +
+        '<label for="title">Task title</label>' +
+        '<input id="title" type="text" placeholder="what should the agent do?" />' +
+        '<label for="ticket">Ticket key (optional)</label>' +
+        '<input id="ticket" type="text" placeholder="AC2-123" />' +
+        '<label for="prompt">Initial prompt (optional)</label>' +
+        '<textarea id="prompt" rows="3"></textarea>' +
+        '<button id="create">Create task</button>' +
+        '<div id="nerr" class="err"></div>';
+      const errEl = document.getElementById("nerr");
+      const btn = document.getElementById("create");
+      btn.addEventListener("click", async () => {
+        const title = document.getElementById("title").value.trim();
+        const ticketKey = document.getElementById("ticket").value.trim() || null;
+        const prompt = document.getElementById("prompt").value.trim() || null;
+        if (!title && !ticketKey) { errEl.textContent = "Enter a title or a ticket key."; return; }
+        btn.disabled = true; errEl.textContent = "";
+        try {
+          const res = await apiFetch("/api/tasks", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ repoId, title, ticketKey, prompt }),
+          });
+          if (!res.ok) {
+            errEl.textContent = "Create failed (" + res.status + "): " + (await res.text());
+            btn.disabled = false; return;
+          }
+          toast("Task created");
+          location.hash = "#/repo/" + encodeURIComponent(repoId);
+          fetchState();
+        } catch (e) { errEl.textContent = String(e); btn.disabled = false; }
+      });
+    }
+    function renderTask(taskId) {
+      const t = (snapshot.tasks || []).find((x) => x.id === taskId);
+      if (!t) {
+        app().innerHTML = '<a class="back" href="#/">‹ Repositories</a>' +
+          '<p class="muted">Task not found.</p>';
+        return;
+      }
+      const chip = t.ticketKey ? '<span class="chip">' + esc(t.ticketKey) + '</span>' : "";
+      const prHttps = t.prUrl && /^https:\/\//.test(t.prUrl);
+      const pr = t.prNumber
+        ? (prHttps
+            ? '<a class="badge" href="' + esc(t.prUrl) + '" target="_blank" rel="noopener">PR #' + esc(t.prNumber) + '</a>'
+            : '<span class="badge">PR #' + esc(t.prNumber) + '</span>')
+        : "";
+      app().innerHTML =
+        '<a class="back" href="#/repo/' + encodeURIComponent(t.repoId) + '">‹ Back</a>' +
+        '<h1>' + esc(t.title) + chip + '</h1>' +
+        '<div class="meta">' + statusPill(t) + pr +
+          '<span class="branch">⎇ ' + esc(t.branch) + '</span></div>' +
+        '<div class="chatwrap">' +
+          '<div id="chatlog" class="chatlog"><p class="muted">Loading conversation…</p></div>' +
+          '<button id="jump" class="btn jump">↓ Latest</button>' +
+        '</div>' +
+        '<div class="replybar">' +
+          '<textarea id="reply" rows="1" placeholder="Reply to Claude…"></textarea>' +
+          '<button id="send">Send</button>' +
+        '</div>';
+      const ta = document.getElementById("reply");
+      document.getElementById("send").addEventListener("click", () => sendReply(taskId));
+      ta.addEventListener("input", () => autogrow(ta));
+      ta.addEventListener("keydown", (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); sendReply(taskId); }
+      });
+      const log = document.getElementById("chatlog");
+      log.addEventListener("scroll", updateJump);
+      document.getElementById("jump").addEventListener("click", () => {
+        log.scrollTop = log.scrollHeight; updateJump();
+      });
+      startChat(taskId);
+    }
+
+    // ---- boot: QR auto-pair (AC2-106) → sessionStorage → repos ----
+    (function boot() {
+      const m = /[#&]token=([^&]+)/.exec(location.hash || "");
+      if (m) {
+        setToken(decodeURIComponent(m[1]));
+        history.replaceState(null, "", location.pathname + location.search); // strip token from URL
+      }
+      render();
+      if (getToken()) fetchState();
+    })();
+  </script>
+</body>
+</html>

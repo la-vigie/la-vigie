@@ -1,0 +1,66 @@
+.run-pill {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px;
+  border: none;
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  background: var(--bg-pill);
+  color: var(--text-muted);
+}
+
+.run-pill__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.run-pill__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.run-pill__stop {
+  display: none;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Per-state accents (mirror the .state-badge palette). */
+.run-pill--working { background: rgba(76, 141, 255, 0.16); color: #7aa8ff; }
+.run-pill--idle { background: var(--green-soft); color: var(--green-strong); }
+.run-pill--attention { background: rgba(227, 160, 8, 0.16); color: #e3b340; }
+.run-pill--error { background: var(--red-soft); color: #ff8a98; }
+.run-pill--starting { background: var(--bg-pill); color: var(--text-muted); }
+/* Lifecycle agents: neutral "Running" — no hook activity, honest & calm. */
+.run-pill--running { background: var(--bg-pill); color: var(--text-muted); }
+
+/* The working dot gently pulses. */
+.run-pill--working .run-pill__dot {
+  animation: run-pill-pulse 1.2s ease-in-out infinite;
+}
+@keyframes run-pill-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* Hover/focus → the whole pill becomes Stop. */
+.run-pill:hover,
+.run-pill:focus-visible {
+  background: var(--red-soft);
+  color: #ff8a98;
+  outline: none;
+}
+.run-pill:hover .run-pill__status,
+.run-pill:focus-visible .run-pill__status { display: none; }
+.run-pill:hover .run-pill__stop,
+.run-pill:focus-visible .run-pill__stop { display: inline-flex; }

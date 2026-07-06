@@ -1,0 +1,62 @@
+.status-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0;
+  height: 30px;
+  padding: 0 12px;
+  flex-shrink: 0;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.status-banner__segment {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-banner__dot {
+  color: var(--text-faint);
+}
+
+.status-banner__mono {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+/* Context budget meter */
+.status-banner__ctx {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.status-banner__meter {
+  display: inline-block;
+  width: 64px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-pill);
+  overflow: hidden;
+}
+
+.status-banner__meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(90deg, var(--accent), #8b7bf5);
+}
+
+.status-banner__ctx-label {
+  font-family: var(--font-mono);
+}
+
+.status-banner__auto {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #d6b94a;
+}

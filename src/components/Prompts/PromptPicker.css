@@ -1,0 +1,42 @@
+.prompt-picker { position: relative; display: inline-block; }
+.prompt-picker__button {
+  font-size: 12px;
+  padding: 2px 8px;
+  background: var(--bg-elevated, #16181f);
+  color: var(--text, #e6e8ec);
+  border: 1px solid var(--border-strong, #2a2e37);
+  border-radius: var(--radius-sm, 5px);
+  cursor: pointer;
+}
+.prompt-picker__menu {
+  position: absolute;
+  z-index: 30;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  min-width: 200px;
+  max-width: min(280px, 80vw);
+  background: var(--bg-panel, #0e0f14);
+  border: 1px solid var(--border-strong, #2a2e37);
+  border-radius: var(--radius, 7px);
+  box-shadow: var(--shadow-pop, 0 8px 24px rgba(0, 0, 0, 0.45));
+  padding: 4px;
+}
+.prompt-picker__item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  background: transparent;
+  color: var(--text, #e6e8ec);
+  border: none;
+  border-radius: var(--radius-sm, 5px);
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.prompt-picker__item:hover { background: var(--bg-hover, #181a22); }
+.prompt-picker__item--manage { color: var(--text-muted, #8b9099); }
+.prompt-picker__divider { height: 1px; background: var(--border, #1f2229); margin: 4px 0; }

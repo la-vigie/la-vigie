@@ -1,0 +1,246 @@
+/* ─────────────────────────────────────────────────────────────────────────
+   La Vigie — design tokens
+   Dark is the real default theme. Tokens live on [data-theme="dark"] so a
+   light theme can be added later by defining [data-theme="light"] and the
+   header toggle flipping the attribute. Do not hard-code colors in components;
+   reference these variables.
+   ──────────────────────────────────────────────────────────────────────── */
+
+:root,
+[data-theme="dark"] {
+  /* Surfaces — cool near-blacks, layered from deepest (app) to elevated. */
+  --bg-app: #0c0d11;
+  --bg-sidebar: #0a0b0e;
+  --bg-panel: #0e0f14;
+  --bg-titlebar: #131419;
+  --bg-elevated: #16181f;
+  --bg-input: #14161c;
+  --bg-hover: #181a22;
+  --bg-selected: #1b1e27;
+  --bg-pill: #1a1d25;
+
+  /* Borders / hairlines */
+  --border: #1f2229;
+  --border-strong: #2a2e37;
+  --border-faint: #16181e;
+
+  /* Text */
+  --text: #e6e8ec;
+  --text-muted: #8b9099;
+  --text-faint: #5f646d;
+  --text-on-accent: #ffffff;
+
+  /* Accent — single indigo, used sparingly for primary actions/selection. */
+  --accent: #6e5cf0;
+  --accent-hover: #7d6df5;
+  --accent-soft: rgba(110, 92, 240, 0.16);
+  --accent-border: rgba(110, 92, 240, 0.45);
+
+  /* Status palette (shared by StatusDot, badges, diff) */
+  --status-idle: #9099a3;
+  --status-working: #4c8dff;
+  --status-attention: #e3a008;
+  --status-done: #3fb950;
+  --status-error: #f0556a;
+
+  --green: #3fb950;
+  --green-soft: rgba(63, 185, 80, 0.15);
+  --green-strong: #56d364;
+  --red: #f0556a;
+  --red-soft: rgba(240, 85, 106, 0.15);
+
+  /* PR state palette (GitHub semantics) */
+  --pr-open: #2f9e44;
+  --pr-merged: #8957e5;
+  --pr-closed: #cf3a4b;
+
+  /* Typography */
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+    system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo,
+    Consolas, "Liberation Mono", monospace;
+
+  /* Radii / shadow */
+  --radius-sm: 5px;
+  --radius: 7px;
+  --radius-lg: 10px;
+  --radius-pill: 999px;
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.45);
+
+  /* Chrome metrics */
+  --titlebar-h: 40px;
+  --traffic-light-pad: 78px; /* room for macOS lights in the overlay titlebar */
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+:root {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+  background-color: var(--bg-app);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-text-size-adjust: 100%;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Inputs and editable surfaces re-enable selection. */
+input,
+textarea,
+.allow-select {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Slim, unobtrusive scrollbars to match the dark chrome. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: var(--radius-pill);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a3f49;
+  background-clip: padding-box;
+}
+
+/* ── Shared primitives ──────────────────────────────────────────────────── */
+
+.btn {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 5px 11px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+.btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: #353a44;
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.btn--primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--text-on-accent);
+}
+.btn--primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: transparent;
+}
+
+.btn--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+.btn--ghost:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.btn--danger {
+  background: transparent;
+  border-color: var(--red);
+  color: var(--red);
+}
+.btn--danger:hover:not(:disabled) {
+  background: var(--red);
+  border-color: var(--red);
+  color: var(--text-on-accent);
+}
+
+.icon-btn {
+  font: inherit;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.icon-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.field {
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 9px;
+  width: 100%;
+}
+.field::placeholder {
+  color: var(--text-faint);
+}
+.field:focus {
+  outline: none;
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+/* Badge: small status / meta pill */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-pill);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.badge--green {
+  background: var(--green-soft);
+  color: var(--green-strong);
+}
+.badge--accent {
+  background: var(--accent-soft);
+  color: #b3a7ff;
+}

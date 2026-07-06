@@ -1,0 +1,56 @@
+{
+  "name": "la-vigie",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local desktop app to manage parallel AI coding agents and their git worktrees",
+  "author": "evermax",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/evermax/la-vigie.git"
+  },
+  "homepage": "https://github.com/evermax/la-vigie",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "test": "vitest run",
+    "setup": "./scripts/setup-worktree.sh",
+    "tauri:dev": "npm install && npm run tauri dev",
+    "tauri:build": "npm install && npm run tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
+    "@tauri-apps/plugin-notification": "^2.3.3",
+    "@tauri-apps/plugin-opener": "^2",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/xterm": "^6.0.0",
+    "qrcode.react": "^4.2.0",
+    "react": "^19.1.0",
+    "react-diff-view": "^3.3.3",
+    "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "refractor": "^3.6.0",
+    "remark-gfm": "^4.0.1",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@types/refractor": "^3.4.1",
+    "@vitejs/plugin-react": "^4.6.0",
+    "jsdom": "^29.1.1",
+    "typescript": "~5.8.3",
+    "vite": "^7.0.4",
+    "vitest": "^4.1.9"
+  }
+}

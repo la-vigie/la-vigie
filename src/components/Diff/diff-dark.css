@@ -1,0 +1,211 @@
+/* GitHub dark theme overrides for react-diff-view */
+
+.diff-wrapper {
+  background-color: #0d1117;
+  color: #e6edf3;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+:root {
+  --diff-background-color: #0d1117;
+  --diff-text-color: #e6edf3;
+  --diff-font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  /* Added lines */
+  --diff-code-insert-background-color: rgba(46, 160, 67, 0.15);
+  --diff-code-insert-text-color: #e6edf3;
+  --diff-gutter-insert-background-color: rgba(46, 160, 67, 0.25);
+  --diff-gutter-insert-text-color: #e6edf3;
+
+  /* Removed lines */
+  --diff-code-delete-background-color: rgba(248, 81, 73, 0.15);
+  --diff-code-delete-text-color: #e6edf3;
+  --diff-gutter-delete-background-color: rgba(248, 81, 73, 0.25);
+  --diff-gutter-delete-text-color: #e6edf3;
+
+  /* Inline edit highlights */
+  --diff-code-insert-edit-background-color: rgba(46, 160, 67, 0.4);
+  --diff-code-delete-edit-background-color: rgba(248, 81, 73, 0.4);
+
+  /* Selection */
+  --diff-selection-background-color: rgba(179, 215, 255, 0.3);
+
+  /* Hunk omit line */
+  --diff-omit-gutter-line-color: #388bfd;
+}
+
+/* Collapse-all / expand-all toolbar */
+.diff-panel__diff-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 2px;
+}
+
+.diff-panel__collapse-all {
+  background: none;
+  border: none;
+  color: #8b949e;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+}
+.diff-panel__collapse-all:hover {
+  color: #e6edf3;
+  background: #1c2128;
+}
+
+/* Per-file collapse header (clickable bar with path + counts) */
+.diff-panel__diff-file-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
+  padding: 6px 10px;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px 6px 0 0;
+  color: #e6edf3;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.diff-panel__diff-file-header:hover {
+  background: #1c2128;
+}
+
+/* When collapsed, the header is the whole card — round all corners. */
+.diff-panel__diff-file--collapsed .diff-panel__diff-file-header {
+  border-radius: 6px;
+}
+
+.diff-panel__diff-file-caret {
+  color: #8b949e;
+  font-size: 10px;
+  width: 12px;
+  flex-shrink: 0;
+}
+
+.diff-panel__diff-file-path {
+  flex: 1;
+  font-family: var(--diff-font-family);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.diff-panel__diff-file-badge {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: #21262d;
+  color: #8b949e;
+  flex-shrink: 0;
+}
+.diff-panel__diff-file-badge--add {
+  background: rgba(46, 160, 67, 0.2);
+  color: #3fb950;
+}
+.diff-panel__diff-file-badge--delete {
+  background: rgba(248, 81, 73, 0.2);
+  color: #ff8a98;
+}
+.diff-panel__diff-file-badge--rename,
+.diff-panel__diff-file-badge--copy {
+  background: rgba(56, 139, 253, 0.2);
+  color: #79c0ff;
+}
+
+.diff-panel__diff-file-counts {
+  display: inline-flex;
+  gap: 6px;
+  font-family: var(--diff-font-family);
+  font-size: 11px;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+/* Hunk header / decoration row (the @@ line) */
+.diff-decoration {
+  background-color: #1c2128;
+  color: #8b949e;
+  font-family: var(--diff-font-family);
+  font-size: 12px;
+}
+
+.diff-decoration-content {
+  padding: 4px 10px;
+}
+
+/* Gutter sizing */
+.diff-gutter-col {
+  width: 52px;
+}
+
+/* Gutter number styling */
+.diff-gutter {
+  color: #6e7681;
+  padding: 0 10px;
+  min-width: 50px;
+}
+
+/* Syntax token colors via refractor/prism classes */
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata {
+  color: #8b949e;
+}
+
+.token.punctuation {
+  color: #e6edf3;
+}
+
+.token.property,
+.token.tag,
+.token.boolean,
+.token.number,
+.token.constant,
+.token.symbol,
+.token.deleted {
+  color: #79c0ff;
+}
+
+.token.selector,
+.token.attr-name,
+.token.string,
+.token.char,
+.token.builtin,
+.token.inserted {
+  color: #a5d6ff;
+}
+
+.token.operator,
+.token.entity,
+.token.url,
+.language-css .token.string,
+.style .token.string {
+  color: #79c0ff;
+}
+
+.token.atrule,
+.token.attr-value,
+.token.keyword {
+  color: #ff7b72;
+}
+
+.token.function,
+.token.class-name {
+  color: #d2a8ff;
+}
+
+.token.regex,
+.token.important,
+.token.variable {
+  color: #ffa657;
+}

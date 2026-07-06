@@ -1,0 +1,275 @@
+/* ── Settings modal ─────────────────────────────────────────────────────── */
+
+.settings__backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.settings {
+  width: 640px;
+  max-width: 92vw;
+  max-height: 88vh;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-pop);
+  overflow: hidden;
+}
+
+/* ── Header ──────────────────────────────────────────────────────────────── */
+.settings__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-faint);
+  flex-shrink: 0;
+}
+
+.settings__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.settings__close {
+  flex: none;
+}
+
+/* ── Body ────────────────────────────────────────────────────────────────── */
+.settings__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ── Section ─────────────────────────────────────────────────────────────── */
+.settings__section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 20px;
+}
+
+.settings__section + .settings__section {
+  border-top: 1px solid var(--border-faint);
+}
+
+/* Notification-sounds section controls */
+.settings__master {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.settings__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Fixed basis wide enough for "Awaiting input" so the label never collapses. */
+.settings__row-label {
+  flex: 0 0 110px;
+  font-size: 14px;
+}
+
+/* `.field` is width:100%, which would otherwise eat the whole flex row and
+   squash the label — let the sound <select> take just the remaining space. */
+.settings__row .field {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+
+.settings__preview {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 2px 8px;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.settings__preview:hover {
+  color: var(--text);
+  border-color: var(--border-faint);
+}
+
+.settings__section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.settings__section-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+
+/* ── Error ───────────────────────────────────────────────────────────────── */
+.settings__error {
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--red);
+  background: var(--red-soft);
+  border: 1px solid var(--red);
+  border-radius: var(--radius-sm);
+}
+
+/* ── Agent list ──────────────────────────────────────────────────────────── */
+.settings__agent-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings__agent-group-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+}
+
+.settings__agent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings__agent-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  gap: 12px;
+}
+
+.settings__agent-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings__agent-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.settings__agent-binary {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings__agent-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* ── Custom sounds library ───────────────────────────────────────────────── */
+.settings__custom-sounds {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ── Add / edit form ─────────────────────────────────────────────────────── */
+.settings__form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 16px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.settings__form-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.settings__form-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings__field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.settings__label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+}
+
+.settings__hint {
+  font-size: 11px;
+  color: var(--text-faint);
+  line-height: 1.4;
+}
+
+.settings__form-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.settings__remote-token { display: block; padding: 8px 10px; margin: 4px 0; border-radius: 6px;
+  background: var(--surface-2, #1d2027); word-break: break-all; cursor: text;
+  /* WKWebView honors the -webkit- prefix; without it the global
+     `-webkit-user-select: none` (theme.css) wins and the token can't be selected. */
+  -webkit-user-select: all; user-select: all; }
+.settings__remote-hint { color: var(--text-muted, #a9adb6); font-size: 13px; }
+/* The QR needs a light quiet zone to scan reliably against the dark modal. */
+.settings__remote-qr { margin-top: 10px; }
+.settings__remote-qr svg { display: block; padding: 10px; border-radius: 8px; background: #fff; }
+
+/* ── Prompt manager section ──────────────────────────────────────────────── */
+.prompt-manager__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.prompt-manager__row { display: flex; flex-direction: column; gap: 4px; }
+.prompt-manager__row-actions { display: flex; gap: 6px; }
+.prompt-manager__add { display: flex; flex-direction: column; gap: 6px; margin-top: 16px; }

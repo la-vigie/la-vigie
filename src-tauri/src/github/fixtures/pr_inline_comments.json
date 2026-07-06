@@ -1,0 +1,60 @@
+{
+  "_comment": "Fixture from gh api repos/<owner>/<repo>/pulls/<number>/comments (REST API, not GraphQL)",
+  "_source": "cli/cli#13679 (2 inline review comments from real PR)",
+  "_note": "This endpoint uses DIFFERENT field names than the GraphQL comments[] from gh pr view --json",
+  "elements": [
+    {
+      "_label": "inline comment on a line range",
+      "id": 3442241541,
+      "user": {
+        "login": "babakks"
+      },
+      "body": "Now that we're adding a test for `printSummary`, let's cover all code paths...",
+      "path": "pkg/cmd/pr/checks/output_test.go",
+      "line": 15,
+      "original_line": 16,
+      "position": 15,
+      "start_line": 11,
+      "original_start_line": 12,
+      "side": "RIGHT",
+      "start_side": "RIGHT",
+      "subject_type": "line",
+      "created_at": "2026-06-19T11:43:16Z",
+      "updated_at": "2026-06-19T11:43:16Z",
+      "in_reply_to_id": null,
+      "pull_request_review_id": 2766327539,
+      "commit_id": "abc123...",
+      "diff_hunk": "@@ -1,15 +1,15 @@ ...",
+      "html_url": "https://github.com/cli/cli/pull/13679#discussion_r3442241541"
+    },
+    {
+      "_label": "inline comment where line is null (outdated/deleted line)",
+      "id": 3442257676,
+      "user": {
+        "login": "babakks"
+      },
+      "body": "This is not needed. Please remove it.",
+      "path": "pkg/cmd/pr/checks/output_test.go",
+      "line": null,
+      "original_line": 55,
+      "position": 1,
+      "start_line": null,
+      "original_start_line": 45,
+      "side": "RIGHT",
+      "start_side": "RIGHT",
+      "subject_type": "line",
+      "created_at": "2026-06-19T11:46:47Z",
+      "updated_at": "2026-06-19T11:46:47Z",
+      "in_reply_to_id": null,
+      "pull_request_review_id": 2766327539
+    }
+  ],
+  "_field_notes": {
+    "author_field": "user.login (REST) vs author.login (GraphQL via gh pr view)",
+    "timestamp_field": "created_at (snake_case, REST) vs createdAt (camelCase, GraphQL)",
+    "line_can_be_null": "line is null when the commented line no longer exists in the latest diff; use original_line as fallback",
+    "path_is_present": "path is always a string (relative file path in the repo)",
+    "in_reply_to_id": "null for top-level comments; integer ID for replies in a thread",
+    "all_rest_keys": ["_links","author_association","body","commit_id","created_at","diff_hunk","html_url","id","line","node_id","original_commit_id","original_line","original_position","original_start_line","path","position","pull_request_review_id","pull_request_url","reactions","side","start_line","start_side","subject_type","updated_at","url","user"]
+  }
+}

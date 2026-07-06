@@ -1,0 +1,102 @@
+{
+  "_comment": "Fixture from gh pr view <number> --repo <owner>/<repo> --json number,url,state,isDraft,mergeable,reviewDecision,statusCheckRollup,title",
+  "_sources": {
+    "open_draft": "cli/cli#13707 (OPEN, isDraft:true, REVIEW_REQUIRED)",
+    "merged": "cli/cli#13705 (MERGED, isDraft:false, APPROVED)",
+    "open_pending": "kubernetes/kubernetes#139972 (OPEN, StatusContext checks)"
+  },
+  "examples": [
+    {
+      "_label": "open draft PR with CheckRun checks (cli/cli#13707)",
+      "isDraft": true,
+      "mergeable": "MERGEABLE",
+      "number": 13707,
+      "reviewDecision": "REVIEW_REQUIRED",
+      "state": "OPEN",
+      "title": "Add `issueFieldValues` to `gh issue view --json` fields",
+      "url": "https://github.com/cli/cli/pull/13707",
+      "statusCheckRollup": [
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-06-23T13:03:07Z",
+          "conclusion": "SKIPPED",
+          "detailsUrl": "https://github.com/cli/cli/actions/runs/28028211762/job/82961485690",
+          "name": "label-external",
+          "startedAt": "2026-06-23T13:03:14Z",
+          "status": "COMPLETED",
+          "workflowName": "PR Triaging"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "0001-01-01T00:00:00Z",
+          "conclusion": "",
+          "detailsUrl": "https://github.com/nodejs/node/actions/runs/28061882419/job/83077734888",
+          "name": "test-macOS",
+          "startedAt": "2026-06-23T22:38:54Z",
+          "status": "IN_PROGRESS",
+          "workflowName": "Test macOS"
+        }
+      ]
+    },
+    {
+      "_label": "merged PR with CheckRun checks (cli/cli#13705)",
+      "isDraft": false,
+      "mergeable": "UNKNOWN",
+      "number": 13705,
+      "reviewDecision": "APPROVED",
+      "state": "MERGED",
+      "title": "Pin reusable triage workflows to a commit SHA",
+      "url": "https://github.com/cli/cli/pull/13705",
+      "statusCheckRollup": [
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-06-23T00:42:35Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/cli/cli/actions/runs/27993959344/job/82852102727",
+          "name": "CodeQL-Build (go)",
+          "startedAt": "2026-06-23T00:39:22Z",
+          "status": "COMPLETED",
+          "workflowName": "Code Scanning"
+        }
+      ]
+    },
+    {
+      "_label": "open PR with StatusContext checks (kubernetes/kubernetes#139972)",
+      "isDraft": false,
+      "mergeable": "MERGEABLE",
+      "number": 139972,
+      "reviewDecision": "",
+      "state": "OPEN",
+      "title": "Increase lower bound capacity...",
+      "url": "https://github.com/kubernetes/kubernetes/pull/139972",
+      "statusCheckRollup": [
+        {
+          "__typename": "StatusContext",
+          "context": "pull-kubernetes-gce-master-scale-performance-5000",
+          "startedAt": "2026-06-23T22:11:48Z",
+          "state": "PENDING",
+          "targetUrl": "https://prow.k8s.io/view/gs/kubernetes-ci-logs/pr-logs/pull/139972/..."
+        },
+        {
+          "__typename": "StatusContext",
+          "context": "EasyCLA",
+          "startedAt": "2026-06-23T19:52:11Z",
+          "state": "SUCCESS",
+          "targetUrl": "https://easycla.lfx.linuxfoundation.org/#/?version=2"
+        }
+      ]
+    }
+  ],
+  "_field_notes": {
+    "state_values": ["OPEN", "MERGED", "CLOSED"],
+    "mergeable_values": ["MERGEABLE", "CONFLICTING", "UNKNOWN"],
+    "reviewDecision_values": ["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", ""],
+    "CheckRun_status_values": ["QUEUED", "IN_PROGRESS", "COMPLETED", "WAITING", "REQUESTED", "PENDING"],
+    "CheckRun_conclusion_values": ["SUCCESS", "FAILURE", "NEUTRAL", "CANCELLED", "SKIPPED", "TIMED_OUT", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE", ""],
+    "StatusContext_state_values": ["EXPECTED", "ERROR", "FAILURE", "PENDING", "SUCCESS"],
+    "CheckRun_name_field": "name (human-readable workflow job name)",
+    "StatusContext_name_field": "context (equivalent of 'name' for commit status API)",
+    "CheckRun_result_field": "conclusion (empty string when status != COMPLETED)",
+    "StatusContext_result_field": "state (always set)"
+  }
+}

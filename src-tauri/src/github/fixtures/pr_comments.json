@@ -1,0 +1,47 @@
+{
+  "_comment": "Fixture from gh pr view <number> --repo <owner>/<repo> --json comments,reviews",
+  "_source": "cli/cli#13707 (reviews), kubernetes/kubernetes#139972 (comments)",
+  "comments": [
+    {
+      "_label": "issue comment (not inline review comment)",
+      "author": {
+        "login": "kubernetes-prow"
+      },
+      "authorAssociation": "MEMBER",
+      "body": "This issue is currently awaiting triage.\n\nIf a SIG or subproject determines this is a relevant issue...",
+      "createdAt": "2026-06-23T22:11:03Z",
+      "id": "IC_kwDODKw3uc6...",
+      "includesCreatedEdit": false,
+      "isMinimized": false,
+      "minimizedReason": "",
+      "reactionGroups": [],
+      "url": "https://github.com/kubernetes/kubernetes/pull/139972#issuecomment-...",
+      "viewerDidAuthor": false
+    }
+  ],
+  "reviews": [
+    {
+      "_label": "review with COMMENTED state",
+      "id": "PRR_kwDODKw3uc8AAAABD6hFbw",
+      "author": {
+        "login": "Cooper-Runstein"
+      },
+      "authorAssociation": "NONE",
+      "body": "Thanks for putting this together — the flattened shape mirroring `projectItems` reads well...",
+      "commit": {
+        "oid": "86a3e7fb245d30583978bb03e47c09c071e2c6b8"
+      },
+      "includesCreatedEdit": false,
+      "reactionGroups": [],
+      "state": "COMMENTED",
+      "submittedAt": "2026-06-23T22:47:51Z"
+    }
+  ],
+  "_field_notes": {
+    "comments_element_key_fields": ["author.login", "body", "createdAt"],
+    "reviews_element_key_fields": ["author.login", "body", "state", "submittedAt"],
+    "review_state_values": ["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", "PENDING"],
+    "comments_are_issue_comments": "comments[] is issue-level comments (not inline review comments); inline review comments come from gh api repos/.../pulls/.../comments",
+    "author_is_object": "author is {login: string}, not a plain string"
+  }
+}

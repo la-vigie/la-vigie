@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","timestamp":"2026-06-28T10:00:00Z"}
+{"type":"user","message":{"role":"user","content":"Add the reply endpoint"},"timestamp":"2026-06-28T10:00:01Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"secret","signature":"x"},{"type":"text","text":"On it."},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"server.rs"}}]},"timestamp":"2026-06-28T10:00:02Z"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"...file..."}]},"timestamp":"2026-06-28T10:00:03Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done."}]},"timestamp":"2026-06-28T10:00:04Z"}

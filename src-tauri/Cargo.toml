@@ -1,0 +1,44 @@
+[package]
+name = "vigie"
+version = "0.1.0"
+description = "Local desktop app to manage parallel AI coding agents and their git worktrees"
+authors = ["evermax"]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/evermax/la-vigie"
+homepage = "https://github.com/evermax/la-vigie"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "vigie_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+anyhow = "1"
+uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["process", "rt", "macros", "rt-multi-thread", "net"] }
+portable-pty = "0.9"
+base64 = "0.22"
+axum = "0.8"
+tauri-plugin-notification = "2.3.3"
+# Holds a macOS IOPMAssertion (PreventUserIdleSystemSleep) via Drop-based release;
+# keeps the host reachable over the tailnet while remote control is enabled (AC2-104).
+keepawake = "0.6"
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+
