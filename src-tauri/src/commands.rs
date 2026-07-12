@@ -13,7 +13,7 @@ use crate::git::{self, FileChange};
 use crate::github;
 use crate::setup::{self, SetupEvent, SetupOutcome};
 use crate::state::{AppState, SetupState};
-use crate::store::{Repo, SetupStatus, Task};
+use crate::store::{Repo, SetupStatus, Task, TaskStatus};
 
 /// Returns `false` if `branch` looks like a git flag (starts with `'-'`),
 /// which would be misinterpreted as a positional argument by git. This is an
@@ -33,6 +33,16 @@ pub fn effective_fetch_remote_base(repo_override: Option<bool>, app_setting: Opt
     repo_override.or(app_setting).unwrap_or(DEFAULT_FETCH_REMOTE_BASE)
 }
 
+/// App-level default for "inject La Vigie's bundled default skills into launched
+/// agents" (TASK-153). OFF — the operator opts in.
+pub const DEFAULT_INJECT_LAVIGIE_SKILLS: bool = false;
+
+/// Resolve whether to inject the bundled skill plugin. v1 is app-level only;
+/// repo/task overrides are TASK-154 (this signature will gain them then).
+pub fn effective_inject_lavigie_skills(app_setting: Option<bool>) -> bool {
+    app_setting.unwrap_or(DEFAULT_INJECT_LAVIGIE_SKILLS)
+}
+
 /// The worktree start-point ref: the fetched remote-tracking ref only when we
 /// both want it and the fetch succeeded; otherwise the local base branch.
 pub fn worktree_base_ref(use_remote: bool, fetch_ok: bool, remote: &str, base: &str) -> String {
@@ -40,6 +50,38 @@ pub fn worktree_base_ref(use_remote: bool, fetch_ok: bool, remote: &str, base: &
         format!("{remote}/{base}")
     } else {
         base.to_string()
+    }
+}
+
+/// App-level throttle window for the Diff tab's background base fetch (TASK-144):
+/// the tab re-renders often, so fetch `origin/<base>` at most once per window.
+pub const BASE_FETCH_THROTTLE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The ref to compare a task's `HEAD` against for diffs and the teardown gate:
+/// the remote-tracking base (`<remote>/<base>`) when we both want the remote base
+/// AND that tracking ref is present, otherwise the local `<base>`. Freshness is
+/// the caller's job (a best-effort fetch); this only picks the ref, so a failed or
+/// never-run fetch degrades to the last-known `<remote>/<base>` (if present) or the
+/// local base — never an error.
+pub fn comparison_base_ref(
+    use_remote: bool,
+    origin_ref_exists: bool,
+    remote: &str,
+    base: &str,
+) -> String {
+    if use_remote && origin_ref_exists {
+        format!("{remote}/{base}")
+    } else {
+        base.to_string()
+    }
+}
+
+/// Throttle decision for the Diff-tab background base fetch: fetch when we have
+/// never fetched (`None`) or the last fetch is at least `window` old.
+pub fn should_fetch(since_last: Option<std::time::Duration>, window: std::time::Duration) -> bool {
+    match since_last {
+        None => true,
+        Some(elapsed) => elapsed >= window,
     }
 }
 
@@ -124,6 +166,7 @@ pub struct AppSnapshot {
     pub worktrees_root: String,
     pub sound_settings: Option<String>,
     pub fetch_remote_base: Option<bool>,
+    pub inject_lavigie_skills: Option<bool>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -277,6 +320,7 @@ pub async fn update_repo(
     sound_settings: Option<String>,
     fetch_remote_base: Option<bool>,
     default_agent: Option<String>,
+    auto_approve: Option<bool>,
 ) -> Result<Repo, String> {
     let name = name.trim().to_string();
     let default_branch = default_branch.trim().to_string();
@@ -325,6 +369,9 @@ pub async fn update_repo(
     store
         .set_repo_fetch_remote_base(&repo_id, fetch_remote_base)
         .map_err(|e| format!("{e:#}"))?;
+    store
+        .set_repo_auto_approve(&repo_id, auto_approve)
+        .map_err(|e| format!("{e:#}"))?;
     let repo = store
         .get_repo(&repo_id)
         .map_err(|e| format!("{e:#}"))?
@@ -348,7 +395,7 @@ pub async fn set_sound_settings(
 
 /// True when the user is in a meeting (mic or camera capturing anywhere on the
 /// system). Used by the frontend to optionally suppress notification sounds
-/// (AC2-105). Native probe on macOS; always `false` on other platforms.
+/// (TASK-105). Native probe on macOS; always `false` on other platforms.
 #[tauri::command]
 pub fn is_meeting_active() -> bool {
     crate::meeting::is_meeting_active()
@@ -364,6 +411,20 @@ pub async fn set_fetch_remote_base(
     let store = state.store.lock().map_err(|e| e.to_string())?;
     store
         .set_app_setting("fetch_remote_base", bool_setting_str(enabled))
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(())
+}
+
+/// Persist the app-level "inject La Vigie default skills" flag, stored under the
+/// `inject_lavigie_skills` app_settings key (TASK-153).
+#[tauri::command]
+pub async fn set_inject_lavigie_skills(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store
+        .set_app_setting("inject_lavigie_skills", bool_setting_str(enabled))
         .map_err(|e| format!("{e:#}"))?;
     Ok(())
 }
@@ -481,8 +542,8 @@ pub async fn list_repo_branches(
         .map_err(|e| format!("{e:#}"))
 }
 
-/// Shared launch path: run the AC2-88 launch core, then kick off the repo's
-/// background setup job (AC2-96). Used by both the `create_task` command and the
+/// Shared launch path: run the TASK-88 launch core, then kick off the repo's
+/// background setup job (TASK-96). Used by both the `create_task` command and the
 /// MCP `start_task` tool so worktree/row creation and setup stay one path.
 ///
 /// Locking: each store lock is captured-then-dropped before the next `.await`.
@@ -493,7 +554,26 @@ pub async fn launch_and_kickoff_setup(
 ) -> Result<Task, String> {
     let task = crate::launch::launch_task(state, args).await?.task;
 
-    // Look up the repo's setup command (brief lock, dropped before the await).
+    // A queued (Pending) task has no worktree yet — setup runs at promote-time.
+    if task.status == TaskStatus::Pending {
+        return Ok(task);
+    }
+
+    kickoff_setup(state, app, &task)?;
+    Ok(task)
+}
+
+/// Kick off the repo's background setup job for a freshly-created/promoted task
+/// (TASK-96). No-op when the worktree has no setup to run. Shared by the create
+/// path and the TASK-90 promote path.
+///
+/// Locking: each store lock is captured-then-dropped; this fn does not `.await`.
+pub(crate) fn kickoff_setup(
+    state: &AppState,
+    app: &tauri::AppHandle,
+    task: &Task,
+) -> Result<(), String> {
+    // Look up the repo's setup command (brief lock).
     let setup_command = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         store
@@ -524,7 +604,7 @@ pub async fn launch_and_kickoff_setup(
         spawn_setup_job(app.clone(), task.id.clone(), worktree_path, setup_command);
     }
 
-    Ok(task)
+    Ok(())
 }
 
 #[tauri::command]
@@ -537,6 +617,7 @@ pub async fn create_task(
     ticket_key: Option<String>,
     agent: Option<String>,
     model: Option<String>,
+    auto_approve: Option<bool>,
 ) -> Result<Task, String> {
     // Durable creation + background setup go through the shared launch path so
     // the `create_task` command and the MCP `start_task` tool share one path.
@@ -547,11 +628,114 @@ pub async fn create_task(
         ticket_key,
         agent,
         model,
-        // The frontend create path never queues on another task (AC2-90).
+        auto_approve,
+        // The frontend create path never queues on another task (TASK-90).
         after_merge_of: None,
+        prompt: None,
     };
     let task = launch_and_kickoff_setup(state.inner(), &app, args).await?;
     Ok(task)
+}
+
+/// Preview of what creating a task at the derived worktree path would do, for the
+/// New Task modal warning (TASK-125). `state` is `"vacant"` (path free), `"adopt"`
+/// (an existing worktree on the intended branch will be reused), or `"conflict"`
+/// (the path is occupied by something that doesn't match — creation would fail).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreePreview {
+    pub state: String,
+    pub path: String,
+    pub message: Option<String>,
+}
+
+/// Check whether the worktree path derived from the given task inputs already
+/// exists on disk, so the New Task modal can warn before submit (TASK-125). Never
+/// errors on incomplete input — an unresolvable request (e.g. no title yet)
+/// returns a `vacant` preview with no message so the UI simply shows nothing.
+#[tauri::command]
+pub async fn check_worktree_path(
+    state: State<'_, AppState>,
+    repo_id: String,
+    title: String,
+    base_branch: Option<String>,
+    ticket_key: Option<String>,
+) -> Result<WorktreePreview, String> {
+    let repo = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        store
+            .get_repo(&repo_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("repo not found: {repo_id}"))?
+    };
+
+    let args = crate::launch::LaunchArgs {
+        repo_id,
+        title,
+        base_branch,
+        ticket_key,
+        agent: None,
+        model: None,
+        after_merge_of: None,
+        prompt: None,
+        auto_approve: None,
+    };
+    // Resolution can fail on incomplete input (no identity yet, flag-like base):
+    // there's nothing to warn about, so present a vacant preview.
+    let resolved = match crate::launch::resolve_launch(args, &repo, &state.worktrees_root) {
+        Ok(r) => r,
+        Err(_) => {
+            return Ok(WorktreePreview { state: "vacant".to_string(), path: String::new(), message: None })
+        }
+    };
+
+    let already_task_owned = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        store
+            .list_tasks()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|t| Path::new(&t.worktree_path) == resolved.worktree_path)
+    };
+
+    let repo_path = Path::new(&repo.path);
+    let adoption =
+        git::worktree_state(repo_path, &resolved.worktree_path, &resolved.branch, already_task_owned)
+            .await;
+
+    let path = resolved.worktree_path.to_string_lossy().to_string();
+    let preview = match adoption {
+        git::WorktreeAdoption::Vacant => {
+            // The path is free, but the branch may already exist (a leftover from a
+            // deleted task): note that its commits will be reused (TASK-125).
+            let branch_exists =
+                git::ref_exists(repo_path, &format!("refs/heads/{}", resolved.branch)).await;
+            if branch_exists {
+                WorktreePreview {
+                    state: "reuse-branch".to_string(),
+                    message: Some(format!(
+                        "Branch {} already exists — its commits will be reused.",
+                        resolved.branch
+                    )),
+                    path,
+                }
+            } else {
+                WorktreePreview { state: "vacant".to_string(), path, message: None }
+            }
+        }
+        git::WorktreeAdoption::Adopt => WorktreePreview {
+            state: "adopt".to_string(),
+            message: Some(format!("A worktree already exists at {path} — it will be reused.")),
+            path,
+        },
+        git::WorktreeAdoption::Reclaim { reason } => {
+            WorktreePreview { state: "reclaim".to_string(), path, message: Some(reason) }
+        }
+        git::WorktreeAdoption::Conflict { reason } => {
+            WorktreePreview { state: "conflict".to_string(), path, message: Some(reason) }
+        }
+    };
+    Ok(preview)
 }
 
 #[tauri::command]
@@ -593,18 +777,23 @@ pub async fn delete_task(
         }
     }
 
-    git::remove_worktree(
-        Path::new(&repo.path),
-        Path::new(&task.worktree_path),
-        true,
-    )
-    .await
-    .map_err(|e| format!("{e:#}"))?;
+    // A queued (Pending, TASK-90) task has no worktree/branch on disk — skip the
+    // git teardown; the DB row delete above already cascaded its dependency
+    // edges away.
+    if !task.worktree_path.is_empty() {
+        git::remove_worktree(
+            Path::new(&repo.path),
+            Path::new(&task.worktree_path),
+            true,
+        )
+        .await
+        .map_err(|e| format!("{e:#}"))?;
 
-    // Optional best-effort branch deletion (the modal's opt-in checkbox).
-    // Mirrors Finish "discard": force-delete, ignore failure.
-    if delete_branch {
-        let _ = git::delete_branch(Path::new(&repo.path), &task.branch, true).await;
+        // Optional best-effort branch deletion (the modal's opt-in checkbox).
+        // Mirrors Finish "discard": force-delete, ignore failure.
+        if delete_branch && !task.branch.is_empty() {
+            let _ = git::delete_branch(Path::new(&repo.path), &task.branch, true).await;
+        }
     }
 
     Ok(())
@@ -643,6 +832,7 @@ pub fn get_setup_state(state: State<'_, AppState>, task_id: String) -> Result<Se
 #[tauri::command]
 pub async fn finish_task(
     state: State<'_, AppState>,
+    app: tauri::AppHandle,
     task_id: String,
     mode: String,
 ) -> Result<(), String> {
@@ -697,7 +887,158 @@ pub async fn finish_task(
         let _ = git::delete_branch(Path::new(&repo_path), &branch, true).await;
     }
 
+    // TASK-90 (revised): promote dependents when this task's work has landed
+    // (PR MERGED auto-detected). Merge mode already squash-merged the PR above,
+    // so the landed check is redundant — bypass it. Keep/discard still verify
+    // via `gh pr view`. Cheap early-out when there are no dependents.
+    promote_dependents_of(state.inner(), &app, &task_id, &branch, &repo_path, mode == "merge").await;
+
     Ok(())
+}
+
+/// Promote one queued (Pending) task now that its dependency has merged: create
+/// the worktree off the up-to-date base, flip it live, kick off setup, and emit
+/// `task_launched` so the frontend starts the agent (TASK-90). Store-Mutex is
+/// captured-then-dropped before each await.
+async fn promote_pending_task(
+    state: &AppState,
+    app: &tauri::AppHandle,
+    dep_id: &str,
+) -> Result<(), String> {
+    // 1. Capture the pending row + repo, and its seeded prompt.
+    let (task, repo) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let task = store
+            .get_task(dep_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("pending task not found: {dep_id}"))?;
+        let repo = store
+            .get_repo(&task.repo_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("repo not found: {}", task.repo_id))?;
+        (task, repo)
+    };
+
+    // Idempotency: if this row is no longer Pending, another finish surface (or
+    // the TASK-91 poller) already promoted it — do nothing, so we never re-create
+    // a worktree or double-start an agent for an already-live task.
+    if task.status != crate::store::TaskStatus::Pending {
+        return Ok(());
+    }
+
+    let initial_prompt = task.pending_prompt.clone();
+
+    // 2. Re-resolve branch/worktree off the now-updated base (after_merge_of=None).
+    let args = crate::launch::LaunchArgs {
+        repo_id: task.repo_id.clone(),
+        title: task.title.clone(),
+        base_branch: Some(task.base_branch.clone()),
+        ticket_key: task.ticket_key.clone(),
+        agent: task.agent.clone(),
+        model: task.model.clone(),
+        after_merge_of: None,
+        prompt: None,
+        auto_approve: None,
+    };
+    let resolved = crate::launch::resolve_launch(args, &repo, &state.worktrees_root)?;
+
+    // 3. Create the worktree (fetches origin/<base>, now containing the merge).
+    crate::launch::prepare_worktree(
+        state,
+        &repo,
+        &resolved.base_branch,
+        &resolved.branch,
+        &resolved.worktree_path,
+    )
+    .await?;
+
+    // 4. Flip the row live + kick off setup.
+    let worktree_path = resolved
+        .worktree_path
+        .to_str()
+        .ok_or("worktree path is not valid UTF-8")?
+        .to_string();
+    let promote_result = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        store.promote_task(dep_id, &worktree_path, &resolved.branch)
+    };
+    if let Err(e) = promote_result {
+        // Worktree exists on disk but the DB promote failed: best-effort rollback
+        // so a retry isn't blocked by a leftover worktree with no DB record
+        // (mirrors launch_task's insert-failure rollback in launch.rs).
+        let _ = git::remove_worktree(Path::new(&repo.path), &resolved.worktree_path, true).await;
+        return Err(e.to_string());
+    }
+    let live_task = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        store
+            .get_task(dep_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("promoted task vanished: {dep_id}"))?
+    };
+    kickoff_setup(state, app, &live_task)?;
+
+    // 5. Tell the frontend to start the agent (reuses TASK-89 useTaskLaunch).
+    crate::mcp::emit_task_launched(app, dep_id.to_string(), initial_prompt);
+    Ok(())
+}
+
+/// TASK-90 (revised): promote every dependent queued on `task_id` when its work
+/// has LANDED. Dependents-first early-out — the gh landed-check runs ONLY when a
+/// dependent is actually waiting (the common case exits after one indexed SELECT).
+/// `landed = bypass || (this task's PR state == MERGED)`. Infallible + error-
+/// isolated: a promote failure marks that dependent Error and never affects the
+/// finishing/teardown caller.
+pub(crate) async fn promote_dependents_of(
+    state: &AppState,
+    app: &tauri::AppHandle,
+    task_id: &str,
+    branch: &str,
+    repo_path: &str,
+    bypass: bool,
+) {
+    // 1. Cheap indexed lookup. No dependents ⇒ exit with no gh call, no work.
+    let dependents = {
+        let store = match state.store.lock() { Ok(s) => s, Err(e) => { eprintln!("TASK-90: store lock: {e}"); return; } };
+        match store.dependents_of(task_id) {
+            Ok(d) => d,
+            Err(e) => { eprintln!("TASK-90: dependents_of({task_id}): {e:#}"); return; }
+        }
+    };
+    if dependents.is_empty() {
+        return;
+    }
+    // 2. Only now pay for the landed check. bypass short-circuits (no PR / no gh).
+    let landed = bypass
+        || matches!(
+            crate::github::pr_status(Path::new(repo_path), branch).await,
+            Ok(Some(pr)) if pr.state == "MERGED"
+        );
+    if !landed {
+        return; // dependents stay queued; edges left intact
+    }
+    // 3. Satisfied ⇒ clear this dependency's edges, promote each 0-unmet dependent.
+    {
+        let store = match state.store.lock() { Ok(s) => s, Err(e) => { eprintln!("TASK-90: store lock: {e}"); return; } };
+        if let Err(e) = store.remove_dependencies_on(task_id) {
+            eprintln!("TASK-90: remove_dependencies_on({task_id}): {e:#}");
+            return;
+        }
+    }
+    for dep_id in dependents {
+        let ready = {
+            let store = match state.store.lock() { Ok(s) => s, Err(_) => continue };
+            matches!(store.unmet_dependency_count(&dep_id), Ok(0))
+        };
+        if !ready { continue; }
+        if let Err(e) = promote_pending_task(state, app, &dep_id).await {
+            eprintln!("TASK-90: promoting dependent {dep_id}: {e:#}");
+            if let Ok(store) = state.store.lock() {
+                let _ = store.update_task_status(&dep_id, crate::store::TaskStatus::Error);
+                let _ = store.set_task_setup_status(&dep_id, Some(SetupStatus::Failed));
+            }
+        }
+    }
 }
 
 /// Build the full app snapshot from the store (brief lock, no await). Shared by
@@ -714,8 +1055,13 @@ pub fn build_snapshot(state: &AppState) -> Result<AppSnapshot, String> {
         .map_err(|e| format!("{e:#}"))?
         .as_deref()
         .and_then(parse_bool_setting);
+    let inject_lavigie_skills = store
+        .get_app_setting("inject_lavigie_skills")
+        .map_err(|e| format!("{e:#}"))?
+        .as_deref()
+        .and_then(parse_bool_setting);
     let worktrees_root = state.worktrees_root.to_string_lossy().to_string();
-    Ok(AppSnapshot { repos, tasks, worktrees_root, sound_settings, fetch_remote_base })
+    Ok(AppSnapshot { repos, tasks, worktrees_root, sound_settings, fetch_remote_base, inject_lavigie_skills })
 }
 
 #[tauri::command]
@@ -737,22 +1083,111 @@ fn diff_target<'a>(scope: Option<&str>, base_branch: &'a str) -> &'a str {
     }
 }
 
+/// Captured inputs (lock → capture → drop) for resolving a task's diff base.
+struct DiffBaseCtx {
+    worktree_path: String,
+    base_branch: String,
+    /// Effective `fetch_remote_base`: repo override → app setting → default.
+    use_remote: bool,
+    /// Whether the repo has an `origin` remote at all.
+    has_remote: bool,
+    /// Throttle-map key: `"<repo_id>:<base_branch>"`.
+    throttle_key: String,
+}
+
+/// Capture everything needed to resolve a task's diff base under one brief store
+/// lock, then drop the guard before any git/await work.
+fn diff_base_context(state: &State<'_, AppState>, task_id: &str) -> Result<DiffBaseCtx, String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let task = store
+        .get_task(task_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("task not found: {task_id}"))?;
+    let repo = store
+        .get_repo(&task.repo_id)
+        .map_err(|e| format!("{e:#}"))?
+        .ok_or_else(|| format!("repo not found: {}", task.repo_id))?;
+    let app_setting = store
+        .get_app_setting("fetch_remote_base")
+        .map_err(|e| format!("{e:#}"))?
+        .as_deref()
+        .and_then(parse_bool_setting);
+    Ok(DiffBaseCtx {
+        worktree_path: task.worktree_path.clone(),
+        base_branch: task.base_branch.clone(),
+        use_remote: effective_fetch_remote_base(repo.fetch_remote_base, app_setting),
+        has_remote: repo.remote_url.is_some(),
+        throttle_key: format!("{}:{}", task.repo_id, task.base_branch),
+    })
+}
+
+/// Resolve the ref the Diff tab should compare `HEAD` against. Best-effort and
+/// non-blocking: when we want the remote base and the repo has a remote, a
+/// throttled background fetch refreshes `origin/<base>` (spawned, never awaited —
+/// so the diff never waits on the network and works offline); resolution itself
+/// uses the *last-known* `origin/<base>` tracking ref. Degrades to the local base
+/// when we don't want the remote, there's no remote, or the tracking ref is absent.
+async fn resolve_base_ref(state: &AppState, ctx: &DiffBaseCtx) -> String {
+    if ctx.use_remote && ctx.has_remote {
+        // Throttle: decide + stamp under a brief lock, never across `.await`.
+        let should = {
+            let mut map = match state.base_fetch_at.lock() {
+                Ok(m) => m,
+                Err(_) => return comparison_base_ref(ctx.use_remote, false, "origin", &ctx.base_branch),
+            };
+            let since = map.get(&ctx.throttle_key).map(|t| t.elapsed());
+            if should_fetch(since, BASE_FETCH_THROTTLE) {
+                map.insert(ctx.throttle_key.clone(), std::time::Instant::now());
+                true
+            } else {
+                false
+            }
+        };
+        if should {
+            // Fire-and-forget: refreshes the ref for the *next* render. Failure
+            // (offline / no upstream branch) is intentionally ignored.
+            let wt = ctx.worktree_path.clone();
+            let base = ctx.base_branch.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = git::fetch(Path::new(&wt), "origin", &base).await;
+            });
+        }
+    }
+
+    let origin_ref_exists = ctx.use_remote
+        && ctx.has_remote
+        && git::ref_exists(Path::new(&ctx.worktree_path), &format!("origin/{}", ctx.base_branch)).await;
+
+    comparison_base_ref(ctx.use_remote, origin_ref_exists, "origin", &ctx.base_branch)
+}
+
 /// Return the unified diff of the task's worktree for the given review scope
-/// (`uncommitted` vs `base`). Defaults to `base`.
+/// (`uncommitted` vs `base`). Defaults to `base`. For the `base` scope the diff
+/// is taken against the freshly-fetched `origin/<base>` when available (TASK-144),
+/// else the local base; the `uncommitted` scope is unaffected (always vs `HEAD`).
 #[tauri::command]
 pub async fn get_diff(
     state: State<'_, AppState>,
     task_id: String,
     scope: Option<String>,
 ) -> Result<String, String> {
-    let (worktree_path, base_branch) = task_paths(&state, &task_id)?;
-    let target = diff_target(scope.as_deref(), &base_branch);
-    let mut diff = git::diff_against_base(Path::new(&worktree_path), target)
+    let ctx = diff_base_context(&state, &task_id)?;
+
+    // Only the base scope compares against origin/<base>; skip the fetch/resolve
+    // for the uncommitted scope (diff_target returns HEAD there regardless).
+    let base_ref = if scope.as_deref() == Some("uncommitted") {
+        ctx.base_branch.clone()
+    } else {
+        resolve_base_ref(state.inner(), &ctx).await
+    };
+    let target = diff_target(scope.as_deref(), &base_ref);
+
+    let mut diff = git::diff_against_base(Path::new(&ctx.worktree_path), target)
         .await
         .map_err(|e| e.to_string())?;
 
     if scope.as_deref() == Some("uncommitted") {
-        let untracked_diff = git::diff_untracked(Path::new(&worktree_path))
+        let untracked_diff = git::diff_untracked(Path::new(&ctx.worktree_path))
             .await
             .map_err(|e| e.to_string())?;
         diff.push_str(&untracked_diff);
@@ -762,23 +1197,31 @@ pub async fn get_diff(
 }
 
 /// Return the list of files changed in the task's worktree for the given review
-/// scope (`uncommitted` vs `base`). Defaults to `base`.
+/// scope (`uncommitted` vs `base`). Defaults to `base`. Base scope compares
+/// against the freshly-fetched `origin/<base>` when available (TASK-144).
 #[tauri::command]
 pub async fn get_changed_files(
     state: State<'_, AppState>,
     task_id: String,
     scope: Option<String>,
 ) -> Result<Vec<FileChange>, String> {
-    let (worktree_path, base_branch) = task_paths(&state, &task_id)?;
-    let target = diff_target(scope.as_deref(), &base_branch);
-    let mut changes = git::changed_files(Path::new(&worktree_path), target)
+    let ctx = diff_base_context(&state, &task_id)?;
+
+    let base_ref = if scope.as_deref() == Some("uncommitted") {
+        ctx.base_branch.clone()
+    } else {
+        resolve_base_ref(state.inner(), &ctx).await
+    };
+    let target = diff_target(scope.as_deref(), &base_ref);
+
+    let mut changes = git::changed_files(Path::new(&ctx.worktree_path), target)
         .await
         .map_err(|e| e.to_string())?;
 
     // Untracked (new, non-ignored) files are invisible to `git diff`; surface
     // them as additions in the uncommitted/Iteration view only.
     if scope.as_deref() == Some("uncommitted") {
-        let untracked = git::untracked_files(Path::new(&worktree_path))
+        let untracked = git::untracked_files(Path::new(&ctx.worktree_path))
             .await
             .map_err(|e| e.to_string())?;
         for path in untracked {
@@ -1102,6 +1545,13 @@ mod tests {
     }
 
     #[test]
+    fn effective_inject_defaults_off() {
+        assert!(!effective_inject_lavigie_skills(None));
+        assert!(effective_inject_lavigie_skills(Some(true)));
+        assert!(!effective_inject_lavigie_skills(Some(false)));
+    }
+
+    #[test]
     fn effective_fetch_remote_base_precedence() {
         // repo override wins
         assert!(effective_fetch_remote_base(Some(true), Some(false)));
@@ -1119,6 +1569,26 @@ mod tests {
         assert_eq!(worktree_base_ref(true, false, "origin", "main"), "main");
         assert_eq!(worktree_base_ref(false, true, "origin", "main"), "main");
         assert_eq!(worktree_base_ref(false, false, "origin", "main"), "main");
+    }
+
+    #[test]
+    fn comparison_base_ref_prefers_origin_only_when_wanted_and_present() {
+        assert_eq!(comparison_base_ref(true, true, "origin", "main"), "origin/main");
+        // want remote but ref absent (fetch failed / never fetched) -> local base
+        assert_eq!(comparison_base_ref(true, false, "origin", "main"), "main");
+        // don't want remote -> local base even if the ref happens to exist
+        assert_eq!(comparison_base_ref(false, true, "origin", "main"), "main");
+        assert_eq!(comparison_base_ref(false, false, "origin", "develop"), "develop");
+    }
+
+    #[test]
+    fn should_fetch_true_when_never_fetched_or_window_elapsed() {
+        use std::time::Duration;
+        let window = Duration::from_secs(15);
+        assert!(should_fetch(None, window), "never fetched -> fetch");
+        assert!(should_fetch(Some(Duration::from_secs(15)), window), "exactly at window -> fetch");
+        assert!(should_fetch(Some(Duration::from_secs(30)), window), "past window -> fetch");
+        assert!(!should_fetch(Some(Duration::from_secs(5)), window), "inside window -> skip");
     }
 
     #[test]

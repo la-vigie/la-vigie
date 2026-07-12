@@ -57,7 +57,7 @@ fn apply_lavigie_env(cmd: &mut CommandBuilder) {
 /// Spawn `program` with `args` in a new PTY, optionally with working
 /// directory `cwd`, sized `cols` x `rows`. `extra_env` sets additional
 /// environment variables on the child (on top of `LAVIGIE=1`) — used to hand
-/// an agent its HookBridge coordinates so a skill can call back (AC2-40).
+/// an agent its HookBridge coordinates so a skill can call back (TASK-40).
 pub fn spawn_pty(
     program: impl AsRef<std::ffi::OsStr>,
     args: &[String],
@@ -106,7 +106,7 @@ pub enum SessionKind {
     Task,
     /// A plain interactive shell.
     Shell,
-    /// The worktree-less mobile concierge (AC2-112).
+    /// The worktree-less mobile concierge (TASK-112).
     Concierge,
 }
 
@@ -250,24 +250,51 @@ pub fn build_mcp_config(port: u16, token: &str) -> String {
 /// agent's id, used to address it in `write_session`/`resize_session`/`stop_session`.
 #[tauri::command]
 pub fn start_agent(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     task_id: String,
     resume: bool,
     initial_prompt: Option<String>,
     on_event: Channel<PtyEvent>,
 ) -> Result<String, String> {
-    let (worktree_path, repo_id, task_agent, task_model, repo_default, custom_agents) = {
+    let (
+        worktree_path,
+        repo_id,
+        task_agent,
+        task_model,
+        task_auto_approve,
+        repo_default,
+        repo_auto_approve,
+        custom_agents,
+        app_inject_skills,
+    ) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let task = store
             .get_task(&task_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("task not found: {task_id}"))?;
-        let repo_default = store
-            .get_repo(&task.repo_id)
-            .map_err(|e| e.to_string())?
-            .and_then(|r| r.default_agent);
+        let repo = store.get_repo(&task.repo_id).map_err(|e| e.to_string())?;
+        let repo_default = repo.as_ref().and_then(|r| r.default_agent.clone());
+        let repo_auto_approve = repo.as_ref().and_then(|r| r.auto_approve);
         let custom = store.list_custom_agents().map_err(|e| e.to_string())?;
-        (task.worktree_path, task.repo_id, task.agent, task.model, repo_default, custom)
+        let app_inject_skills = crate::commands::effective_inject_lavigie_skills(
+            store
+                .get_app_setting("inject_lavigie_skills")
+                .map_err(|e| format!("{e:#}"))?
+                .as_deref()
+                .and_then(crate::commands::parse_bool_setting),
+        );
+        (
+            task.worktree_path,
+            task.repo_id,
+            task.agent,
+            task.model,
+            task.auto_approve,
+            repo_default,
+            repo_auto_approve,
+            custom,
+            app_inject_skills,
+        )
     };
 
     // Generate agent_id before building args so it can go in the hook URL.
@@ -285,6 +312,7 @@ pub fn start_agent(
     use crate::agent::spec::{build_agent_command, resolve_for_task, StatusMechanism};
 
     let spec = resolve_for_task(task_agent.as_deref(), repo_default.as_deref(), &custom_agents);
+    let auto_approve = crate::agent::spec::effective_auto_approve(task_auto_approve, repo_auto_approve);
 
     // Hooks (and the HookBridge status pipeline) are Claude-Code-specific; only
     // a ClaudeHooks agent gets `--settings`. Lifecycle agents launch hook-free.
@@ -294,7 +322,7 @@ pub fn start_agent(
         None
     };
 
-    // AC2-89: mint a per-agent MCP token (auth + originating-context carrier) and
+    // TASK-89: mint a per-agent MCP token (auth + originating-context carrier) and
     // inject the --mcp-config so this agent can self-dispatch tasks. Claude only.
     let mcp_token = if spec.status == StatusMechanism::ClaudeHooks {
         let token = uuid::Uuid::new_v4().to_string();
@@ -315,11 +343,27 @@ pub fn start_agent(
     };
     let mcp_config = mcp_token.as_deref().map(|t| build_mcp_config(state.mcp_port, t));
 
-    let (program, mut args) = build_agent_command(&spec, resume, hook_settings.as_deref(), mcp_config.as_deref(), task_model.as_deref());
+    // TASK-153: when enabled, layer La Vigie's bundled skills via `--plugin-dir`.
+    // Namespaced (`/lavigie:*`) so they never shadow the operator's own skills.
+    // Unresolvable/invalid bundle → omit the flag; launch never breaks.
+    let plugin_dir: Option<String> = if app_inject_skills {
+        crate::lavigie_plugin::resolve_plugin_dir(&app).map(|p| p.to_string_lossy().into_owned())
+    } else {
+        None
+    };
+    let (program, mut args) = build_agent_command(
+        &spec,
+        resume,
+        hook_settings.as_deref(),
+        mcp_config.as_deref(),
+        task_model.as_deref(),
+        plugin_dir.as_deref(),
+        auto_approve,
+    );
     let resolved = crate::claude_path::find_binary(&program);
 
     // Deliver an optional initial prompt using the resolved agent's prompt_mode
-    // (AC2-49 delivery + AC2-21 resolution). A prompt is only seeded on a fresh
+    // (TASK-49 delivery + TASK-21 resolution). A prompt is only seeded on a fresh
     // start, never on resume.
     let delivery = crate::agent::spec::initial_prompt_delivery(
         spec.prompt_mode,
@@ -327,24 +371,44 @@ pub fn start_agent(
     );
     args.extend(delivery.args);
 
-    // Hand the agent its HookBridge coordinates so a skill it runs can call
-    // back — e.g. the rename endpoint POST /rename/{agent_id} (AC2-40).
-    let agent_env: [(&str, String); 2] = [
+    // Hand the agent its HookBridge coordinates so a skill it runs can call back.
+    // LAVIGIE_TASK_ID is the durable key for task-scoped callbacks — POST
+    // /rename/{task_id} and /finish/{task_id} (TASK-40/TASK-139/TASK-151) — so they
+    // resolve even after an app restart empties the in-memory agent→task map.
+    // LAVIGIE_AGENT_ID stays for the per-agent hook URLs (status/transcript).
+    let agent_env: [(&str, String); 3] = [
         ("LAVIGIE_HOOK_PORT", state.hook_port.to_string()),
         ("LAVIGIE_AGENT_ID", agent_id.clone()),
+        ("LAVIGIE_TASK_ID", task_id.clone()),
     ];
 
     let mut session = spawn_pty(&resolved, &args, Some(Path::new(&worktree_path)), 80, 24, &agent_env)
         .map_err(|e| format!("{e:#}"))?;
 
     // PromptMode::Stdin path (not exercised by the claude-only live route, but
-    // wired so the AC2-21 thread inherits a complete delivery).
+    // wired so the TASK-21 thread inherits a complete delivery).
     if let Some(stdin) = delivery.stdin {
         session.writer.write_all(stdin.as_bytes()).map_err(|e| format!("{e:#}"))?;
         session.writer.flush().map_err(|e| format!("{e:#}"))?;
     }
 
     register_streaming_session(&state, &agent_id, session, Some(on_event), mcp_token, SessionKind::Task)?;
+
+    // Emit initial console status with permission mode for agents whose auto-approve
+    // is resolved on. Lifecycle agents (e.g. Mistral Vibe) don't use hooks. (TASK-135)
+    if auto_approve && !spec.auto_approve_args.is_empty() {
+        use tauri::Emitter as _;
+        let _ = app.emit(
+            "agent_console",
+            crate::hooks::AgentConsolePayload {
+                agent_id: agent_id.clone(),
+                console: crate::hooks::ConsoleStatus {
+                    mode: Some("auto".to_string()),
+                    ..Default::default()
+                },
+            },
+        );
+    }
 
     Ok(agent_id)
 }
@@ -380,7 +444,7 @@ pub fn start_shell(
 }
 
 /// Write raw bytes to a registered session's PTY. Shared by the `write_session`
-/// command and the remote reply handler (AC2-108). Errors if the id is unknown.
+/// command and the remote reply handler (TASK-108). Errors if the id is unknown.
 pub fn write_to_session(state: &AppState, session_id: &str, data: &str) -> Result<(), String> {
     let mut sessions = state.sessions.lock().map_err(|e| e.to_string())?;
     let handle = sessions
@@ -605,7 +669,7 @@ mod tests {
             serde_json::from_str(&json_str).expect("must be valid JSON");
 
         let hooks = v["hooks"].as_object().expect("hooks must be an object");
-        // AC2-85 adds SubagentStart/SubagentStop to the existing five.
+        // TASK-85 adds SubagentStart/SubagentStop to the existing five.
         for key in &[
             "UserPromptSubmit",
             "Notification",

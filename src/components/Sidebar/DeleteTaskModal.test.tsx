@@ -3,7 +3,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { DeleteTaskModal } from "./DeleteTaskModal";
 import type { Task } from "../../store";
 
-const task = { id: "t1", title: "Fix login", branch: "ac2-1-fix-login" } as Task;
+const task = { id: "t1", title: "Fix login", branch: "task-1-fix-login" } as Task;
 
 describe("DeleteTaskModal", () => {
   it("confirms with deleteBranch=false by default", () => {

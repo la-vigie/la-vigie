@@ -1,4 +1,4 @@
-//! Native, provider-agnostic "is the user in a meeting?" probe (AC2-105).
+//! Native, provider-agnostic "is the user in a meeting?" probe (TASK-105).
 //!
 //! Meeting state = any process anywhere on the system is actively capturing the
 //! mic or camera. We read the public CoreAudio / CoreMediaIO "is running

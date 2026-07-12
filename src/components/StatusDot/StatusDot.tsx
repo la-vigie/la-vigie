@@ -6,6 +6,7 @@ const COLOR_BY_STATUS: Record<TaskStatus, string> = {
   needs_attention: "#f59e0b",
   done: "#22c55e",
   error: "#ef4444",
+  pending: "#a855f7",
 };
 
 export interface StatusDotProps {

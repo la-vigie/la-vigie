@@ -43,6 +43,9 @@ export function RepoSettingsModal({ repo, onClose }: RepoSettingsModalProps) {
   const [fetchRemoteBase, setFetchRemoteBase] = useState<boolean | null>(
     repo.fetchRemoteBase ?? null,
   );
+  const [autoApprove, setAutoApprove] = useState<boolean | null>(
+    repo.autoApprove ?? null,
+  );
 
   // Populate the base-branch dropdown from the repo's local branches. Merge the
   // stored value in (it may be a branch that no longer exists locally) so it's
@@ -175,6 +178,7 @@ export function RepoSettingsModal({ repo, onClose }: RepoSettingsModalProps) {
         hasOverride ? JSON.stringify(override) : null,
         fetchRemoteBase,
         defaultAgent,
+        autoApprove,
       );
       await setRepoDefaultModel(repo.id, defaultModel);
       await refresh();
@@ -354,6 +358,29 @@ export function RepoSettingsModal({ repo, onClose }: RepoSettingsModalProps) {
                 <option value="on">On</option>
                 <option value="off">Off</option>
               </select>
+            </label>
+          </div>
+
+          <div className="repo-settings__row">
+            <label className="repo-settings__field">
+              <span className="repo-settings__label">Auto-approve agent actions</span>
+              <select
+                className="field"
+                aria-label="Auto-approve agent actions"
+                value={autoApprove === null ? "inherit" : autoApprove ? "on" : "off"}
+                onChange={(e) =>
+                  setAutoApprove(
+                    e.target.value === "inherit" ? null : e.target.value === "on",
+                  )
+                }
+              >
+                <option value="inherit">Use default (on)</option>
+                <option value="on">On</option>
+                <option value="off">Off</option>
+              </select>
+              <span className="repo-settings__hint">
+                Auto-approves agent actions for engines that support it (e.g. Mistral Vibe).
+              </span>
             </label>
           </div>
 

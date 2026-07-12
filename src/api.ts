@@ -46,7 +46,7 @@ export type RemoteStatus = {
   active: boolean;
   token?: string | null;
   url?: string | null;
-  // Whether a system-sleep-preventing power assertion is currently held (AC2-104).
+  // Whether a system-sleep-preventing power assertion is currently held (TASK-104).
   sleepInhibited: boolean;
 };
 
@@ -85,6 +85,7 @@ export function updateRepo(
   soundSettings: string | null,
   fetchRemoteBase: boolean | null = null,
   defaultAgent: string | null = null,
+  autoApprove: boolean | null = null,
 ): Promise<Repo> {
   return invoke("update_repo", {
     repoId,
@@ -97,6 +98,7 @@ export function updateRepo(
     soundSettings,
     fetchRemoteBase,
     defaultAgent,
+    autoApprove,
   });
 }
 
@@ -106,6 +108,10 @@ export function setSoundSettings(settings: string): Promise<void> {
 
 export function setFetchRemoteBase(enabled: boolean): Promise<void> {
   return invoke("set_fetch_remote_base", { enabled });
+}
+
+export function setInjectLavigieSkills(enabled: boolean): Promise<void> {
+  return invoke("set_inject_lavigie_skills", { enabled });
 }
 
 /** True when the user is in a meeting (mic/camera active). macOS-only; false elsewhere. */
@@ -144,6 +150,7 @@ export function createTask(
   ticketKey?: string,
   agent?: string,
   model?: string | null,
+  autoApprove: boolean | null = null,
 ): Promise<Task> {
   return invoke("create_task", {
     repoId,
@@ -152,6 +159,37 @@ export function createTask(
     ticketKey: ticketKey ?? null,
     agent: agent ?? null,
     model: model ?? null,
+    autoApprove: autoApprove ?? null,
+  });
+}
+
+/** Preview of what creating a task at the derived worktree path would do (TASK-125). */
+export interface WorktreePreview {
+  /**
+   * - "vacant"       — path free, create normally (no message).
+   * - "reuse-branch" — path free but the branch exists; its commits are reused.
+   * - "adopt"        — an existing worktree on the branch will be reused.
+   * - "reclaim"      — a leftover/orphaned worktree will be cleaned up & recreated.
+   * - "conflict"     — the path is occupied by a mismatch; creation would fail.
+   */
+  state: "vacant" | "reuse-branch" | "adopt" | "reclaim" | "conflict";
+  path: string;
+  message: string | null;
+}
+
+/** Check whether the worktree path derived from these inputs already exists, so
+ *  the New Task modal can warn before submit (TASK-125). */
+export function checkWorktreePath(
+  repoId: string,
+  title: string,
+  baseBranch?: string,
+  ticketKey?: string,
+): Promise<WorktreePreview> {
+  return invoke("check_worktree_path", {
+    repoId,
+    title,
+    baseBranch: baseBranch ?? null,
+    ticketKey: ticketKey ?? null,
   });
 }
 
@@ -181,6 +219,13 @@ export function listAgentModels(agentName: string): Promise<string[]> {
 
 export function setTaskModel(taskId: string, model: string | null): Promise<void> {
   return invoke("set_task_model", { taskId, model });
+}
+
+export function setTaskAutoApprove(
+  taskId: string,
+  autoApprove: boolean | null,
+): Promise<void> {
+  return invoke("set_task_auto_approve", { taskId, autoApprove });
 }
 
 export function deleteTask(taskId: string, deleteBranch: boolean): Promise<void> {
@@ -244,6 +289,18 @@ export function onTaskRenamed(
   cb: (e: { taskId: string; title: string }) => void,
 ): Promise<UnlistenFn> {
   return listen<{ taskId: string; title: string }>("task_renamed", (event) => cb(event.payload));
+}
+
+export function onTaskRemoved(
+  cb: (e: { taskId: string }) => void,
+): Promise<UnlistenFn> {
+  return listen<{ taskId: string }>("task_removed", (event) => cb(event.payload));
+}
+
+export function onTaskCreated(
+  cb: (e: { taskId: string }) => void,
+): Promise<UnlistenFn> {
+  return listen<{ taskId: string }>("task_created", (event) => cb(event.payload));
 }
 
 export function getSetupState(

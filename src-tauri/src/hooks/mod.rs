@@ -9,23 +9,26 @@
 //! The `StatusSink` trait decouples the bridge from a live Tauri app handle so
 //! the route handler can be tested without any Tauri infrastructure.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{FromRef, Path, Query, State};
 use axum::routing::post;
 use axum::Router;
 
 use crate::agent::status::{apply_event, to_task_status, StatusEvent};
 use crate::state::AppState;
+use crate::teardown::TeardownOutcome;
 
 // ── Pure Claude hook adapter ──────────────────────────────────────────────────
 
 /// Claude Code hook adapter: map a hook event name (+ optional notification_type)
 /// to a normalized `StatusEvent`. `PreToolUse` and `UserPromptSubmit` both mean
-/// "the agent is actively working" — mapping `PreToolUse` closes the AC2-47 gap
+/// "the agent is actively working" — mapping `PreToolUse` closes the TASK-47 gap
 /// where a permission approval (which resumes via `PreToolUse`, not a prompt
 /// submit) left the run-state stuck on NeedsAttention. `SubagentStart`/
-/// `SubagentStop` map to background-subagent events (AC2-85) so the state machine
+/// `SubagentStop` map to background-subagent events (TASK-85) so the state machine
 /// keeps the pill active while a backgrounded subagent runs past the main `Stop`.
 /// Returns `None` for events that carry no status meaning.
 pub fn claude_event(
@@ -41,7 +44,7 @@ pub fn claude_event(
         },
         "Stop" => Some(StatusEvent::Idle),
         "StopFailure" => Some(StatusEvent::Failed),
-        // AC2-85: track in-flight background subagents so the pill stays active
+        // TASK-85: track in-flight background subagents so the pill stays active
         // while a backgrounded subagent runs past the main loop's Stop.
         "SubagentStart" => Some(StatusEvent::SubagentStarted),
         "SubagentStop" => Some(StatusEvent::SubagentStopped),
@@ -87,12 +90,12 @@ pub fn parse_permission_mode(body: &[u8]) -> Option<String> {
     v["permission_mode"].as_str().map(str::to_string)
 }
 
-// ── Task-rename name sanitizer (AC2-40) ───────────────────────────────────────
+// ── Task-rename name sanitizer (TASK-40) ───────────────────────────────────────
 
 /// Maximum length (in chars) of an agent-set task name; longer input is truncated.
 const MAX_TASK_NAME_LEN: usize = 200;
 
-/// Normalize an agent-supplied task name (AC2-40): collapse every run of
+/// Normalize an agent-supplied task name (TASK-40): collapse every run of
 /// whitespace — including embedded newlines, tabs, and other control
 /// whitespace — to single spaces, trim the ends, and cap the length at a char
 /// boundary. Returns `None` when nothing usable remains, so a blank/whitespace
@@ -114,14 +117,38 @@ pub fn sanitize_task_name(raw: &str) -> Option<String> {
 pub trait StatusSink: Send + Sync + 'static {
     fn record(&self, agent_id: &str, event: StatusEvent);
     fn emit_console(&self, agent_id: &str, console: ConsoleStatus);
-    /// Rename the task owned by `agent_id` to the (already-sanitized) `name`
-    /// (AC2-40). The agent can only ever rename its own task — implementations
-    /// resolve `agent_id → task_id` and no-op for an unknown id.
-    fn set_task_name(&self, agent_id: &str, name: &str);
-    /// Record the filesystem path of `agent_id`'s transcript (AC2-108).
+    /// Rename the task identified by `task_id` to the (already-sanitized) `name`
+    /// (TASK-40/TASK-151). Keyed on the durable `task_id` (the agent presents its own
+    /// `LAVIGIE_TASK_ID`), so it resolves after a restart. Returns `true` when the
+    /// task existed and was renamed, `false` for an unknown id — the caller maps
+    /// `false` to a 404 so a 200 genuinely means "renamed".
+    fn set_task_name(&self, task_id: &str, name: &str) -> bool;
+    /// Record the filesystem path of `agent_id`'s transcript (TASK-108).
     /// Implementations resolve `agent_id → task_id` and store `task_id → path`;
     /// no-op for an unknown agent id.
     fn set_transcript(&self, agent_id: &str, transcript_path: &str);
+}
+
+/// Boxed future returned by [`TaskTeardown::teardown`]. Written by hand (rather
+/// than via `#[async_trait]`) so `Arc<dyn TaskTeardown>` stays dyn-compatible
+/// without adding an `async-trait` dependency.
+pub type TeardownFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<TeardownOutcome, String>> + Send + 'a>>;
+
+/// Tear down the task identified by `task_id` (TASK-139/TASK-151). Async + fallible,
+/// unlike the fire-and-forget `StatusSink` methods, so it is a separate seam.
+/// Implemented by `TauriSink` (real teardown) and by test doubles.
+pub trait TaskTeardown: Send + Sync + 'static {
+    fn teardown<'a>(&'a self, task_id: &'a str, force: bool, promote: bool) -> TeardownFuture<'a>;
+}
+
+/// Axum router state: the sync status sink plus the async teardown seam. The
+/// `FromRef` derive lets each handler extract just the piece it needs, so the
+/// existing handlers keep `State<Arc<dyn StatusSink>>` unchanged.
+#[derive(Clone, FromRef)]
+struct HookState {
+    sink: Arc<dyn StatusSink>,
+    teardown: Arc<dyn TaskTeardown>,
 }
 
 // ── Production sink (Tauri AppHandle) ────────────────────────────────────────
@@ -139,13 +166,13 @@ struct AgentStatusPayload {
 /// Tauri event payload for `"agent_console"`.
 #[derive(serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct AgentConsolePayload {
-    agent_id: String,
+pub struct AgentConsolePayload {
+    pub agent_id: String,
     #[serde(flatten)]
-    console: ConsoleStatus,
+    pub console: ConsoleStatus,
 }
 
-/// Tauri event payload for `"task_renamed"` (AC2-40): the task whose title an
+/// Tauri event payload for `"task_renamed"` (TASK-40): the task whose title an
 /// agent changed, and its new title. The frontend patches the task in place so
 /// the sidebar/header refresh live.
 #[derive(serde::Serialize, Clone)]
@@ -217,25 +244,21 @@ impl StatusSink for TauriSink {
         );
     }
 
-    fn set_task_name(&self, agent_id: &str, name: &str) {
+    fn set_task_name(&self, task_id: &str, name: &str) -> bool {
         use tauri::{Emitter as _, Manager as _};
 
         let st = self.app.state::<AppState>();
 
-        // Resolve the agent's OWN task; unknown id → no-op (an agent can never
-        // rename a task that isn't the one it was spawned for).
-        let task_id = st
-            .agent_tasks
-            .lock()
-            .ok()
-            .and_then(|m| m.get(agent_id).cloned());
-        let Some(task_id) = task_id else { return };
-
-        // Persist the new title. Mutex-safe: lock → write → drop, no await.
+        // Persist the new title, keyed on the durable task_id. Unknown id → false
+        // (honest 404). Mutex-safe: lock → verify → write → drop, no await.
         {
-            let Ok(store) = st.store.lock() else { return };
-            if store.update_task_title(&task_id, name).is_err() {
-                return;
+            let Ok(store) = st.store.lock() else { return false };
+            match store.get_task(task_id) {
+                Ok(Some(_)) => {}
+                _ => return false,
+            }
+            if store.update_task_title(task_id, name).is_err() {
+                return false;
             }
         }
 
@@ -243,10 +266,11 @@ impl StatusSink for TauriSink {
         let _ = self.app.emit(
             "task_renamed",
             TaskRenamedPayload {
-                task_id,
+                task_id: task_id.to_string(),
                 title: name.to_string(),
             },
         );
+        true
     }
 
     fn set_transcript(&self, agent_id: &str, transcript_path: &str) {
@@ -263,6 +287,39 @@ impl StatusSink for TauriSink {
             .transcripts
             .lock()
             .map(|mut map| map.insert(task_id, transcript_path.to_string()));
+    }
+}
+
+impl TaskTeardown for TauriSink {
+    fn teardown<'a>(&'a self, task_id: &'a str, force: bool, promote: bool) -> TeardownFuture<'a> {
+        use tauri::Manager as _;
+        let app = self.app.clone();
+        let task_id = task_id.to_string();
+        Box::pin(async move {
+            let state = app.state::<AppState>();
+            match crate::teardown::prepare_teardown(&state, &task_id, force).await? {
+                crate::teardown::TeardownStep::Early(outcome) => Ok(outcome),
+                crate::teardown::TeardownStep::Ready(plan) => {
+                    // Detach the destructive sequence: on success this kills the
+                    // caller's own PTY, which can cancel this request future — a
+                    // detached task can't be interrupted between worktree removal
+                    // and DB-row deletion. 200 here means "accepted, will complete".
+                    let app2 = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let state = app2.state::<AppState>();
+                        // TASK-90: promote landed dependents before the destructive
+                        // teardown (worktree still present, row still resolves).
+                        crate::commands::promote_dependents_of(
+                            &state, &app2, &plan.task_id, &plan.branch, &plan.repo_path, promote,
+                        ).await;
+                        if let Err(e) = crate::teardown::perform_teardown(&state, &app2, &plan).await {
+                            eprintln!("[hooks] self-teardown of task {} failed: {e}", plan.task_id);
+                        }
+                    });
+                    Ok(TeardownOutcome::Done)
+                }
+            }
+        })
     }
 }
 
@@ -300,26 +357,66 @@ async fn hook_handler(
     axum::http::StatusCode::OK
 }
 
-/// `POST /rename/:agent_id` — rename the calling agent's own task (AC2-40).
-/// The request body is the raw new name (plain text). On success returns 200
-/// with the applied (sanitized) name; a blank/whitespace-only name returns 400
-/// so the caller knows the rename was rejected rather than silently dropped.
+/// `POST /rename/:task_id` — rename the calling agent's own task (TASK-40/TASK-151).
+/// Keyed on the durable `task_id` so it resolves after an app restart. The request
+/// body is the raw new name (plain text). Returns 200 with the applied (sanitized)
+/// name on success; 400 for a blank/whitespace-only name; 404 for an unknown
+/// task_id — mirroring `/finish`, so a 200 genuinely means "renamed".
 async fn rename_handler(
-    Path(agent_id): Path<String>,
+    Path(task_id): Path<String>,
     State(sink): State<Arc<dyn StatusSink>>,
     body: axum::body::Bytes,
 ) -> (axum::http::StatusCode, String) {
     let raw = String::from_utf8_lossy(&body);
     match sanitize_task_name(&raw) {
         Some(name) => {
-            sink.set_task_name(&agent_id, &name);
-            (axum::http::StatusCode::OK, name)
+            if sink.set_task_name(&task_id, &name) {
+                (axum::http::StatusCode::OK, name)
+            } else {
+                (axum::http::StatusCode::NOT_FOUND, "unknown task".to_string())
+            }
         }
         None => (
             axum::http::StatusCode::BAD_REQUEST,
             "task name is empty after trimming".to_string(),
         ),
     }
+}
+
+#[derive(serde::Deserialize)]
+struct FinishQuery {
+    #[serde(default)]
+    force: bool,
+    #[serde(default)]
+    promote: bool,
+}
+
+/// Map a teardown result to the HTTP response. Pure — unit-tested directly.
+fn finish_response(result: Result<TeardownOutcome, String>) -> (axum::http::StatusCode, String) {
+    use axum::http::StatusCode;
+    match result {
+        Ok(TeardownOutcome::Done) => (StatusCode::OK, "finished".to_string()),
+        Ok(TeardownOutcome::UnknownTask) => (StatusCode::NOT_FOUND, "unknown task".to_string()),
+        Ok(TeardownOutcome::Unsafe(reason)) => (StatusCode::CONFLICT, reason),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// `POST /finish/{task_id}?force=<bool>&promote=<bool>` — tear down the calling
+/// agent's own task (TASK-139/TASK-151). Keyed on the durable `task_id` so it
+/// resolves after an app restart. 200 done / 404 unknown / 409 unsafe (uncommitted
+/// or unmerged work) / 500 on git/DB failure. Before the destructive teardown,
+/// promotes any dependents queued on this task once its work has landed (TASK-90);
+/// `promote=true` bypasses the landed check (e.g. no-PR flows). Teardown of a
+/// `Ready` plan runs detached, so a 200 here means "accepted; teardown will run to
+/// completion in the background" — not that it has finished. The caller's PTY is
+/// killed by that detached `perform_teardown`, after the 200 has already been sent.
+async fn finish_handler(
+    Path(task_id): Path<String>,
+    Query(q): Query<FinishQuery>,
+    State(teardown): State<Arc<dyn TaskTeardown>>,
+) -> (axum::http::StatusCode, String) {
+    finish_response(teardown.teardown(&task_id, q.force, q.promote).await)
 }
 
 /// `POST /status/:agent_id` — receive a statusLine payload and emit a console update.
@@ -337,15 +434,19 @@ async fn status_handler(
 /// Start the hook bridge server. Binds to an ephemeral port on loopback,
 /// spawns the axum serve loop on the Tauri (tokio) runtime, and returns the
 /// chosen port.
-pub async fn start_hook_server(sink: Arc<dyn StatusSink>) -> std::io::Result<u16> {
+pub async fn start_hook_server(
+    sink: Arc<dyn StatusSink>,
+    teardown: Arc<dyn TaskTeardown>,
+) -> std::io::Result<u16> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
 
     let app: Router = Router::new()
         .route("/hook/{agent_id}", post(hook_handler))
         .route("/status/{agent_id}", post(status_handler))
-        .route("/rename/{agent_id}", post(rename_handler))
-        .with_state(sink);
+        .route("/rename/{task_id}", post(rename_handler))
+        .route("/finish/{task_id}", post(finish_handler))
+        .with_state(HookState { sink, teardown });
 
     tauri::async_runtime::spawn(async move {
         let _ = axum::serve(listener, app).await;
@@ -402,7 +503,7 @@ mod tests {
 
     #[test]
     fn claude_subagent_start_and_stop_map_to_background_events() {
-        // AC2-85: background-subagent lifecycle drives the in-flight counter so the
+        // TASK-85: background-subagent lifecycle drives the in-flight counter so the
         // pill stays active while a backgrounded subagent runs past the main Stop.
         assert_eq!(claude_event("SubagentStart", None), Some(StatusEvent::SubagentStarted));
         assert_eq!(claude_event("SubagentStop", None), Some(StatusEvent::SubagentStopped));
@@ -422,15 +523,23 @@ mod tests {
         consoles: Mutex<Vec<(String, ConsoleStatus)>>,
         renames: Mutex<Vec<(String, String)>>,
         transcripts: Mutex<Vec<(String, String)>>,
+        /// What `set_task_name` returns — models "task found" (true) vs an unknown
+        /// task_id (false → the handler 404s). Defaults to true via `new`.
+        rename_result: bool,
     }
 
     impl CollectingSink {
         fn new() -> Arc<Self> {
+            Self::with_rename_result(true)
+        }
+
+        fn with_rename_result(rename_result: bool) -> Arc<Self> {
             Arc::new(Self {
                 events: Mutex::new(Vec::new()),
                 consoles: Mutex::new(Vec::new()),
                 renames: Mutex::new(Vec::new()),
                 transcripts: Mutex::new(Vec::new()),
+                rename_result,
             })
         }
 
@@ -460,8 +569,9 @@ mod tests {
             self.consoles.lock().unwrap().push((agent_id.to_string(), console));
         }
 
-        fn set_task_name(&self, agent_id: &str, name: &str) {
-            self.renames.lock().unwrap().push((agent_id.to_string(), name.to_string()));
+        fn set_task_name(&self, task_id: &str, name: &str) -> bool {
+            self.renames.lock().unwrap().push((task_id.to_string(), name.to_string()));
+            self.rename_result
         }
 
         fn set_transcript(&self, agent_id: &str, transcript_path: &str) {
@@ -473,8 +583,89 @@ mod tests {
         Router::new()
             .route("/hook/{agent_id}", post(hook_handler))
             .route("/status/{agent_id}", post(status_handler))
-            .route("/rename/{agent_id}", post(rename_handler))
-            .with_state(sink)
+            .route("/rename/{task_id}", post(rename_handler))
+            .with_state(HookState { sink, teardown: Arc::new(NoopTeardown) })
+    }
+
+    // ── Collecting teardown double ────────────────────────────────────────────
+    struct CollectingTeardown {
+        calls: Mutex<Vec<(String, bool)>>,
+        outcome: TeardownOutcome,
+    }
+    impl CollectingTeardown {
+        fn new(outcome: TeardownOutcome) -> Arc<Self> {
+            Arc::new(Self { calls: Mutex::new(Vec::new()), outcome })
+        }
+        fn calls(&self) -> Vec<(String, bool)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+    impl TaskTeardown for CollectingTeardown {
+        fn teardown<'a>(&'a self, task_id: &'a str, force: bool, _promote: bool) -> TeardownFuture<'a> {
+            self.calls.lock().unwrap().push((task_id.to_string(), force));
+            let outcome = self.outcome.clone();
+            Box::pin(async move { Ok(outcome) })
+        }
+    }
+
+    // No-op teardown for routers that only exercise the existing routes.
+    struct NoopTeardown;
+    impl TaskTeardown for NoopTeardown {
+        fn teardown<'a>(&'a self, _task_id: &'a str, _force: bool, _promote: bool) -> TeardownFuture<'a> {
+            Box::pin(async { Ok(TeardownOutcome::UnknownTask) })
+        }
+    }
+
+    fn make_router_with_teardown(teardown: Arc<dyn TaskTeardown>) -> Router {
+        let sink: Arc<dyn StatusSink> = CollectingSink::new();
+        Router::new()
+            .route("/finish/{task_id}", post(finish_handler))
+            .with_state(HookState { sink, teardown })
+    }
+
+    #[tokio::test]
+    async fn finish_done_returns_200_and_records_call() {
+        let td = CollectingTeardown::new(TeardownOutcome::Done);
+        let router = make_router_with_teardown(td.clone());
+        let (status, _body) = post_hook_status(&router, "/finish/task-9", "").await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(td.calls(), vec![("task-9".to_string(), false)]);
+    }
+
+    #[tokio::test]
+    async fn finish_force_query_passes_force_true() {
+        let td = CollectingTeardown::new(TeardownOutcome::Done);
+        let router = make_router_with_teardown(td.clone());
+        let (status, _) = post_hook_status(&router, "/finish/task-9?force=true", "").await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(td.calls(), vec![("task-9".to_string(), true)]);
+    }
+
+    #[tokio::test]
+    async fn finish_unknown_task_returns_404() {
+        let td = CollectingTeardown::new(TeardownOutcome::UnknownTask);
+        let router = make_router_with_teardown(td);
+        let (status, _) = post_hook_status(&router, "/finish/nope", "").await;
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn finish_unsafe_returns_409_with_reason() {
+        let td = CollectingTeardown::new(TeardownOutcome::Unsafe("dirty tree".to_string()));
+        let router = make_router_with_teardown(td);
+        let (status, body) = post_hook_status(&router, "/finish/task-9", "").await;
+        assert_eq!(status, axum::http::StatusCode::CONFLICT);
+        assert_eq!(body, "dirty tree");
+    }
+
+    #[test]
+    fn finish_response_maps_outcomes() {
+        use axum::http::StatusCode;
+        assert_eq!(finish_response(Ok(TeardownOutcome::Done)).0, StatusCode::OK);
+        assert_eq!(finish_response(Ok(TeardownOutcome::UnknownTask)).0, StatusCode::NOT_FOUND);
+        let (code, body) = finish_response(Ok(TeardownOutcome::Unsafe("r".into())));
+        assert_eq!((code, body), (StatusCode::CONFLICT, "r".to_string()));
+        assert_eq!(finish_response(Err("boom".into())).0, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     async fn post_hook_status(router: &Router, path: &str, body: &str) -> (axum::http::StatusCode, String) {
@@ -516,7 +707,7 @@ mod tests {
 
     #[tokio::test]
     async fn pretooluse_records_working() {
-        // AC2-47: PreToolUse (the resume-after-approval event) is now delivered as Working.
+        // TASK-47: PreToolUse (the resume-after-approval event) is now delivered as Working.
         let sink = CollectingSink::new();
         let router = make_router(Arc::clone(&sink) as Arc<dyn StatusSink>);
         let body = r#"{"hook_event_name":"PreToolUse","permission_mode":"default"}"#;
@@ -605,19 +796,30 @@ mod tests {
     async fn rename_valid_name_records_and_echoes_sanitized() {
         let sink = CollectingSink::new();
         let router = make_router(Arc::clone(&sink) as Arc<dyn StatusSink>);
-        let (status, body) = post_hook_status(&router, "/rename/agent-7", "  New title \n").await;
+        let (status, body) = post_hook_status(&router, "/rename/task-7", "  New title \n").await;
         assert_eq!(status, axum::http::StatusCode::OK);
         assert_eq!(body, "New title");
-        assert_eq!(sink.collected_renames(), vec![("agent-7".to_string(), "New title".to_string())]);
+        assert_eq!(sink.collected_renames(), vec![("task-7".to_string(), "New title".to_string())]);
     }
 
     #[tokio::test]
     async fn rename_blank_name_is_rejected_and_records_nothing() {
         let sink = CollectingSink::new();
         let router = make_router(Arc::clone(&sink) as Arc<dyn StatusSink>);
-        let (status, _body) = post_hook_status(&router, "/rename/agent-7", "   \n  ").await;
+        let (status, _body) = post_hook_status(&router, "/rename/task-7", "   \n  ").await;
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         assert!(sink.collected_renames().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rename_unknown_task_returns_404() {
+        // TASK-151 Defect B: an unknown task_id must 404, mirroring `/finish`, so a
+        // 200 genuinely means "renamed" (not a silent no-op that echoes the name).
+        let sink = CollectingSink::with_rename_result(false);
+        let router = make_router(Arc::clone(&sink) as Arc<dyn StatusSink>);
+        let (status, body) = post_hook_status(&router, "/rename/nope", "New title").await;
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(body, "unknown task");
     }
 
     #[tokio::test]

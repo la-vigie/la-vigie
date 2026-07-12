@@ -10,7 +10,7 @@ export interface SoundSettings {
   /**
    * When true, suppress notification *sounds* while the user is in a meeting
    * (mic/camera capturing anywhere on the system). Off by default. Visual OS
-   * notifications still fire — this mutes sound only. macOS-only (AC2-105).
+   * notifications still fire — this mutes sound only. macOS-only (TASK-105).
    */
   automute: boolean;
   events: Record<SoundEvent, EventSetting>;

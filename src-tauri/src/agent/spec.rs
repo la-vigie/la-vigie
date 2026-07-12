@@ -1,4 +1,4 @@
-//! Pluggable agent definitions (AC2-21): the data describing how to launch a
+//! Pluggable agent definitions (TASK-21): the data describing how to launch a
 //! coding agent in a worktree, the code-defined built-in presets, the pure
 //! launch-command builder, and the pure registry resolver.
 //!
@@ -13,7 +13,7 @@
 use serde::{Deserialize, Serialize};
 
 /// How an agent receives its initial prompt at launch. Forward-looking: no
-/// spawn path uses this yet (tracked as AC2-49); it is carried on the spec so
+/// spawn path uses this yet (tracked as TASK-49); it is carried on the spec so
 /// definitions are complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,7 +53,13 @@ pub struct AgentSpec {
     pub resume_args: Vec<String>,
     /// Raw extra args, appended last (power-user escape hatch).
     pub extra_args: Vec<String>,
-    /// How an initial prompt is delivered (forward-looking; see AC2-49).
+    /// Flag(s) that enable the agent's auto-approve/skip-confirmation mode,
+    /// appended after `base_args` (before `resume_args`) only when the resolved
+    /// per-task/per-repo setting is on. Empty ⇒ the agent has no auto-approve
+    /// concept, so the setting is a no-op for it. (TASK-135)
+    #[serde(default)]
+    pub auto_approve_args: Vec<String>,
+    /// How an initial prompt is delivered (forward-looking; see TASK-49).
     pub prompt_mode: PromptMode,
     /// How status is reported.
     pub status: StatusMechanism,
@@ -83,6 +89,7 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
             base_args: vec![],
             resume_args: vec!["--continue".into()],
             extra_args: vec![],
+            auto_approve_args: vec![],
             prompt_mode: PromptMode::Arg,
             status: StatusMechanism::ClaudeHooks,
             model_arg: None,
@@ -96,6 +103,7 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
             base_args: vec![],
             resume_args: vec![],
             extra_args: vec![],
+            auto_approve_args: vec![],
             prompt_mode: PromptMode::Arg,
             status: StatusMechanism::Lifecycle,
             model_arg: None,
@@ -109,6 +117,7 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
             base_args: vec![],
             resume_args: vec![],
             extra_args: vec![],
+            auto_approve_args: vec![],
             prompt_mode: PromptMode::Arg,
             status: StatusMechanism::Lifecycle,
             model_arg: None,
@@ -122,6 +131,7 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
             base_args: vec![],
             resume_args: vec![],
             extra_args: vec![],
+            auto_approve_args: vec![],
             prompt_mode: PromptMode::Arg,
             status: StatusMechanism::Lifecycle,
             model_arg: None,
@@ -135,6 +145,7 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
             base_args: vec![],
             resume_args: vec![],
             extra_args: vec![],
+            auto_approve_args: vec![],
             prompt_mode: PromptMode::Arg,
             status: StatusMechanism::Lifecycle,
             model_arg: None,
@@ -148,6 +159,7 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
             base_args: vec![],
             resume_args: vec![],
             extra_args: vec![],
+            auto_approve_args: vec![],
             prompt_mode: PromptMode::Arg,
             status: StatusMechanism::Lifecycle,
             model_arg: Some("--model".into()),
@@ -161,6 +173,7 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
             base_args: vec!["--trust".into()],
             resume_args: vec!["--continue".into()],
             extra_args: vec![],
+            auto_approve_args: vec!["--auto-approve".into()],
             prompt_mode: PromptMode::Arg,
             status: StatusMechanism::Lifecycle,
             model_arg: None,
@@ -172,30 +185,46 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
 
 /// Build the `(binary, args)` to launch `spec`.
 ///
-/// Arg order: `base_args`, then `resume_args` when `resume` and they are
-/// non-empty, then (for `ClaudeHooks` specs) `--mcp-config <mcp_config>` when
-/// provided followed by `--settings <hook_settings>` when provided — `--mcp-config`
-/// is variadic and must precede the single-value `--settings` so it never sits
-/// last before the positional prompt the caller appends — then model args when
-/// `spec.model_arg` is `Some(flag)` and `model` is `Some(m)` (non-empty),
-/// then `extra_args`. The binary is returned unresolved; the caller resolves
-/// it via the binary resolver at spawn time. `hook_settings` and `mcp_config` are
-/// the inline JSON from `crate::agent::build_hook_settings` and
-/// `crate::agent::build_mcp_config` respectively; both are ignored for `Lifecycle`
-/// specs.
+/// Arg order: `base_args`, then `auto_approve_args` when `auto_approve`, then
+/// `resume_args` when `resume` and they are non-empty, then (for `ClaudeHooks`
+/// specs) `--plugin-dir <plugin_dir>` when provided, followed by
+/// `--mcp-config <mcp_config>` when provided, followed by `--settings
+/// <hook_settings>` when provided — `--plugin-dir` takes a single path so it is
+/// safe ahead of the variadic `--mcp-config`, and `--mcp-config` in turn must
+/// precede the single-value `--settings` so it never sits last before the
+/// positional prompt the caller appends — then model args when `spec.model_arg`
+/// is `Some(flag)` and `model` is `Some(m)` (non-empty), then `extra_args`. The
+/// binary is returned unresolved; the caller resolves it via the binary resolver
+/// at spawn time. `hook_settings` and `mcp_config` are the inline JSON from
+/// `crate::agent::build_hook_settings` and `crate::agent::build_mcp_config`
+/// respectively; `plugin_dir` is the resolved La Vigie skill plugin path
+/// (TASK-153); all three are ignored for `Lifecycle` specs.
 pub fn build_agent_command(
     spec: &AgentSpec,
     resume: bool,
     hook_settings: Option<&str>,
     mcp_config: Option<&str>,
     model: Option<&str>,
+    plugin_dir: Option<&str>,
+    auto_approve: bool,
 ) -> (String, Vec<String>) {
     let mut args: Vec<String> = Vec::new();
     args.extend(spec.base_args.iter().cloned());
+    if auto_approve {
+        args.extend(spec.auto_approve_args.iter().cloned());
+    }
     if resume && !spec.resume_args.is_empty() {
         args.extend(spec.resume_args.iter().cloned());
     }
     if spec.status == StatusMechanism::ClaudeHooks {
+        // Additive La Vigie skill plugin (TASK-153). `--plugin-dir` takes a single
+        // path, so it is safe before the variadic `--mcp-config`. Kept ahead of
+        // both, so the single-value `--settings` remains the last option before
+        // the positional prompt (appended later by start_agent).
+        if let Some(dir) = plugin_dir {
+            args.push("--plugin-dir".to_string());
+            args.push(dir.to_string());
+        }
         // `--mcp-config` is variadic in the claude CLI: it greedily consumes
         // following non-option tokens. It must therefore NOT be the last option
         // before the positional prompt (appended later by start_agent), or the
@@ -273,6 +302,14 @@ pub fn resolve_for_task(
         .expect("DEFAULT_AGENT must be a built-in")
 }
 
+/// The effective auto-approve setting for a session, using the precedence
+/// task override → repo default → global default. The global default is `true`,
+/// preserving the historical always-on behavior for agents that support
+/// auto-approve (an agent with empty `auto_approve_args` ignores it). (TASK-135)
+pub fn effective_auto_approve(task: Option<bool>, repo: Option<bool>) -> bool {
+    task.or(repo).unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +380,7 @@ mod tests {
             base_args: vec![],
             resume_args: vec![],
             extra_args: vec![],
+            auto_approve_args: vec![],
             prompt_mode: PromptMode::None,
             status: StatusMechanism::Lifecycle,
             model_arg: None,
@@ -354,7 +392,7 @@ mod tests {
     #[test]
     fn claude_command_injects_settings_and_continue_on_resume() {
         let claude = builtin_specs().into_iter().find(|s| s.name == "claude").unwrap();
-        let (bin, args) = build_agent_command(&claude, true, Some("{\"hooks\":{}}"), None, None);
+        let (bin, args) = build_agent_command(&claude, true, Some("{\"hooks\":{}}"), None, None, None, true);
         assert_eq!(bin, "claude");
         assert_eq!(args, vec!["--continue", "--settings", "{\"hooks\":{}}"]);
     }
@@ -362,7 +400,7 @@ mod tests {
     #[test]
     fn claude_command_without_resume_has_settings_only() {
         let claude = builtin_specs().into_iter().find(|s| s.name == "claude").unwrap();
-        let (_bin, args) = build_agent_command(&claude, false, Some("{\"hooks\":{}}"), None, None);
+        let (_bin, args) = build_agent_command(&claude, false, Some("{\"hooks\":{}}"), None, None, None, false);
         assert_eq!(args, vec!["--settings", "{\"hooks\":{}}"]);
     }
 
@@ -371,7 +409,7 @@ mod tests {
         let mut spec = lifecycle_spec("aider");
         spec.base_args = vec!["--no-auto-commit".into()];
         // resume=true but resume_args empty ⇒ nothing added; hook_settings ignored for lifecycle.
-        let (bin, args) = build_agent_command(&spec, true, Some("{\"hooks\":{}}"), None, None);
+        let (bin, args) = build_agent_command(&spec, true, Some("{\"hooks\":{}}"), None, None, None, true);
         assert_eq!(bin, "aider");
         assert_eq!(args, vec!["--no-auto-commit"]);
     }
@@ -381,7 +419,7 @@ mod tests {
         let mut spec = lifecycle_spec("custom");
         spec.base_args = vec!["--base".into()];
         spec.extra_args = vec!["--model".into(), "gpt-4o".into()];
-        let (_bin, args) = build_agent_command(&spec, false, None, None, None);
+        let (_bin, args) = build_agent_command(&spec, false, None, None, None, None, false);
         assert_eq!(args, vec!["--base", "--model", "gpt-4o"]);
     }
 
@@ -451,7 +489,7 @@ mod tests {
     #[test]
     fn opencode_command_appends_model_when_selected() {
         let oc = builtin_specs().into_iter().find(|s| s.name == "opencode").unwrap();
-        let (bin, args) = build_agent_command(&oc, false, None, None, Some("zhipuai-coding-plan/glm-5.2"));
+        let (bin, args) = build_agent_command(&oc, false, None, None, Some("zhipuai-coding-plan/glm-5.2"), None, false);
         assert_eq!(bin, "opencode");
         assert_eq!(args, vec!["--model", "zhipuai-coding-plan/glm-5.2"]);
     }
@@ -460,22 +498,22 @@ mod tests {
     fn model_ignored_when_spec_has_no_model_arg() {
         let claude = builtin_specs().into_iter().find(|s| s.name == "claude").unwrap();
         // model passed but claude has model_arg=None ⇒ ignored.
-        let (_b, args) = build_agent_command(&claude, false, Some("{\"hooks\":{}}"), None, Some("opus"));
+        let (_b, args) = build_agent_command(&claude, false, Some("{\"hooks\":{}}"), None, Some("opus"), None, false);
         assert_eq!(args, vec!["--settings", "{\"hooks\":{}}"]);
     }
 
     #[test]
     fn empty_or_absent_model_adds_nothing() {
         let oc = builtin_specs().into_iter().find(|s| s.name == "opencode").unwrap();
-        assert_eq!(build_agent_command(&oc, false, None, None, None).1, Vec::<String>::new());
-        assert_eq!(build_agent_command(&oc, false, None, None, Some("   ")).1, Vec::<String>::new());
+        assert_eq!(build_agent_command(&oc, false, None, None, None, None, true).1, Vec::<String>::new());
+        assert_eq!(build_agent_command(&oc, false, None, None, Some("   "), None, true).1, Vec::<String>::new());
     }
 
     #[test]
     fn build_agent_command_appends_mcp_config_for_claude() {
         let spec = resolve_agent("claude", &[]).unwrap();
         let (_program, args) =
-            build_agent_command(&spec, false, Some("{hooks}"), Some("{mcp}"), None);
+            build_agent_command(&spec, false, Some("{hooks}"), Some("{mcp}"), None, None, false);
         let i = args.iter().position(|a| a == "--mcp-config").expect("has --mcp-config");
         assert_eq!(args[i + 1], "{mcp}");
     }
@@ -483,7 +521,7 @@ mod tests {
     #[test]
     fn build_agent_command_omits_mcp_config_when_none() {
         let spec = resolve_agent("claude", &[]).unwrap();
-        let (_program, args) = build_agent_command(&spec, false, Some("{hooks}"), None, None);
+        let (_program, args) = build_agent_command(&spec, false, Some("{hooks}"), None, None, None, false);
         assert!(!args.iter().any(|a| a == "--mcp-config"));
     }
 
@@ -495,9 +533,83 @@ mod tests {
         // single-value `--settings` last by emitting `--mcp-config` first.
         let spec = resolve_agent("claude", &[]).unwrap();
         let (_program, args) =
-            build_agent_command(&spec, false, Some("{hooks}"), Some("{mcp}"), None);
+            build_agent_command(&spec, false, Some("{hooks}"), Some("{mcp}"), None, None, false);
         let mcp_i = args.iter().position(|a| a == "--mcp-config").expect("has --mcp-config");
         let settings_i = args.iter().position(|a| a == "--settings").expect("has --settings");
         assert!(mcp_i < settings_i, "--mcp-config must precede --settings; args: {args:?}");
+    }
+
+    #[test]
+    fn mistral_spec_splits_trust_and_auto_approve() {
+        let mistral = resolve_agent("mistral", &[]).unwrap();
+        assert!(mistral.base_args.contains(&"--trust".to_string()), "Mistral keeps --trust in base_args");
+        assert!(!mistral.base_args.contains(&"--auto-approve".to_string()), "--auto-approve moved out of base_args");
+        assert_eq!(mistral.auto_approve_args, vec!["--auto-approve".to_string()]);
+    }
+
+    #[test]
+    fn build_agent_command_appends_auto_approve_when_enabled() {
+        let mistral = resolve_agent("mistral", &[]).unwrap();
+        let (_prog, args) = build_agent_command(&mistral, false, None, None, None, None, true);
+        assert!(args.contains(&"--trust".to_string()));
+        assert!(args.contains(&"--auto-approve".to_string()));
+    }
+
+    #[test]
+    fn build_agent_command_omits_auto_approve_when_disabled() {
+        let mistral = resolve_agent("mistral", &[]).unwrap();
+        let (_prog, args) = build_agent_command(&mistral, false, None, None, None, None, false);
+        assert!(args.contains(&"--trust".to_string()));
+        assert!(!args.contains(&"--auto-approve".to_string()));
+    }
+
+    #[test]
+    fn build_agent_command_auto_approve_precedes_resume() {
+        let mistral = resolve_agent("mistral", &[]).unwrap();
+        let (_prog, args) = build_agent_command(&mistral, true, None, None, None, None, true);
+        assert_eq!(args, vec!["--trust", "--auto-approve", "--continue"]);
+    }
+
+    #[test]
+    fn build_agent_command_no_auto_approve_flag_for_agent_without_any() {
+        let claude = resolve_agent("claude", &[]).unwrap();
+        let (_p1, on) = build_agent_command(&claude, false, None, None, None, None, true);
+        let (_p2, off) = build_agent_command(&claude, false, None, None, None, None, false);
+        assert_eq!(on, off, "claude has no auto_approve_args, so the flag is a no-op");
+        assert!(!on.contains(&"--auto-approve".to_string()));
+    }
+
+    #[test]
+    fn effective_auto_approve_precedence() {
+        assert!(effective_auto_approve(Some(true), Some(false)));   // task wins
+        assert!(!effective_auto_approve(Some(false), Some(true)));  // task wins
+        assert!(effective_auto_approve(None, Some(true)));          // repo used
+        assert!(!effective_auto_approve(None, Some(false)));        // repo used
+        assert!(effective_auto_approve(None, None));                // default true
+    }
+
+    #[test]
+    fn plugin_dir_injected_before_mcp_config_for_claude() {
+        let spec = builtin_specs().into_iter().find(|s| s.name == "claude").unwrap();
+        let (_prog, args) = build_agent_command(
+            &spec,
+            false,
+            Some("{\"settings\":1}"),
+            Some("{\"mcp\":1}"),
+            None,
+            Some("/tmp/lavigie-plugin"),
+            false,
+        );
+        let pd = args.iter().position(|a| a == "--plugin-dir").expect("--plugin-dir present");
+        assert_eq!(args[pd + 1], "/tmp/lavigie-plugin");
+        let mcp = args.iter().position(|a| a == "--mcp-config").unwrap();
+        assert!(pd < mcp, "--plugin-dir must precede --mcp-config");
+    }
+
+    #[test]
+    fn plugin_dir_absent_when_none() {
+        let spec = builtin_specs().into_iter().find(|s| s.name == "claude").unwrap();
+        let (_prog, args) = build_agent_command(&spec, false, None, None, None, None, false);
+        assert!(!args.iter().any(|a| a == "--plugin-dir"));
     }
 }

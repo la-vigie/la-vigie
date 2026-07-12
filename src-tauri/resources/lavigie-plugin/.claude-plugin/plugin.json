@@ -1,0 +1,5 @@
+{
+  "name": "lavigie",
+  "description": "La Vigie's default way-of-working skills: rename the current task, finish/tear down, spec-init, verify-claims, and await-merge.",
+  "version": "0.1.0"
+}

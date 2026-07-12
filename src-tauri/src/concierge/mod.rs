@@ -1,4 +1,4 @@
-//! Concierge session primitive (AC2-112): a worktree-less, singleton Claude
+//! Concierge session primitive (TASK-112): a worktree-less, singleton Claude
 //! session for the mobile concierge. This module holds the pure policy core
 //! (sentinel id, idle predicate, idle-victim collection) plus glue
 //! (token minting, spawn, activity tracking, reaper, desktop listing) added in
@@ -133,7 +133,7 @@ pub fn ensure_concierge(state: &AppState) -> Result<(), String> {
         .map_err(|e| format!("{e:#}"))?
         .insert(agent_id.clone(), CONCIERGE_SENTINEL.to_string());
 
-    // 6. Spawn in the neutral cwd; hand the agent its HookBridge coords (AC2-40
+    // 6. Spawn in the neutral cwd; hand the agent its HookBridge coords (TASK-40
     //    parity); register with NO frontend channel (drained to a sink).
     let agent_env: [(&str, String); 2] = [
         ("LAVIGIE_HOOK_PORT", state.hook_port.to_string()),

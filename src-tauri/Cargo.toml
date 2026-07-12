@@ -5,8 +5,8 @@ description = "Local desktop app to manage parallel AI coding agents and their g
 authors = ["evermax"]
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/evermax/la-vigie"
-homepage = "https://github.com/evermax/la-vigie"
+repository = "https://github.com/la-vigie/la-vigie"
+homepage = "https://github.com/la-vigie/la-vigie"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -32,10 +32,10 @@ uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = ["process", "rt", "macros", "rt-multi-thread", "net"] }
 portable-pty = "0.9"
 base64 = "0.22"
-axum = "0.8"
+axum = { version = "0.8", features = ["macros"] }
 tauri-plugin-notification = "2.3.3"
 # Holds a macOS IOPMAssertion (PreventUserIdleSystemSleep) via Drop-based release;
-# keeps the host reachable over the tailnet while remote control is enabled (AC2-104).
+# keeps the host reachable over the tailnet while remote control is enabled (TASK-104).
 keepawake = "0.6"
 
 [dev-dependencies]

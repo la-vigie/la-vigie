@@ -1,0 +1,122 @@
+# CI unit-test gate (TASK-150). The plain pass/fail unit-test signal for the repo:
+# runs the Rust and frontend test + build commands on every PR to `main` and emits
+# a single `review-gate-tests` commit status (success ⇔ both suites green) that
+# MERGE_POLICY.md / branch protection can require for auto-merge. This is the
+# prerequisite the Watch Report names for trusting the machine to record test
+# results instead of humans hand-transcribing counts.
+#
+# It sits BENEATH the advisory mutation tier (mutation-advisory.yml, TASK-143):
+# this gate blocks; mutation stays advisory on top. It mirrors the status-check
+# shape of pr-review.yml's `review-gate-mistral` (a distinct `context` string,
+# posted on the PR head SHA) so branch protection can require it by name.
+#
+# "New build warning" ⇒ failure: the Rust steps run with `RUSTFLAGS=-D warnings`.
+# cargo applies `--cap-lints allow` to registry/git dependencies, so `-D warnings`
+# denies warnings only in this workspace's own crate — exactly the warning-free bar
+# CLAUDE.md already mandates. `tsc` (inside `npm run build`) already fails on type
+# errors, so the frontend build is its own typecheck gate.
+name: tests
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# Least privilege: read the code, write a commit status. No PR-content
+# interpolation into any shell (the status description is our own text).
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  rust:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    # Deny warnings in our own crate; capped lints keep dependency warnings from
+    # tripping this. Applies to both `cargo build` and `cargo test` below.
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri v2 build deps — the src-tauri crate links against them to compile.
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev patchelf \
+            libayatana-appindicator3-dev libsoup-3.0-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: cargo build (warning-free)
+        working-directory: src-tauri
+        run: cargo build
+
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test
+
+  frontend:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # `npm run build` = `tsc && vite build`; tsc fails the build on any type
+      # error, so this doubles as the frontend typecheck gate.
+      - name: npm run build (typecheck + build)
+        run: npm run build
+
+      - name: vitest
+        run: npx vitest run
+
+  # Single gate: collapse the two job results into one `review-gate-tests` commit
+  # status so MERGE_POLICY.md has one stable check name to require, decoupled from
+  # the job names above. Runs even when a test job fails (`if: always()`) so the
+  # status always reflects the real outcome.
+  gate:
+    needs: [rust, frontend]
+    if: always() && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      RUST_RESULT: ${{ needs.rust.result }}
+      FRONTEND_RESULT: ${{ needs.frontend.result }}
+    steps:
+      - name: Compute verdict
+        id: verdict
+        run: |
+          if [ "$RUST_RESULT" = "success" ] && [ "$FRONTEND_RESULT" = "success" ]; then
+            state=success
+            desc="cargo test + vitest + builds green"
+          else
+            state=failure
+            desc="rust: $RUST_RESULT, frontend: $FRONTEND_RESULT"
+          fi
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+          echo "description=$desc" >> "$GITHUB_OUTPUT"
+
+      # Post the commit status. Guard on same-repo: a fork PR runs with a read-only
+      # token and cannot write statuses (mirrors pr-review.yml). Forks go to
+      # human-merge regardless, so skipping the status there is harmless.
+      - name: Post review-gate-tests status
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          gh api "repos/$REPO/statuses/$HEAD_SHA" \
+            -f state="${{ steps.verdict.outputs.state }}" \
+            -f context="review-gate-tests" \
+            -f description="${{ steps.verdict.outputs.description }}" \
+            -f target_url="$GITHUB_SERVER_URL/$REPO/actions/runs/$GITHUB_RUN_ID"

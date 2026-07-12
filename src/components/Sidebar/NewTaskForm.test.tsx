@@ -8,13 +8,15 @@ import * as agentHooks from "../../hooks/useAgents";
 
 vi.mock("../../hooks/useAgents");
 
-const { createTaskMock } = vi.hoisted(() => ({
+const { createTaskMock, checkWorktreePathMock } = vi.hoisted(() => ({
   createTaskMock: vi.fn(),
+  checkWorktreePathMock: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({}));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("../../api", () => ({
   createTask: createTaskMock,
+  checkWorktreePath: checkWorktreePathMock,
   addRepo: vi.fn(),
 }));
 
@@ -22,6 +24,9 @@ vi.mock("../../api", () => ({
 beforeEach(() => {
   (agentHooks.useAgents as ReturnType<typeof vi.fn>).mockReturnValue({ agents: [], loading: false, error: null });
   (agentHooks.useAgentModels as ReturnType<typeof vi.fn>).mockReturnValue({ models: [], loading: false });
+  // The worktree-path check runs on a debounce as inputs change; default it to
+  // "vacant" (no warning) so existing tests are unaffected.
+  checkWorktreePathMock.mockResolvedValue({ state: "vacant", path: "", message: null });
 });
 
 const repo = (over: Partial<Repo> = {}): Repo => ({
@@ -123,6 +128,166 @@ describe("NewTaskForm auto-launch", () => {
   });
 });
 
+describe("NewTaskForm skip repo prompt (TASK-160)", () => {
+  const skipLabel = "Skip the repository prompt for this task";
+  const seedSpies = () => {
+    const startSpy = vi.fn();
+    useVigieStore.setState({
+      startAgentSession: startSpy,
+      refresh: vi.fn(),
+      setSelectedTask: vi.fn(),
+    });
+    return startSpy;
+  };
+
+  it("hides the skip toggle when the repo has no initialPrompt", () => {
+    seedSpies();
+    render(<NewTaskForm repo={repo({ initialPrompt: null })} onClose={vi.fn()} />);
+    expect(screen.queryByLabelText(skipLabel)).toBeNull();
+  });
+
+  it("hides the skip toggle when the repo's initialPrompt is only whitespace", () => {
+    seedSpies();
+    render(<NewTaskForm repo={repo({ initialPrompt: "   " })} onClose={vi.fn()} />);
+    expect(screen.queryByLabelText(skipLabel)).toBeNull();
+  });
+
+  it("shows the skip toggle when the repo has a non-empty initialPrompt", () => {
+    seedSpies();
+    render(<NewTaskForm repo={repo({ initialPrompt: "repo ctx" })} onClose={vi.fn()} />);
+    expect(screen.getByLabelText(skipLabel)).toBeTruthy();
+  });
+
+  it("launches with only the task prompt when the skip toggle is ticked", async () => {
+    createTaskMock.mockResolvedValue({ id: "task-skip" });
+    const startSpy = seedSpies();
+    render(
+      <NewTaskForm
+        repo={repo({ autoStartAgent: true, initialPrompt: "repo ctx" })}
+        onClose={vi.fn()}
+      />,
+    );
+    await userEvent.type(screen.getByLabelText("Task title"), "build X");
+    await userEvent.type(screen.getByLabelText("Initial prompt"), "task text");
+    await userEvent.click(screen.getByLabelText(skipLabel));
+    await userEvent.click(screen.getByRole("button", { name: "Create task" }));
+    await waitFor(() =>
+      expect(startSpy).toHaveBeenCalledWith("task-skip", false, undefined, "task text"),
+    );
+  });
+
+  it("launches a bare agent when skip is ticked and the task prompt is empty", async () => {
+    createTaskMock.mockResolvedValue({ id: "task-bare" });
+    const startSpy = seedSpies();
+    render(
+      <NewTaskForm
+        repo={repo({ autoStartAgent: true, initialPrompt: "repo ctx" })}
+        onClose={vi.fn()}
+      />,
+    );
+    await userEvent.type(screen.getByLabelText("Task title"), "build X");
+    await userEvent.click(screen.getByLabelText(skipLabel));
+    await userEvent.click(screen.getByRole("button", { name: "Create task" }));
+    await waitFor(() =>
+      expect(startSpy).toHaveBeenCalledWith("task-bare", false, undefined, undefined),
+    );
+  });
+
+  it("keeps prepending the repo prompt when the skip toggle is left off (default)", async () => {
+    createTaskMock.mockResolvedValue({ id: "task-noskip" });
+    const startSpy = seedSpies();
+    render(
+      <NewTaskForm
+        repo={repo({ autoStartAgent: true, initialPrompt: "repo ctx" })}
+        onClose={vi.fn()}
+      />,
+    );
+    await userEvent.type(screen.getByLabelText("Task title"), "build X");
+    await userEvent.type(screen.getByLabelText("Initial prompt"), "task text");
+    await userEvent.click(screen.getByRole("button", { name: "Create task" }));
+    await waitFor(() =>
+      expect(startSpy).toHaveBeenCalledWith(
+        "task-noskip",
+        false,
+        undefined,
+        "repo ctx\n\ntask text",
+      ),
+    );
+  });
+});
+
+describe("NewTaskForm worktree-path warning (TASK-125)", () => {
+  beforeEach(() => {
+    useVigieStore.setState({ refresh: vi.fn(), setSelectedTask: vi.fn(), startAgentSession: vi.fn() });
+  });
+
+  it("shows an adopt notice when the derived worktree path already exists", async () => {
+    checkWorktreePathMock.mockResolvedValue({
+      state: "adopt",
+      path: "/wt/r1/build-x",
+      message: "A worktree already exists at /wt/r1/build-x — it will be reused.",
+    });
+    render(<NewTaskForm repo={repo()} onClose={vi.fn()} />);
+    await userEvent.type(screen.getByLabelText("Task title"), "build X");
+    await waitFor(() =>
+      expect(screen.getByText(/it will be reused/i)).toBeTruthy(),
+    );
+    // The check is keyed on the current repo + trimmed inputs.
+    expect(checkWorktreePathMock).toHaveBeenCalledWith("r1", "build X", undefined, undefined);
+  });
+
+  it("shows a conflict warning when the path is occupied by a mismatch", async () => {
+    checkWorktreePathMock.mockResolvedValue({
+      state: "conflict",
+      path: "/wt/r1/build-y",
+      message: "a directory already exists at /wt/r1/build-y but is not a git worktree",
+    });
+    render(<NewTaskForm repo={repo()} onClose={vi.fn()} />);
+    await userEvent.type(screen.getByLabelText("Task title"), "build Y");
+    await waitFor(() =>
+      expect(screen.getByText(/is not a git worktree/i)).toBeTruthy(),
+    );
+  });
+
+  it("shows a reclaim notice for a leftover/orphaned worktree", async () => {
+    checkWorktreePathMock.mockResolvedValue({
+      state: "reclaim",
+      path: "/wt/r1/testing",
+      message: "a leftover worktree already exists at /wt/r1/testing — it will be cleaned up and recreated",
+    });
+    render(<NewTaskForm repo={repo()} onClose={vi.fn()} />);
+    await userEvent.type(screen.getByLabelText("Task title"), "Testing");
+    await waitFor(() =>
+      expect(screen.getByText(/cleaned up and recreated/i)).toBeTruthy(),
+    );
+    // Reclaim is benign (auto-resolves), so it is NOT styled as a conflict.
+    expect(
+      screen.getByRole("status").className.includes("new-task-form__worktree-warning--conflict"),
+    ).toBe(false);
+  });
+
+  it("shows a reuse-branch notice when the branch already exists", async () => {
+    checkWorktreePathMock.mockResolvedValue({
+      state: "reuse-branch",
+      path: "/wt/r1/testing",
+      message: "Branch testing already exists — its commits will be reused.",
+    });
+    render(<NewTaskForm repo={repo()} onClose={vi.fn()} />);
+    await userEvent.type(screen.getByLabelText("Task title"), "Testing");
+    await waitFor(() =>
+      expect(screen.getByText(/its commits will be reused/i)).toBeTruthy(),
+    );
+  });
+
+  it("shows nothing when the path is vacant", async () => {
+    checkWorktreePathMock.mockResolvedValue({ state: "vacant", path: "/wt/r1/z", message: null });
+    render(<NewTaskForm repo={repo()} onClose={vi.fn()} />);
+    await userEvent.type(screen.getByLabelText("Task title"), "build Z");
+    await waitFor(() => expect(checkWorktreePathMock).toHaveBeenCalled());
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+});
+
 describe("NewTaskForm prompt library picker", () => {
   it("closes the Library dropdown after selecting a prompt (a wrapping <label> must not re-toggle it)", async () => {
     useVigieStore.setState({
@@ -155,7 +320,7 @@ describe("NewTaskForm prompt library picker", () => {
   });
 });
 
-describe("NewTaskForm agent picker (AC2-21)", () => {
+describe("NewTaskForm agent picker (TASK-21)", () => {
   const agentFixtures: AgentSpec[] = [
     {
       name: "claude",
@@ -228,6 +393,7 @@ describe("NewTaskForm agent picker (AC2-21)", () => {
         undefined,
         undefined,
         "antigravity",
+        null,
         null,
       ),
     );

@@ -75,7 +75,7 @@ describe("useVigieStore", () => {
     expect(useVigieStore.getState().tasks).toEqual([sampleTask]);
   });
 
-  describe("removeRepo (AC2-69)", () => {
+  describe("removeRepo (TASK-69)", () => {
     const repo2: Repo = { ...sampleRepo, id: "repo-2", name: "other" };
     const task2: Task = { ...sampleTask, id: "task-2", repoId: "repo-2" };
 
@@ -185,7 +185,7 @@ describe("useVigieStore", () => {
     expect(session?.activity).toBeUndefined();
   });
 
-  describe("attention cue (AC2-33)", () => {
+  describe("attention cue (TASK-33)", () => {
     beforeEach(() => {
       useVigieStore.setState({ attentionByTask: {} });
       useVigieStore.getState().startAgentSession("task-1", false);
@@ -241,7 +241,7 @@ describe("useVigieStore", () => {
     });
   });
 
-  describe("sidebar collapse + width (AC2-17)", () => {
+  describe("sidebar collapse + width (TASK-17)", () => {
     beforeEach(() => {
       localStorage.clear();
       // Reset sidebar slice to defaults (override any module-load state)
@@ -272,11 +272,11 @@ describe("useVigieStore", () => {
 
   });
 
-  // AC2-53: exercise the module-load initializer directly (the tests above
+  // TASK-53: exercise the module-load initializer directly (the tests above
   // only cover the setter). Set localStorage, reset the module registry, then
   // re-import the store so its initial-state factory re-runs against the
   // freshly stored values.
-  describe("sidebar init from localStorage at module load (AC2-53)", () => {
+  describe("sidebar init from localStorage at module load (TASK-53)", () => {
     beforeEach(() => {
       localStorage.clear();
       vi.resetModules();

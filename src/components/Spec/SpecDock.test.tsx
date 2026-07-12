@@ -56,16 +56,16 @@ describe("SpecDock", () => {
   });
 
   it("renders the markdown of the single resolved doc", async () => {
-    listMock.mockResolvedValue([{ id: "memory/spec_AC2-54.md", label: "Spec (AC2-54)" }]);
+    listMock.mockResolvedValue([{ id: "memory/spec_TASK-54.md", label: "Spec (TASK-54)" }]);
     readMock.mockResolvedValue("# Spec body");
     render(<SpecDock taskId="t1" />);
     expect(await screen.findByTestId("markdown")).toHaveTextContent("# Spec body");
-    expect(readMock).toHaveBeenCalledWith("t1", "memory/spec_AC2-54.md");
+    expect(readMock).toHaveBeenCalledWith("t1", "memory/spec_TASK-54.md");
   });
 
   it("offers a picker and switches docs when multiple are present", async () => {
     listMock.mockResolvedValue([
-      { id: "memory/spec_AC2-54.md", label: "Spec (AC2-54)" },
+      { id: "memory/spec_TASK-54.md", label: "Spec (TASK-54)" },
       { id: "docs/superpowers/plans/p.md", label: "Plan: p.md" },
     ]);
     readMock.mockImplementation((_t, id) =>

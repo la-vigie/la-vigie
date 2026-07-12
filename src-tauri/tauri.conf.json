@@ -40,10 +40,13 @@
     "active": true,
     "publisher": "evermax",
     "copyright": "Copyright © 2026 evermax",
-    "homepage": "https://github.com/evermax/la-vigie",
+    "homepage": "https://github.com/la-vigie/la-vigie",
     "license": "MIT",
     "category": "DeveloperTool",
     "targets": "all",
+    "resources": [
+      "resources/lavigie-plugin"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

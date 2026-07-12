@@ -1,4 +1,4 @@
-//! Tauri command glue for the pluggable agent runtime (AC2-21): listing agents,
+//! Tauri command glue for the pluggable agent runtime (TASK-21): listing agents,
 //! custom-agent CRUD, and per-task / per-repo agent selection. Thin glue over
 //! the store and the pure registry in `agent::spec`; not unit-tested (needs a
 //! running app), per project convention.
@@ -69,6 +69,19 @@ pub fn set_task_model(
     let model = model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
     let store = state.store.lock().map_err(|e| e.to_string())?;
     store.set_task_model(&task_id, model.as_deref()).map_err(|e| format!("{e:#}"))
+}
+
+/// Set (or clear) a task's auto-approve override. `None` ⇒ inherit the repo. (TASK-135)
+#[tauri::command]
+pub fn set_task_auto_approve(
+    state: State<'_, AppState>,
+    task_id: String,
+    auto_approve: Option<bool>,
+) -> Result<(), String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store
+        .set_task_auto_approve(&task_id, auto_approve)
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// Enumerate the models the named agent advertises (empty when it advertises

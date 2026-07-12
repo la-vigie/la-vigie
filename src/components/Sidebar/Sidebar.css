@@ -278,6 +278,23 @@
   color: var(--red);
 }
 
+/* TASK-125: inline notice when the derived worktree path already exists. Benign
+   outcomes (reuse-branch / adopt / reclaim) read as info (accent); only a
+   blocking conflict is styled as a warning (red). */
+.new-task-form__worktree-warning {
+  margin: 2px 0 0;
+  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  border-radius: 6px;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.new-task-form__worktree-warning--conflict {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
 .sidebar__add-repo-error {
   margin: 0 12px 8px;
   font-size: 12px;
@@ -760,6 +777,43 @@
   height: 16px;
   accent-color: var(--accent);
   cursor: pointer;
+}
+.new-task-form__info {
+  position: relative;
+  margin-left: 5px;
+  color: var(--text-muted);
+  cursor: help;
+  font-size: 12px;
+}
+/* Native `title` tooltips are suppressed in the macOS webview; render our own. */
+.new-task-form__info::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 7px);
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: 230px;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-pop);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: normal;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+  z-index: 20;
+}
+.new-task-form__info:hover::after,
+.new-task-form__info:focus-visible::after {
+  opacity: 1;
 }
 .new-task-modal__footer {
   display: flex;

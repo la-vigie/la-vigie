@@ -55,7 +55,7 @@ export function useAgentStatus() {
           const repo = task ? state.repos.find((r) => r.id === task.repoId) : undefined;
           const override = parseRepoOverride(repo?.soundSettings);
 
-          // Automute (AC2-105): only pay the native meeting probe when automute
+          // Automute (TASK-105): only pay the native meeting probe when automute
           // is actually enabled for this repo/app (off by default → no cost).
           const automuteOn = override.automute ?? state.soundSettings.automute;
           let inMeeting = false;

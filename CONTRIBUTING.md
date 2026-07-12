@@ -37,6 +37,11 @@ Please keep `cargo build` and test output warning-free.
 - `git/` — `git` CLI wrapper (worktree add/remove, diff vs base, status, stage, commit, branch delete).
 - `agent/` — spawns an agent process in a worktree via a PTY, streams output over a Tauri channel,
   and handles write/resize/stop. Holds the live PTY registry in app state.
+- `lavigie_plugin.rs` — resolves La Vigie's bundled skill *plugin* (`src-tauri/resources/lavigie-plugin/`:
+  a Claude Code plugin, `.claude-plugin/plugin.json` + `skills/<name>/SKILL.md`, shipped as a Tauri
+  resource) and injects it into launched `claude` agents via `--plugin-dir` when the Settings toggle is
+  on (gated in `build_agent_command`). *Extend it:* add a skill by dropping a `skills/<name>/SKILL.md`
+  into that directory.
 - `hooks/` — a loopback HTTP server (ephemeral port) that receives agent hook callbacks and emits
   `agent_status` Tauri events.
 - `github/` — `gh` CLI wrapper: PR status/comments/create/merge; pure JSON parsers unit-tested
@@ -73,6 +78,17 @@ Please keep `cargo build` and test output warning-free.
   faking it.
 - **Frontend**: Vitest with `invoke`/`Channel`/`@xterm/xterm`/plugins mocked. Assert real behavior
   (decoded bytes, DOM-node identity for keep-alive, command args), not mock construction.
+
+## Keeping docs current (the doc-scan skill)
+
+This repo ships a repo-local skill, `.claude/skills/scan-for-doc-change/`, that the `/ship` flow
+runs automatically: when a branch adds user-facing surface — a new Tauri/IPC command, MCP tool,
+HookBridge route, setting, agent engine, or UI feature — it emits an advisory and a drafted doc
+entry so the change doesn't ship undocumented. It's advisory; it never blocks a merge, and it stays
+silent for internal-only diffs (refactors, tests, CI).
+
+*Extend it:* the detection heuristics and doc targets all live in that one `SKILL.md`. Teach it a
+new user-facing surface kind, or a new doc target, by editing that file.
 
 ## Pull requests
 

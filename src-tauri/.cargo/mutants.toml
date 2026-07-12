@@ -1,0 +1,58 @@
+# cargo-mutants — Rust pure-function core scope (TASK-143).
+#
+# examine_globs is an ALLOWLIST: only these files are mutated. It is the Rust
+# pure-function core our testing doctrine already targets — parsers, helpers,
+# migrations, and decision/mapping fns. The thin Tauri/`gh`/`git`/PTY glue we
+# deliberately don't unit-test (git/mod.rs, hooks/mod.rs, setup/mod.rs,
+# commands.rs, *_commands.rs, the MCP/remote servers, etc.) is left out so the
+# score reflects real test strength, not unkillable glue mutants.
+# See docs/mutation-testing.md for the full rationale + advisory→gating rollout.
+#
+# Run (full baseline):      cd src-tauri && cargo mutants --in-place
+# Run (changed lines only):  cd src-tauri && git diff --relative origin/main...HEAD -- src > /tmp/pr.diff && cargo mutants --in-diff /tmp/pr.diff
+#   (--relative so the diff's paths are crate-relative `src/…`, which --in-diff matches)
+examine_globs = [
+    "src/github/mod.rs",     # PR JSON parsers (parse_pr_status, parse_comments, normalize_check)
+    "src/agent/status.rs",   # agent-status state machine / mapping
+    "src/agent/spec.rs",     # agent spec parsing
+    "src/agent/models.rs",   # agent model helpers
+    "src/remote/auth.rs",    # token auth comparison
+    "src/remote/tailscale.rs", # tailscale-output parsing (CLI-invoking wrappers excluded below)
+    "src/claude_path.rs",    # PATH split (pure); filesystem probes excluded below
+    "src/shell_env.rs",      # login-shell env parsing (shell-spawning fns excluded below)
+    "src/docs.rs",           # docs helpers
+    "src/session/mod.rs",    # session helpers
+    "src/sound/mod.rs",      # sound resolution decision fns
+    "src/store/mod.rs",      # SQLite migrations, slugify, pure CRUD (tested against in-memory DB)
+]
+# NOTE: src/meeting/mod.rs is deliberately NOT listed — it is a native macOS
+# CoreAudio/AVFoundation camera/mic probe (FFI to real hardware), untestable
+# headlessly. It's glue, same category as the TASK-105 automute probe.
+
+# Skip glue functions that live inside otherwise-pure allowlisted files: async
+# `gh`/`tailscale` CLI wrappers, login-shell spawners, and filesystem probes are
+# integration glue we don't unit-test, so their mutants survive and would
+# depress the pure-core score. Word-anchored (\b…\b) so e.g. `pr_status` does
+# NOT also match the pure `parse_pr_status` parser we DO want mutated.
+exclude_re = [
+    # github/mod.rs — async gh CLI wrappers
+    '\bgh_status\b',
+    '\bpr_status\b',
+    '\bpr_comments\b',
+    '\bcreate_pr\b',
+    '\bmerge_pr\b',
+    '\brun_gh\b',
+    # remote/tailscale.rs — functions that shell out to the `tailscale` CLI
+    '\bfind_tailscale\b',
+    '\bmagic_dns_name\b',
+    '\bserve_start\b',
+    '\bserve_reset\b',
+    '\bserve_funnel_active\b',
+    'tailscale\.rs.*\brun\b',
+    # shell_env.rs — spawns a login shell / mutates process env
+    '\bcapture_login_env\b',
+    '\bhydrate\b',
+    # claude_path.rs — filesystem probes (pure split_path stays in scope)
+    '\bfind_binary\b',
+    '\bis_executable_file\b',
+]

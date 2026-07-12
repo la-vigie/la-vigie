@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { TaskDetail } from "./TaskDetail";
@@ -6,19 +6,21 @@ import { useVigieStore } from "../../store";
 import type { Task, VigieState } from "../../store";
 import { AGENT_TAB } from "../../store";
 import * as agentHooks from "../../hooks/useAgents";
+import * as api from "../../api";
 
 vi.mock("../../hooks/useAgents");
 
-const { invokeMock, stopSession, listAgentsMock, setTaskAgentMock, setTaskModelMock } = vi.hoisted(() => {
+const { invokeMock, stopSession, listAgentsMock, setTaskAgentMock, setTaskModelMock, setTaskAutoApproveMock } = vi.hoisted(() => {
   const invokeMock = vi.fn();
   // stopSession delegates to invokeMock so existing assertions on invokeMock("stop_session")
   // continue to work after the api module is mocked at the component boundary.
   const stopSession = vi.fn((sessionId: string) => invokeMock("stop_session", { sessionId }));
-  // listAgents, setTaskAgent, setTaskModel default to safe values so existing tests don't throw.
+  // listAgents, setTaskAgent, setTaskModel, setTaskAutoApprove default to safe values so existing tests don't throw.
   const listAgentsMock = vi.fn().mockResolvedValue([]);
   const setTaskAgentMock = vi.fn().mockResolvedValue(undefined);
   const setTaskModelMock = vi.fn().mockResolvedValue(undefined);
-  return { invokeMock, stopSession, listAgentsMock, setTaskAgentMock, setTaskModelMock };
+  const setTaskAutoApproveMock = vi.fn().mockResolvedValue(undefined);
+  return { invokeMock, stopSession, listAgentsMock, setTaskAgentMock, setTaskModelMock, setTaskAutoApproveMock };
 });
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -28,10 +30,17 @@ vi.mock("@tauri-apps/api/core", () => ({
   },
 }));
 
-// Replace stopSession/listAgents/setTaskAgent/setTaskModel with spies so TaskDetail.tsx calls them instead of the real api.
+// Replace stopSession/listAgents/setTaskAgent/setTaskModel/setTaskAutoApprove with spies so TaskDetail.tsx calls them instead of the real api.
 vi.mock("../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api")>();
-  return { ...actual, stopSession, listAgents: listAgentsMock, setTaskAgent: setTaskAgentMock, setTaskModel: setTaskModelMock };
+  return {
+    ...actual,
+    stopSession,
+    listAgents: listAgentsMock,
+    setTaskAgent: setTaskAgentMock,
+    setTaskModel: setTaskModelMock,
+    setTaskAutoApprove: setTaskAutoApproveMock,
+  };
 });
 
 // Default safe hook mocks — overridden per-describe where needed.
@@ -154,6 +163,26 @@ describe("TaskDetail", () => {
     expect(screen.getByText("Start agent")).toBeInTheDocument();
     expect(screen.getByText("Resume")).toBeInTheDocument();
     expect(screen.queryByText("Stop")).not.toBeInTheDocument();
+  });
+
+  it("sets the task auto-approve override", async () => {
+    const setTaskAutoApprove = vi.mocked(api.setTaskAutoApprove);
+    setTaskAutoApprove.mockResolvedValue();
+    // The onChange handler chains .then(refresh); refresh() calls list_state via
+    // invoke, so give it a valid snapshot shape (avoids an unhandled rejection
+    // from destructuring an undefined snapshot).
+    invokeMock.mockResolvedValue({ repos: [], tasks: [] });
+    useVigieStore.setState({ tasks: [task], selectedTaskId: "task-1" });
+
+    render(<TaskDetail />);
+
+    fireEvent.change(screen.getByLabelText("Auto-approve for this task"), {
+      target: { value: "off" },
+    });
+
+    await waitFor(() =>
+      expect(setTaskAutoApprove).toHaveBeenCalledWith(expect.any(String), false),
+    );
   });
 
   it("shows Start agent and Resume when the agent session has exited", () => {
@@ -494,7 +523,7 @@ describe("TaskDetail", () => {
   });
 });
 
-describe("TaskDetail — ticket key display (AC2-16)", () => {
+describe("TaskDetail — ticket key display (TASK-16)", () => {
   beforeEach(() => {
     invokeMock.mockReset();
     localStorage.clear();
@@ -527,7 +556,7 @@ describe("TaskDetail — ticket key display (AC2-16)", () => {
   });
 });
 
-describe("TaskDetail — resizable terminal/diff split (AC2-17)", () => {
+describe("TaskDetail — resizable terminal/diff split (TASK-17)", () => {
   beforeEach(() => {
     invokeMock.mockReset();
     localStorage.clear();
@@ -743,7 +772,7 @@ describe("TaskDetail — Finish flow", () => {
   });
 });
 
-describe("TaskDetail — tab strip (AC2-24)", () => {
+describe("TaskDetail — tab strip (TASK-24)", () => {
   beforeEach(() => {
     invokeMock.mockReset();
     stopSession.mockReset();
@@ -1013,7 +1042,7 @@ describe("TaskDetail — Finish stops ALL sessions (Fix: shell PTY leak)", () =>
   });
 });
 
-describe("TaskDetail — agent picker (AC2-21)", () => {
+describe("TaskDetail — agent picker (TASK-21)", () => {
   const agentFixtures = [
     { name: "claude", displayName: "Claude Code", binary: "claude", baseArgs: [], resumeArgs: ["--continue"], extraArgs: [], promptMode: "arg", status: "claudeHooks", builtin: true, modelsListArgs: null },
     { name: "aider", displayName: "Aider", binary: "aider", baseArgs: [], resumeArgs: [], extraArgs: [], promptMode: "arg", status: "lifecycle", builtin: true, modelsListArgs: null },
@@ -1075,7 +1104,7 @@ describe("TaskDetail — agent picker (AC2-21)", () => {
     });
   });
 
-  it("shows persisted model on picker trigger when task has model and no user override (AC2-93 regression)", async () => {
+  it("shows persisted model on picker trigger when task has model and no user override (TASK-93 regression)", async () => {
     // Task with a persisted model
     const taskWithModel: Task = {
       ...task,
@@ -1096,7 +1125,7 @@ describe("TaskDetail — agent picker (AC2-21)", () => {
   });
 });
 
-describe("TaskDetail — diff controls relocated (AC2-24 Task 5)", () => {
+describe("TaskDetail — diff controls relocated (TASK-24 Task 5)", () => {
   beforeEach(() => {
     invokeMock.mockReset();
     localStorage.clear();
@@ -1122,5 +1151,52 @@ describe("TaskDetail — diff controls relocated (AC2-24 Task 5)", () => {
     const rail = screen.getByRole("button", { name: /show changes/i });
     await userEvent.click(rail);
     expect(screen.getByRole("button", { name: /diff options/i })).toBeInTheDocument();
+  });
+});
+
+describe("TaskDetail — queued placeholder for pending tasks (TASK-90)", () => {
+  const pendingTask: Task = {
+    ...task,
+    status: "pending",
+    worktreePath: "",
+    branch: "",
+  };
+
+  beforeEach(() => {
+    invokeMock.mockReset();
+    localStorage.clear();
+    useVigieStore.setState({
+      repos: [],
+      tasks: [pendingTask],
+      selectedTaskId: "task-1",
+      sessionsByTask: {},
+      activeTabByTask: {},
+    });
+  });
+
+  it("shows a queued placeholder for a pending task and no start controls", () => {
+    render(<TaskDetail />);
+
+    // Scope to the placeholder itself — StatusBanner also has role="status",
+    // so assert on the dedicated queued-placeholder node, not by role alone.
+    const placeholder = document.querySelector(".task-detail__queued");
+    expect(placeholder).toBeInTheDocument();
+    expect(placeholder).toHaveTextContent(/queued/i);
+
+    // No agent Start/Resume controls, and no Finish/Open PR header actions,
+    // for a queued task (it has no worktree/agent/PR yet).
+    expect(screen.queryByRole("button", { name: /start/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /resume/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /finish task/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /open pr/i })).toBeNull();
+  });
+
+  it("keeps the TerminalHost mounted for a pending task (KEEP-ALIVE)", () => {
+    render(<TaskDetail />);
+
+    // TerminalHost host node must still be present (identity invariant) —
+    // a queued task must never cause TerminalHost to unmount.
+    expect(screen.getByTestId("terminal-host")).toBeInTheDocument();
+    expect(document.querySelector(".terminal-pane__body")).toBeInTheDocument();
   });
 });

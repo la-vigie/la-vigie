@@ -199,7 +199,7 @@ export function TerminalView({ taskId, localId, kind, hidden }: TerminalViewProp
       // xterm freezes its renderer while the container is display:none, so on a
       // plain session switch (same size) fit() is a no-op and the viewport stays
       // stale/blank until an interaction forces a refresh. Repaint the visible
-      // rows explicitly so the output shows immediately (AC2-84).
+      // rows explicitly so the output shows immediately (TASK-84).
       term?.refresh(0, term.rows - 1);
       term?.focus();
     });

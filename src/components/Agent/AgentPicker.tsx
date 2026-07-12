@@ -32,7 +32,7 @@ interface AgentPickerProps {
  * prevents a React dev-mode warning about a controlled `<select>` with no
  * matching option.
  *
- * CSS classes (kept stable for AC2-76 styling):
+ * CSS classes (kept stable for TASK-76 styling):
  *   .agent-picker            — root <label>
  *   .agent-picker__label     — label span
  *   .agent-picker__select    — the <select> element

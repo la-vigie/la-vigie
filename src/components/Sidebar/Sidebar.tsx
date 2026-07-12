@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { addRepo, createTask } from "../../api";
+import { addRepo, createTask, checkWorktreePath, type WorktreePreview } from "../../api";
 import { useVigieStore } from "../../store";
 import type { Repo } from "../../store";
 import { taskName } from "../../lib/taskName";
@@ -30,14 +30,21 @@ export function NewTaskForm({ repo, onClose }: NewTaskFormProps) {
   const [ticketId, setTicketId] = useState("");
   const [baseBranch, setBaseBranch] = useState("");
   const [taskPrompt, setTaskPrompt] = useState("");
+  // TASK-160: launch-time-only opt-out of the repo-level prompt for this task.
+  // Only meaningful when the repo actually has a non-empty initialPrompt.
+  const [skipRepoPrompt, setSkipRepoPrompt] = useState(false);
+  const hasRepoPrompt = (repo.initialPrompt ?? "").trim().length > 0;
   // Per-task launch toggle; defaults from the repo's auto-start setting and can
   // be overridden per task. This (not the repo setting directly) gates launch.
   const [startImmediately, setStartImmediately] = useState(repo.autoStartAgent ?? false);
   const [agentName, setAgentName] = useState(repo.defaultAgent ?? "claude");
   const [modelName, setModelName] = useState<string | null>(repo.defaultModel ?? null);
+  const [autoApprove, setAutoApprove] = useState<boolean | null>(null);
   const { agents } = useAgents();
   const [phase, setPhase] = useState<"form" | "running">("form");
   const [error, setError] = useState<string | null>(null);
+  // TASK-125: warn when the derived worktree path already exists on disk.
+  const [worktreePreview, setWorktreePreview] = useState<WorktreePreview | null>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -46,6 +53,33 @@ export function NewTaskForm({ repo, onClose }: NewTaskFormProps) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  // Debounced worktree-path check (TASK-125): as the title/ticket/base change,
+  // ask the backend whether the derived worktree path already exists. Only a
+  // non-vacant preview (adopt/conflict) is surfaced; a stale in-flight request
+  // is discarded via the `cancelled` guard.
+  useEffect(() => {
+    const t = title.trim();
+    const tk = ticketId.trim();
+    if (!t && !tk) {
+      setWorktreePreview(null);
+      return;
+    }
+    let cancelled = false;
+    const handle = setTimeout(() => {
+      checkWorktreePath(repo.id, t, baseBranch.trim() || undefined, tk || undefined)
+        .then((preview) => {
+          if (!cancelled) setWorktreePreview(preview.state === "vacant" ? null : preview);
+        })
+        .catch(() => {
+          if (!cancelled) setWorktreePreview(null);
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [title, ticketId, baseBranch, repo.id]);
 
   const selectedAgent = agents.find((a) => a.name === agentName);
 
@@ -75,6 +109,7 @@ export function NewTaskForm({ repo, onClose }: NewTaskFormProps) {
         ticketId.trim() || undefined,
         agentName,
         modelName,
+        autoApprove,
       );
       await refresh();
       setSelectedTask(task.id);
@@ -85,7 +120,7 @@ export function NewTaskForm({ repo, onClose }: NewTaskFormProps) {
           selectedAgent
             ? { label: selectedAgent.displayName, lifecycle: selectedAgent.status === "lifecycle" }
             : undefined,
-          combineInitialPrompts(repo.initialPrompt, taskPrompt),
+          combineInitialPrompts(skipRepoPrompt ? null : repo.initialPrompt, taskPrompt),
         );
       }
       onClose();
@@ -187,6 +222,15 @@ export function NewTaskForm({ repo, onClose }: NewTaskFormProps) {
               />
             </label>
 
+            {worktreePreview && (
+              <p
+                className={`new-task-form__worktree-warning new-task-form__worktree-warning--${worktreePreview.state}`}
+                role="status"
+              >
+                {worktreePreview.message}
+              </p>
+            )}
+
             {/* Not a <label>: it contains the PromptPicker button, and a label
                 forwards clicks to its first labelable descendant (that button),
                 re-opening the dropdown after every selection. The textarea keeps
@@ -209,6 +253,35 @@ export function NewTaskForm({ repo, onClose }: NewTaskFormProps) {
               />
             </div>
 
+            {hasRepoPrompt && (
+              <label className="new-task-form__checkbox">
+                <input
+                  type="checkbox"
+                  checked={skipRepoPrompt}
+                  onChange={(e) => setSkipRepoPrompt(e.target.checked)}
+                  aria-label="Skip the repository prompt for this task"
+                />
+                <span>
+                  Skip the repository prompt for this task
+                  {/* Native `title` tooltips don't render in the macOS webview,
+                      so the hint is a CSS ::after driven by data-tooltip, shown
+                      on hover and keyboard focus. */}
+                  <span
+                    className="new-task-form__info"
+                    tabIndex={0}
+                    role="img"
+                    aria-label="Otherwise the repository prompt is prepended to the prompt above."
+                    data-tooltip="Otherwise the repository prompt is prepended to the prompt above."
+                    // The icon lives inside the <label>; without this a click on
+                    // it would activate the label and toggle the checkbox.
+                    onClick={(e) => e.preventDefault()}
+                  >
+                    ⓘ
+                  </span>
+                </span>
+              </label>
+            )}
+
             <div className="new-task-form__group">
               <AgentModelPicker
                 agent={agentName}
@@ -216,6 +289,24 @@ export function NewTaskForm({ repo, onClose }: NewTaskFormProps) {
                 onChange={(a, m) => { setAgentName(a); setModelName(m); }}
               />
             </div>
+
+            <label className="new-task-form__group">
+              <span className="new-task-form__label">Auto-approve</span>
+              <select
+                className="field"
+                aria-label="Auto-approve for new task"
+                value={autoApprove == null ? "inherit" : autoApprove ? "on" : "off"}
+                onChange={(e) =>
+                  setAutoApprove(
+                    e.target.value === "inherit" ? null : e.target.value === "on",
+                  )
+                }
+              >
+                <option value="inherit">Inherit from repo</option>
+                <option value="on">On</option>
+                <option value="off">Off</option>
+              </select>
+            </label>
 
             <label className="new-task-form__checkbox">
               <input

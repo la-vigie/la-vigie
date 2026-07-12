@@ -1,4 +1,4 @@
-//! Agent-session core (AC2-108/AC2-111): parse Claude Code's JSONL transcript
+//! Agent-session core (TASK-108/TASK-111): parse Claude Code's JSONL transcript
 //! into chat-shaped messages, frame a reply for the PTY, resolve a task to its
 //! live agent, and provide the shared `read_session` service consumed by both
 //! the remote HTTP handler and the MCP `get_task_activity` tool. Glue (handlers,
@@ -7,7 +7,7 @@
 use serde::Serialize;
 
 /// A chat-shaped item distilled from one transcript content block. Kept loose on
-/// purpose — the real mobile UI lands with AC2-107. Serialized camelCase; `None`
+/// purpose — the real mobile UI lands with TASK-107. Serialized camelCase; `None`
 /// fields are omitted.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -121,7 +121,7 @@ pub struct SessionRead {
     pub cursor: usize,
 }
 
-/// Shared task-session read service (AC2-111): resolve a task's captured
+/// Shared task-session read service (TASK-111): resolve a task's captured
 /// transcript path, read it, and parse from byte offset `since`. Consumed by
 /// the remote HTTP `GET /api/tasks/:id/session` handler AND the MCP
 /// `get_task_activity` tool. An absent transcript (no hook yet) is NOT an

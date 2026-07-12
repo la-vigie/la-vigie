@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
-import { removeRepo as apiRemoveRepo, deleteTask as apiDeleteTask, stopSession, setSoundSettings as apiSetSoundSettings, setFetchRemoteBase as apiSetFetchRemoteBase, listCustomSounds, enableRemote, disableRemote, remoteStatus, setTaskHidden, type RemoteStatus, listPrompts, createPrompt, updatePrompt, deletePrompt, reorderPrompts, type Prompt } from "../api";
+import { removeRepo as apiRemoveRepo, deleteTask as apiDeleteTask, stopSession, setSoundSettings as apiSetSoundSettings, setFetchRemoteBase as apiSetFetchRemoteBase, setInjectLavigieSkills as apiSetInjectLavigieSkills, listCustomSounds, enableRemote, disableRemote, remoteStatus, setTaskHidden, type RemoteStatus, listPrompts, createPrompt, updatePrompt, deletePrompt, reorderPrompts, type Prompt } from "../api";
 import { DEFAULT_SOUND_SETTINGS, type SoundSettings, type CustomSound } from "../sound/types";
 import { parseSoundSettings } from "../sound/safe-parse";
 
@@ -9,7 +9,8 @@ export type TaskStatus =
   | "working"
   | "needs_attention"
   | "done"
-  | "error";
+  | "error"
+  | "pending";
 
 export type SetupStatus = "running" | "succeeded" | "failed";
 
@@ -27,6 +28,7 @@ export interface Repo {
   defaultModel?: string | null;
   soundSettings?: string | null;
   fetchRemoteBase?: boolean | null;
+  autoApprove?: boolean | null;
 }
 
 export interface Task {
@@ -45,7 +47,9 @@ export interface Task {
   agent?: string | null;
   model?: string | null;
   setupStatus?: SetupStatus | null;
+  pendingPrompt?: string | null;
   hidden?: boolean;
+  autoApprove?: boolean | null;
 }
 
 export type PromptMode = "stdin" | "arg" | "none";
@@ -57,6 +61,7 @@ export interface AgentSpec {
   binary: string;
   baseArgs: readonly string[];
   resumeArgs: readonly string[];
+  autoApproveArgs?: readonly string[];
   extraArgs: readonly string[];
   promptMode: PromptMode;
   status: StatusMechanism;
@@ -71,6 +76,7 @@ interface AppSnapshot {
   worktreesRoot: string;
   soundSettings?: string | null;
   fetchRemoteBase?: boolean | null;
+  injectLavigieSkills?: boolean | null;
 }
 
 export type AgentStatus = "starting" | "running" | "exited";
@@ -127,14 +133,16 @@ export interface VigieState {
   openSettings: () => void;
   closeSettings: () => void;
   fetchRemoteBase: boolean;
+  injectLavigieSkills: boolean;
   remote: RemoteStatus;
   toggleTheme: () => void;
   setSoundSettings: (next: SoundSettings) => Promise<void>;
   setFetchRemoteBase: (enabled: boolean) => Promise<void>;
+  setInjectLavigieSkills: (enabled: boolean) => Promise<void>;
   setSelectedTask: (id: string | null) => void;
   setRepos: (repos: Repo[]) => void;
   setTasks: (tasks: Task[]) => void;
-  /** Patch one task's title in place (AC2-40 agent-driven rename), leaving all
+  /** Patch one task's title in place (TASK-40 agent-driven rename), leaving all
    *  other task state untouched. */
   setTaskTitle: (taskId: string, title: string) => void;
   refresh: () => Promise<void>;
@@ -143,6 +151,11 @@ export interface VigieState {
    *  the removed tasks, then refreshes. */
   removeRepo: (repoId: string) => Promise<void>;
   deleteTask: (taskId: string, deleteBranch: boolean) => Promise<void>;
+  /** Handle a backend-emitted `task_removed` event (TASK-139): the backend
+   *  already deleted the DB row (e.g. self-teardown via `/finish/{agentId}`),
+   *  so this only reproduces the local half of `deleteTask` — clear per-task
+   *  state, deselect if selected, and refresh. */
+  handleTaskRemoved: (taskId: string) => Promise<void>;
   hideTask: (taskId: string) => Promise<void>;
   reopenTask: (taskId: string) => Promise<void>;
   startAgentSession: (taskId: string, resume: boolean, agent?: { label: string; lifecycle: boolean }, initialPrompt?: string) => void;
@@ -192,6 +205,7 @@ export const useVigieStore = create<VigieState>((set, get) => ({
   prompts: [],
   settingsOpen: false,
   fetchRemoteBase: true,
+  injectLavigieSkills: false,
   remote: { active: false, sleepInhibited: false },
   toggleTheme: () =>
     set((state) => {
@@ -232,6 +246,7 @@ export const useVigieStore = create<VigieState>((set, get) => ({
           }
         : DEFAULT_SOUND_SETTINGS,
       fetchRemoteBase: snapshot.fetchRemoteBase ?? true,
+      injectLavigieSkills: snapshot.injectLavigieSkills ?? false,
     });
     await get().refreshCustomSounds();
     await get().refreshPrompts();
@@ -258,6 +273,12 @@ export const useVigieStore = create<VigieState>((set, get) => ({
     );
     clearTaskSessions(taskId);
     await apiDeleteTask(taskId, deleteBranch);
+    if (selectedTaskId === taskId) set({ selectedTaskId: null });
+    await refresh();
+  },
+  handleTaskRemoved: async (taskId: string) => {
+    const { selectedTaskId, clearTaskSessions, refresh } = get();
+    clearTaskSessions(taskId);
     if (selectedTaskId === taskId) set({ selectedTaskId: null });
     await refresh();
   },
@@ -453,6 +474,14 @@ export const useVigieStore = create<VigieState>((set, get) => ({
       await apiSetFetchRemoteBase(enabled);
     } catch (err) {
       console.error("Failed to persist fetch-remote-base setting", err);
+    }
+  },
+  setInjectLavigieSkills: async (enabled) => {
+    set({ injectLavigieSkills: enabled });
+    try {
+      await apiSetInjectLavigieSkills(enabled);
+    } catch (err) {
+      console.error("Failed to persist inject-lavigie-skills setting", err);
     }
   },
   setSidebarCollapsed: (collapsed) => {

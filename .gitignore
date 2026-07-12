@@ -28,3 +28,9 @@ dist-ssr
 
 # Agent memory store (per-task spec/decision logs; canonical specs live in docs/superpowers/)
 memory/
+
+# Mutation testing outputs (TASK-143)
+src-tauri/mutants.out/
+src-tauri/mutants.out.old/
+reports/mutation/
+.stryker-tmp/

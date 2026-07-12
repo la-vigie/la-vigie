@@ -23,14 +23,14 @@ pub enum AgentRunState {
 /// Cross-provider status event. A per-provider adapter maps its own mechanism
 /// (Claude hooks, process liveness, future Antigravity/Codex signals) onto this
 /// vocabulary; `apply_event` is the single place that turns events into states.
-/// `SubagentStarted`/`SubagentStopped` track in-flight *background* work (AC2-85):
+/// `SubagentStarted`/`SubagentStopped` track in-flight *background* work (TASK-85):
 /// they adjust a per-agent counter rather than the main run-state, so the pill
 /// stays active while a backgrounded subagent runs past the main loop's `Stop`.
 ///
 /// This gate works for subagents only because the signal is *balanced*: the
 /// `SubagentStart` increment is matched by a `SubagentStop` decrement, both real
 /// Claude hooks. Background **shell** commands (`run_in_background` Bash) are
-/// deliberately *not* gated here (AC2-101): they have an increment-side signal
+/// deliberately *not* gated here (TASK-101): they have an increment-side signal
 /// (`PreToolUse`/`PostToolUse`, fired at dispatch) but **no Claude hook fires when
 /// the detached command later finishes**, so there is nothing to decrement against.
 /// Gating on the increment alone would pin the pill on `Working` forever; a
@@ -90,7 +90,7 @@ pub fn transition(current: AgentRunState, event: StatusEvent) -> AgentRunState {
 }
 
 /// Derive the *displayed* run-state from the main run-state and the count of
-/// in-flight background subagents (AC2-85). While background work is in flight,
+/// in-flight background subagents (TASK-85). While background work is in flight,
 /// an otherwise-`Idle`/`Running` main loop reads `Working`; `NeedsAttention`,
 /// `Error`, `Working`, `Starting`, and `Exited` always win over the gate (an
 /// actionable or terminal state must not be masked by background activity).
@@ -183,7 +183,7 @@ mod tests {
     fn apply_event_emits_on_real_transition() {
         let mut states = HashMap::new();
         apply_event(&mut states, "a1", StatusEvent::NeedsAttention);
-        // AC2-47: a Working event after NeedsAttention is a real change → emitted.
+        // TASK-47: a Working event after NeedsAttention is a real change → emitted.
         assert_eq!(apply_event(&mut states, "a1", StatusEvent::Working), Some(AgentRunState::Working));
     }
 
@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn needs_attention_to_working_is_reachable() {
-        // AC2-47: after a permission prompt, a Working event (PreToolUse/UserPromptSubmit)
+        // TASK-47: after a permission prompt, a Working event (PreToolUse/UserPromptSubmit)
         // must move the agent back to Working — not stay stuck on NeedsAttention.
         assert_eq!(
             transition(AgentRunState::NeedsAttention, StatusEvent::Working),
@@ -251,7 +251,7 @@ mod tests {
         assert_eq!(to_task_status(AgentRunState::Exited), None);
     }
 
-    // ── display_state matrix: counter → pill (AC2-85) ─────────────────────────
+    // ── display_state matrix: counter → pill (TASK-85) ─────────────────────────
 
     #[test]
     fn display_state_idle_with_no_background_is_idle() {
@@ -288,7 +288,7 @@ mod tests {
         assert_eq!(display_state(AgentRunState::Exited, 5), AgentRunState::Exited);
     }
 
-    // ── apply_event background gating (AC2-85) ─────────────────────────────────
+    // ── apply_event background gating (TASK-85) ─────────────────────────────────
 
     #[test]
     fn background_subagent_keeps_pill_working_across_main_idle() {

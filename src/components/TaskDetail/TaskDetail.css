@@ -263,6 +263,10 @@
 .terminal-pane__placeholder { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--text-muted, #9aa); z-index: 1; }
 .terminal-pane__placeholder-actions { display: flex; gap: 10px; }
 
+.task-detail__queued { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; color: var(--text-muted, #9aa); z-index: 1; text-align: center; padding: 0 24px; }
+.task-detail__queued-title { margin: 0; font-weight: 600; color: var(--text, #fff); }
+.task-detail__queued-hint { margin: 0; font-size: 13px; color: var(--text-muted, #9aa); }
+
 .task-detail__changes-rail { writing-mode: vertical-rl; transform: rotate(180deg); padding: 12px 6px; background: transparent; border: none; border-left: 1px solid var(--border, #333); color: var(--text-muted, #9aa); cursor: pointer; letter-spacing: .04em; }
 .task-detail__changes-rail:hover { color: var(--text, #fff); }
 

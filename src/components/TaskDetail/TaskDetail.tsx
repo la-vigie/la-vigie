@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { finishTask, getPrStatus, openUrl, setTaskAgent, setTaskModel, stopSession } from "../../api";
+import { finishTask, getPrStatus, openUrl, setTaskAgent, setTaskAutoApprove, setTaskModel, stopSession } from "../../api";
 import type { PrStatus } from "../../api";
 import { taskName } from "../../lib/taskName";
 import { useVigieStore, AGENT_TAB } from "../../store";
@@ -29,6 +29,7 @@ const STATUS_LABEL: Record<DisplayStatus, string> = {
   idle: "idle",
   done: "done",
   error: "error",
+  pending: "queued",
 };
 
 const STATUS_MODIFIER: Record<DisplayStatus, string> = {
@@ -38,6 +39,7 @@ const STATUS_MODIFIER: Record<DisplayStatus, string> = {
   idle: "idle",
   done: "done",
   error: "error",
+  pending: "pending",
 };
 
 export function TaskDetail() {
@@ -119,6 +121,12 @@ export function TaskDetail() {
   }, [showFinishConfirm, selectedTaskId]);
 
   const task = tasks.find((t) => t.id === selectedTaskId);
+  // A queued task (status "pending") has no worktree and no agent yet — it's
+  // waiting on a dependency to merge. Render a placeholder instead of the
+  // agent Start/Resume controls and hide finish/Open-PR actions, but never
+  // early-return: <TerminalHost/> below must keep rendering unconditionally
+  // (KEEP-ALIVE — see class-level doc comment near its render site).
+  const isPending = task?.status === "pending";
 
   // Derive the agent/model picker selection for the current task.
   const repoForTask = task ? repos.find((r) => r.id === task.repoId) : undefined;
@@ -234,61 +242,63 @@ export function TaskDetail() {
               </span>
             </div>
 
-            <div className="task-detail__actions" data-testid="task-actions">
-              {showFinishConfirm ? (
-                <div className="task-detail__finish-confirm">
-                  {pr?.state === "OPEN" && (
+            {!isPending && (
+              <div className="task-detail__actions" data-testid="task-actions">
+                {showFinishConfirm ? (
+                  <div className="task-detail__finish-confirm">
+                    {pr?.state === "OPEN" && (
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => handleFinish("merge")}
+                      >
+                        Merge PR &amp; finish
+                      </button>
+                    )}
+                    <button type="button" className="btn" onClick={() => handleFinish("keep")}>
+                      Keep branch
+                    </button>
                     <button
                       type="button"
-                      className="btn"
-                      onClick={() => handleFinish("merge")}
+                      className="btn btn--danger"
+                      onClick={() => handleFinish("discard")}
                     >
-                      Merge PR &amp; finish
+                      Discard branch
                     </button>
-                  )}
-                  <button type="button" className="btn" onClick={() => handleFinish("keep")}>
-                    Keep branch
-                  </button>
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      onClick={() => {
+                        setShowFinishConfirm(false);
+                        setFinishError(null);
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
                   <button
                     type="button"
-                    className="btn btn--danger"
-                    onClick={() => handleFinish("discard")}
+                    className="btn"
+                    onClick={() => setShowFinishConfirm(true)}
                   >
-                    Discard branch
+                    Finish task
                   </button>
-                  <button
-                    type="button"
-                    className="btn btn--ghost"
-                    onClick={() => {
-                      setShowFinishConfirm(false);
-                      setFinishError(null);
-                    }}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              ) : (
+                )}
+
                 <button
                   type="button"
-                  className="btn"
-                  onClick={() => setShowFinishConfirm(true)}
+                  className="btn btn--primary"
+                  disabled={!task.prUrl}
+                  title={task.prUrl ? "Open pull request in browser" : "No pull request yet"}
+                  onClick={() => {
+                    if (task.prUrl) openUrl(task.prUrl).catch(() => {});
+                  }}
                 >
-                  Finish task
+                  Open PR <span aria-hidden>↗</span>
                 </button>
-              )}
-
-              <button
-                type="button"
-                className="btn btn--primary"
-                disabled={!task.prUrl}
-                title={task.prUrl ? "Open pull request in browser" : "No pull request yet"}
-                onClick={() => {
-                  if (task.prUrl) openUrl(task.prUrl).catch(() => {});
-                }}
-              >
-                Open PR <span aria-hidden>↗</span>
-              </button>
-            </div>
+              </div>
+            )}
           </div>
 
           <div className="task-detail__path" title={task.worktreePath}>
@@ -387,48 +397,81 @@ export function TaskDetail() {
             className={"terminal-pane__body" + (isDropActive ? " terminal-pane__body--drop-active" : "")}
           >
             {task && activeTab === AGENT_TAB && !isAgentActive && (
-              <div className="terminal-pane__placeholder">
-                <p>Agent not running.</p>
-                <div className="terminal-pane__placeholder-actions">
-                  <AgentModelPicker
-                    agent={selectedAgentName}
-                    model={selectedModel}
-                    onChange={(a, m) => {
-                      setAgentOverride(a);
-                      setTaskAgent(task.id, a);
-                      setModelOverride(m);
-                      setTaskModel(task.id, m);
-                    }}
-                  />
-                  <button
-                    type="button"
-                    className="btn btn--primary"
-                    onClick={() =>
-                      startAgentSession(task.id, false, selectedAgent
-                        ? { label: selectedAgent.displayName, lifecycle: selectedAgent.status === "lifecycle" }
-                        : undefined)
-                    }
-                  >
-                    Start agent
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn--ghost"
-                    disabled={!selectedAgent || selectedAgent.resumeArgs.length === 0}
-                    onClick={() =>
-                      startAgentSession(task.id, true, selectedAgent
-                        ? { label: selectedAgent.displayName, lifecycle: selectedAgent.status === "lifecycle" }
-                        : undefined)
-                    }
-                  >
-                    Resume
-                  </button>
+              isPending ? (
+                <div className="task-detail__queued" role="status">
+                  <p className="task-detail__queued-title">Queued</p>
+                  <p className="task-detail__queued-hint">
+                    This task will start automatically when its dependency merges.
+                  </p>
                 </div>
-              </div>
+              ) : (
+                <div className="terminal-pane__placeholder">
+                  <p>Agent not running.</p>
+                  <div className="terminal-pane__placeholder-actions">
+                    <AgentModelPicker
+                      agent={selectedAgentName}
+                      model={selectedModel}
+                      onChange={(a, m) => {
+                        setAgentOverride(a);
+                        setTaskAgent(task.id, a);
+                        setModelOverride(m);
+                        setTaskModel(task.id, m);
+                      }}
+                    />
+                    <label className="agent-auto-approve">
+                      <span>Auto-approve</span>
+                      <select
+                        aria-label="Auto-approve for this task"
+                        value={
+                          task.autoApprove == null ? "inherit" : task.autoApprove ? "on" : "off"
+                        }
+                        onChange={(e) => {
+                          const v =
+                            e.target.value === "inherit" ? null : e.target.value === "on";
+                          setTaskAutoApprove(task.id, v).then(refresh);
+                        }}
+                      >
+                        <option value="inherit">Inherit from repo</option>
+                        <option value="on">On</option>
+                        <option value="off">Off</option>
+                      </select>
+                    </label>
+                    <button
+                      type="button"
+                      className="btn btn--primary"
+                      onClick={() =>
+                        startAgentSession(task.id, false, selectedAgent
+                          ? { label: selectedAgent.displayName, lifecycle: selectedAgent.status === "lifecycle" }
+                          : undefined)
+                      }
+                    >
+                      Start agent
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      disabled={!selectedAgent || selectedAgent.resumeArgs.length === 0}
+                      onClick={() =>
+                        startAgentSession(task.id, true, selectedAgent
+                          ? { label: selectedAgent.displayName, lifecycle: selectedAgent.status === "lifecycle" }
+                          : undefined)
+                      }
+                    >
+                      Resume
+                    </button>
+                  </div>
+                </div>
+              )
             )}
             {task && activeTab === AGENT_TAB && isAgentActive && agentInfo && (
               <RunStatePill status={agentInfo.status} activity={agentInfo.activity} lifecycle={agentInfo.lifecycle} onStop={handleStop} />
             )}
+            {/* KEEP-ALIVE: <TerminalHost/> must never unmount/remount while an
+                agent runs — the live PTY lives inside it, so remounting kills it.
+                Keep this at a stable DOM position; swap content around it (tabs,
+                pill, placeholder above; diff/spec panes as siblings), never wrap
+                or conditionally render it. Any layout change here needs a
+                DOM-identity (keep-alive) test. */}
             <TerminalHost />
           </div>
           {task && <StatusBanner task={task} />}

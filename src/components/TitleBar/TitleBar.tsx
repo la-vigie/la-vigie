@@ -94,7 +94,7 @@ export function TitleBar() {
 
         {/*
           Gear / settings button — deliberately omits data-tauri-drag-region so
-          a click does not drag the window (AC2-74 drag rule).
+          a click does not drag the window (TASK-74 drag rule).
         */}
         <button
           type="button"

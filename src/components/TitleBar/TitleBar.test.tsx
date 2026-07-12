@@ -59,7 +59,7 @@ describe("TitleBar", () => {
     const { container } = render(<TitleBar />);
 
     // The bar fills its full width with these wrappers; each must be a drag
-    // region or the window can't be dragged from them (AC2-74 regression).
+    // region or the window can't be dragged from them (TASK-74 regression).
     const header = container.querySelector("header.titlebar")!;
     const brand = container.querySelector(".titlebar__brand")!;
     const logo = container.querySelector("img.titlebar__logo")!;
@@ -100,7 +100,7 @@ describe("TitleBar", () => {
     expect(screen.getByText("repo-overview")).toBeInTheDocument();
   });
 
-  describe("gear / settings button (AC2-21)", () => {
+  describe("gear / settings button (TASK-21)", () => {
     it("renders a gear button with aria-label='Settings'", () => {
       render(<TitleBar />);
       expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();

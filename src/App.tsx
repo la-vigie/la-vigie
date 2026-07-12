@@ -5,8 +5,10 @@ import { TitleBar } from "./components/TitleBar/TitleBar";
 import { useAgentStatus } from "./hooks/useAgentStatus";
 import { useAgentConsole } from "./hooks/useAgentConsole";
 import { useSetupStatus } from "./hooks/useSetupStatus";
+import { useTaskCreated } from "./hooks/useTaskCreated";
 import { useTaskLaunch } from "./hooks/useTaskLaunch";
 import { useTaskRename } from "./hooks/useTaskRename";
+import { useTaskRemoved } from "./hooks/useTaskRemoved";
 import { useVigieStore } from "./store";
 import "./App.css";
 
@@ -20,6 +22,8 @@ function App() {
   useSetupStatus();
   useTaskLaunch();
   useTaskRename();
+  useTaskRemoved();
+  useTaskCreated();
 
   const sidebarCollapsed = useVigieStore((state) => state.sidebarCollapsed);
   const setSidebarWidth = useVigieStore((state) => state.setSidebarWidth);

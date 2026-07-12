@@ -15,7 +15,7 @@ function sampleTask(id: string, title: string): Task {
   };
 }
 
-describe("setTaskTitle (AC2-40)", () => {
+describe("setTaskTitle (TASK-40)", () => {
   beforeEach(() => {
     useVigieStore.setState({ tasks: [sampleTask("t1", "old"), sampleTask("t2", "other")] });
   });

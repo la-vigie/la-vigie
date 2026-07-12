@@ -27,10 +27,10 @@ pub struct AgentLaunchContext {
     pub repo_id: String,
 }
 
-/// An issued MCP bearer token's scope tier (AC2-111). `Agent` is the per-agent,
-/// repo-scoped token minted at agent spawn (AC2-89). `Concierge` is the
+/// An issued MCP bearer token's scope tier (TASK-111). `Agent` is the per-agent,
+/// repo-scoped token minted at agent spawn (TASK-89). `Concierge` is the
 /// broad-scope, cross-repo *read* token for the mobile concierge — minted by
-/// AC2-112; this ticket only defines and enforces the tier.
+/// TASK-112; this ticket only defines and enforces the tier.
 pub enum McpToken {
     Agent(AgentLaunchContext),
     Concierge,
@@ -41,7 +41,7 @@ pub struct AppState {
     pub worktrees_root: PathBuf,
     /// Directory holding imported custom notification sound files.
     pub sounds_root: PathBuf,
-    /// Neutral working directory for the rootless concierge session (AC2-112).
+    /// Neutral working directory for the rootless concierge session (TASK-112).
     /// A stable dir so `claude --continue`'s cwd-scoped history persists.
     pub concierge_root: PathBuf,
     pub sessions: Mutex<HashMap<String, SessionHandle>>,
@@ -61,15 +61,19 @@ pub struct AppState {
     /// tier) → its scope. Agent tokens are inserted at agent spawn and removed
     /// at stop; the token is the auth + context carrier.
     pub mcp_tokens: Mutex<HashMap<String, McpToken>>,
-    /// Tailnet remote-control server state (AC2-86). `None` active ⇒ off.
+    /// Tailnet remote-control server state (TASK-86). `None` active ⇒ off.
     pub remote: crate::remote::RemoteSlot,
-    /// task_id → filesystem path of that task's Claude transcript (AC2-108),
+    /// task_id → filesystem path of that task's Claude transcript (TASK-108),
     /// captured from hook payloads. Keyed by task so the latest hook reflects the
     /// current file (resume overwrites); retained after the agent stops so the
     /// conversation stays readable post-stop.
     pub transcripts: Mutex<HashMap<String, String>>,
-    /// Serializes the concierge create path (AC2-112) so concurrent
+    /// Serializes the concierge create path (TASK-112) so concurrent
     /// `POST /api/concierge` calls cannot both pass the liveness check and
     /// stack processes. Synchronous critical section — never held across `.await`.
     pub concierge_spawn: std::sync::Mutex<()>,
+    /// TASK-144: last time we fetched `origin/<base>` for a task's Diff tab,
+    /// keyed by `"<repo_id>:<base_branch>"`. Throttles the background base fetch
+    /// so frequent re-renders don't spawn a fetch each time. Never held across `.await`.
+    pub base_fetch_at: Mutex<HashMap<String, std::time::Instant>>,
 }

@@ -17,19 +17,19 @@ import { CommentComposer } from "./CommentComposer";
 import { InlineComment } from "./InlineComment";
 import { ReviewFooter } from "./ReviewFooter";
 import { sendToAgent } from "./sendToAgent";
-import refractor from "refractor/core";
-import typescript from "refractor/lang/typescript";
-import tsx from "refractor/lang/tsx";
-import javascript from "refractor/lang/javascript";
-import jsx from "refractor/lang/jsx";
-import json from "refractor/lang/json";
-import css from "refractor/lang/css";
-import python from "refractor/lang/python";
-import rust from "refractor/lang/rust";
-import go from "refractor/lang/go";
-import bash from "refractor/lang/bash";
-import markdown from "refractor/lang/markdown";
-import yaml from "refractor/lang/yaml";
+import { refractor } from "refractor/core";
+import typescript from "refractor/typescript";
+import tsx from "refractor/tsx";
+import javascript from "refractor/javascript";
+import jsx from "refractor/jsx";
+import json from "refractor/json";
+import css from "refractor/css";
+import python from "refractor/python";
+import rust from "refractor/rust";
+import go from "refractor/go";
+import bash from "refractor/bash";
+import markdown from "refractor/markdown";
+import yaml from "refractor/yaml";
 import "react-diff-view/style/index.css";
 import "./diff-dark.css";
 
@@ -46,6 +46,17 @@ refractor.register(go);
 refractor.register(bash);
 refractor.register(markdown);
 refractor.register(yaml);
+
+// react-diff-view@3 predates refractor@5's API change: its tokenizer wraps
+// `refractor.highlight()`'s return value as a hast root's children array, but
+// refractor@5 now returns a hast `Root` ({ type: "root", children }) rather
+// than the bare children array v3 returned. Unwrap to `.children` so tokens
+// render again. The cast bridges react-diff-view's type (which, confusingly,
+// already expects the v5 `Root` signature) to the array shape its code needs.
+const diffRefractor = {
+  highlight: (value: string, language: string) =>
+    refractor.highlight(value, language).children,
+} as unknown as typeof refractor;
 
 const EXT_TO_LANG: Record<string, string> = {
   ts: "typescript",
@@ -157,7 +168,7 @@ function GitHubDiffRenderer({
         const tokens = (() => {
           if (!lang) return undefined;
           try {
-            return tokenize(file.hunks, { highlight: true, refractor, language: lang });
+            return tokenize(file.hunks, { highlight: true, refractor: diffRefractor, language: lang });
           } catch {
             return undefined;
           }

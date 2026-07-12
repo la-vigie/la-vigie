@@ -1,0 +1,138 @@
+# Mutation testing — ADVISORY (TASK-143). Runs cargo-mutants (Rust) and Stryker
+# (TS) over the pure-function core, scoped to the PR diff, and reports the score
+# in the job summary. It does NOT block: every mutation step is
+# `continue-on-error`, and no commit status is emitted, so a surviving mutant
+# never fails the PR. This is the "advisory first" half of the rollout — see
+# docs/mutation-testing.md. Flipping it to gating means emitting a
+# `review-gate-mutation` status the way pr-review.yml emits `review-gate-mistral`,
+# once the baseline has stabilized (MERGE_POLICY.md, code-class auto-merge only).
+name: mutation-advisory
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  rust-mutants:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need the base branch for the diff-scoped run
+
+      # Tauri v2 build deps — cargo-mutants compiles the src-tauri crate.
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev patchelf \
+            libayatana-appindicator3-dev libsoup-3.0-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      # Mutate only the lines this PR changed (scoped further by the allowlist in
+      # src-tauri/.cargo/mutants.toml). Advisory: never fail the job.
+      - name: cargo-mutants (diff-scoped, advisory)
+        id: rust
+        continue-on-error: true
+        working-directory: src-tauri
+        run: |
+          # --relative emits crate-relative paths (src/foo.rs, matching how
+          # cargo-mutants — run here in src-tauri — enumerates sources) instead
+          # of repo-relative (src-tauri/src/foo.rs), which --in-diff wouldn't
+          # match. `-- src` (not 'src/**/*.rs') is required: git's default
+          # pathspec treats ** as * and would skip top-level src/*.rs files
+          # (claude_path.rs, docs.rs, shell_env.rs). Both verified end-to-end.
+          git diff --relative "origin/${{ github.base_ref }}"...HEAD -- src > pr.diff
+          if [ ! -s pr.diff ]; then
+            echo "No Rust changes in this PR — skipping." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # --in-place: mutate the checkout directly. Copy mode would clone the
+          # multi-GB target/ dir per job; pointless on an ephemeral runner.
+          cargo mutants --in-diff pr.diff --no-shuffle --in-place || true
+
+      - name: Summarize Rust mutation result
+        if: always()
+        working-directory: src-tauri
+        run: |
+          # Count non-empty lines. cargo-mutants creates all four category
+          # files unconditionally, so guard the empty-but-present case: `grep -c`
+          # exits 1 (and still prints 0) when a file is empty — `|| true` keeps
+          # that a single clean "0" instead of tripping the later arithmetic.
+          count() { local f="mutants.out/$1"; [ -f "$f" ] || { echo 0; return; }; grep -c . "$f" || true; }
+          caught=$(count caught.txt); missed=$(count missed.txt)
+          timeout=$(count timeout.txt); unviable=$(count unviable.txt)
+          tested=$((caught + missed + timeout))
+          score="n/a"; [ "$tested" -gt 0 ] && score=$(awk "BEGIN{printf \"%.1f\", 100*($caught+$timeout)/$tested}")
+          {
+            echo "## Rust mutation (cargo-mutants) — advisory"
+            if [ ! -d mutants.out ]; then
+              echo "_No mutants generated for this diff._"
+            else
+              echo "- caught: $caught"
+              echo "- missed: $missed"
+              echo "- timeout: $timeout"
+              echo "- unviable (not scored): $unviable"
+              echo "- **score: ${score}%**"
+              echo ""
+              echo "Missed (surviving) mutants — test-suite holes to close:"
+              echo '```'
+              cat mutants.out/missed.txt 2>/dev/null || echo "(none)"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  frontend-mutants:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # Stryker mutates only files changed since the base branch, intersected
+      # with the `mutate` allowlist in stryker.config.mjs. Advisory: never fail.
+      - name: Stryker (diff-scoped, advisory)
+        id: fe
+        continue-on-error: true
+        run: |
+          # origin/<base> is already present via checkout's fetch-depth: 0.
+          npx stryker run --since="origin/${{ github.base_ref }}" || true
+
+      - name: Summarize frontend mutation result
+        if: always()
+        run: |
+          {
+            echo "## Frontend mutation (Stryker) — advisory"
+            if [ -f reports/mutation/mutation.json ]; then
+              node -e '
+                const r = require("./reports/mutation/mutation.json");
+                const f = Object.values(r.files).flatMap(f => f.mutants);
+                const by = s => f.filter(m => m.status === s).length;
+                const killed = by("Killed"), survived = by("Survived"), noCov = by("NoCoverage");
+                const scoreDen = killed + survived + by("Timeout") + noCov;
+                const score = scoreDen ? (100 * (killed + by("Timeout")) / scoreDen).toFixed(1) : "n/a";
+                console.log(`- killed: ${killed}\n- survived: ${survived}\n- no-coverage: ${noCov}\n- score: ${score}%`);
+              ' || echo "_report present but unparseable_"
+            else
+              echo "_No mutants generated for this diff (no changed pure-core files)._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

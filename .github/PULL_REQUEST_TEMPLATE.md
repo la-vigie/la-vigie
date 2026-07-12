@@ -7,10 +7,11 @@
 <!-- Tests added/updated, and any manual GUI/runtime check you ran
      (e.g. `npm run tauri dev` and confirmed the behavior). -->
 
-- [ ] `npx vitest run` passes
-- [ ] `cd src-tauri && cargo test` passes
-- [ ] `npm run build` passes (typecheck)
-- [ ] Manually verified any visual/runtime behavior affected
+The `review-gate-tests` check runs `cargo test`, `npx vitest run`, `cargo build`, and
+`npm run build` on this PR — that CI run is the authoritative test record, so there's nothing to
+hand-attest here. Only what CI can't see needs a human:
+
+- [ ] Manually verified any visual/runtime behavior affected (CI can't check the GUI)
 
 ## Notes for reviewers
 

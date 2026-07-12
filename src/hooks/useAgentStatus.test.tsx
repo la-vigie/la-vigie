@@ -334,7 +334,7 @@ describe("useAgentStatus", () => {
     expect(playSoundSpy).toHaveBeenCalledWith("jobs-done", []);
   });
 
-  // ---- Automute (AC2-105) ----
+  // ---- Automute (TASK-105) ----
 
   it("with automute on and in a meeting, suppresses the sound but still notifies", async () => {
     seedStoreWithAgent({ agentId: "agent-1", repoSoundSettings: null });

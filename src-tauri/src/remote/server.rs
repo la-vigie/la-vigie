@@ -1,6 +1,6 @@
 //! Remote axum server: GET / (static page), GET /api/state, POST /api/tasks.
 //! Auth + Host checks read `RemoteState` per request. The write action reuses
-//! the shared launch core + `task_launched` event (AC2-89), so the desktop
+//! the shared launch core + `task_launched` event (TASK-89), so the desktop
 //! frontend spawns the agent. Glue is not unit-tested (verify live); the pure
 //! body→args mapping is.
 
@@ -46,7 +46,9 @@ pub fn launch_args_from(body: CreateTaskBody) -> (crate::launch::LaunchArgs, Opt
             ticket_key: body.ticket_key,
             agent: None,
             model: None,
+            auto_approve: None,
             after_merge_of: None,
+            prompt: None,
         },
         body.prompt,
     )
@@ -126,7 +128,7 @@ async fn create_task_handler(
         Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, e).into_response(),
     };
 
-    // Mirror AC2-89: the running desktop frontend's `useTaskLaunch` hook starts
+    // Mirror TASK-89: the running desktop frontend's `useTaskLaunch` hook starts
     // the agent on this event (prompt rides the event, not the task row).
     use tauri::Emitter as _;
     let _ = app.emit(
@@ -273,13 +275,13 @@ mod tests {
         let body = CreateTaskBody {
             repo_id: "r1".into(),
             title: "Do thing".into(),
-            ticket_key: Some("AC2-99".into()),
+            ticket_key: Some("TASK-99".into()),
             prompt: Some("go".into()),
         };
         let (args, prompt) = launch_args_from(body);
         assert_eq!(args.repo_id, "r1");
         assert_eq!(args.title, "Do thing");
-        assert_eq!(args.ticket_key.as_deref(), Some("AC2-99"));
+        assert_eq!(args.ticket_key.as_deref(), Some("TASK-99"));
         assert_eq!(args.agent, None);
         assert_eq!(args.base_branch, None);
         assert_eq!(args.model, None);

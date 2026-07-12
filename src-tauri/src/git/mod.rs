@@ -4,12 +4,15 @@
 //! Scope: this module is the git layer only. No Tauri commands here — those
 //! live in `crate::commands`, which calls this module's public functions.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use tokio::process::Command;
 
 use crate::store::Repo;
+
+pub mod worktree_state;
+pub use worktree_state::WorktreeAdoption;
 
 // ── Diff / changed-files types ────────────────────────────────────────────────
 
@@ -117,6 +120,7 @@ pub async fn add_repo(path: &Path) -> anyhow::Result<Repo> {
         default_model: None,
         sound_settings: None,
         fetch_remote_base: None,
+        auto_approve: None,
     })
 }
 
@@ -135,42 +139,128 @@ pub async fn create_worktree(
         .to_str()
         .ok_or_else(|| anyhow!("worktree_path is not valid UTF-8: {:?}", worktree_path))?;
 
-    run_git(&[
-        "-C",
-        repo_path_str,
-        "worktree",
-        "add",
-        "-b",
-        branch,
-        worktree_path_str,
-        base_branch,
-    ])
-    .await
-    .with_context(|| {
-        format!(
-            "failed to create worktree at {} (branch {} off {})",
-            worktree_path_str, branch, base_branch
-        )
+    // Branch-safe (TASK-125): if the branch already exists (a leftover from a
+    // deleted task, or the branch of a worktree we're reclaiming), check it out
+    // into the new worktree instead of `-b` (which would fail "already exists").
+    // Reusing preserves the branch's commits; `base_branch` is only the start
+    // point for a brand-new branch.
+    let branch_exists = ref_exists(repo_path, &format!("refs/heads/{branch}")).await;
+    let args: Vec<&str> = if branch_exists {
+        vec!["-C", repo_path_str, "worktree", "add", worktree_path_str, branch]
+    } else {
+        vec!["-C", repo_path_str, "worktree", "add", "-b", branch, worktree_path_str, base_branch]
+    };
+
+    run_git(&args).await.with_context(|| {
+        if branch_exists {
+            format!("failed to create worktree at {worktree_path_str} (reusing branch {branch})")
+        } else {
+            format!("failed to create worktree at {worktree_path_str} (branch {branch} off {base_branch})")
+        }
     })?;
 
     Ok(())
 }
 
-/// `git -C <repo_path> fetch <remote> <base>`.
-/// Updates the remote-tracking ref (e.g. `refs/remotes/origin/<base>`) so a new
-/// worktree can be branched off the up-to-date `origin/<base>`. Returns the
-/// error (including git's stderr) on failure — callers decide whether to fall
+/// Canonicalize a path for comparison, falling back to the path as-given when it
+/// doesn't exist (e.g. a registered worktree whose directory was deleted). This
+/// resolves macOS `/var` → `/private/var` symlinks so target and git-reported
+/// paths compare equal.
+fn canonical_or(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// True if `path` is a leftover git-worktree checkout: its `.git` is a *file*
+/// containing a `gitdir:` pointer (as git writes for linked worktrees), rather
+/// than a directory (a normal repo) or absent (arbitrary user data). Used to tell
+/// a reclaimable orphaned worktree apart from a foreign directory we must not
+/// clobber.
+fn looks_like_orphaned_worktree(path: &Path) -> bool {
+    match std::fs::read_to_string(path.join(".git")) {
+        Ok(contents) => contents.trim_start().starts_with("gitdir:"),
+        // `.git` is a directory (read_to_string errors) or absent → not a worktree.
+        Err(_) => false,
+    }
+}
+
+/// Classify a task's target worktree path (TASK-125): is it free to create, an
+/// existing worktree we can adopt, or a conflict to warn about? Runs
+/// `git worktree list --porcelain`, canonicalizes both the target and each
+/// registered path (macOS `/var` vs `/private/var`), checks disk existence, and
+/// defers the decision to the pure `classify_worktree_target`. Never errors — a
+/// failed git call is treated as "no registered worktrees".
+pub async fn worktree_state(
+    repo_path: &Path,
+    target_path: &Path,
+    branch: &str,
+    already_task_owned: bool,
+) -> WorktreeAdoption {
+    let Some(repo_str) = repo_path.to_str() else {
+        return WorktreeAdoption::Conflict {
+            reason: format!("repo path is not valid UTF-8: {repo_path:?}"),
+        };
+    };
+
+    let porcelain = run_git(&["-C", repo_str, "worktree", "list", "--porcelain"])
+        .await
+        .unwrap_or_default();
+    let entries: Vec<worktree_state::WorktreeEntry> =
+        worktree_state::parse_worktree_list(&porcelain)
+            .into_iter()
+            .map(|e| worktree_state::WorktreeEntry {
+                path: canonical_or(&e.path),
+                registration: e.registration,
+            })
+            .collect();
+
+    let canon_target = canonical_or(target_path);
+    let registration = worktree_state::match_registration(&entries, &canon_target);
+    let path_exists = target_path.exists();
+    // Only relevant when the path exists but git doesn't track it: is it a
+    // reclaimable leftover worktree, or foreign data we must not touch?
+    let is_orphaned_worktree =
+        path_exists && registration.is_none() && looks_like_orphaned_worktree(target_path);
+
+    worktree_state::classify_worktree_target(
+        registration.as_ref(),
+        path_exists,
+        is_orphaned_worktree,
+        already_task_owned,
+        branch,
+        &target_path.to_string_lossy(),
+    )
+}
+
+/// `git -C <repo_path> fetch <remote> <base>:refs/remotes/<remote>/<base>`.
+/// The explicit refspec forces the remote-tracking ref (`refs/remotes/<remote>/<base>`)
+/// to update. A plain `git fetch <remote> <base>` can leave that ref stale on
+/// clones without a configured fetch refspec for the branch (TASK-144). Returns
+/// the error (including git's stderr) on failure — callers decide whether to fall
 /// back to the local base.
 pub async fn fetch(repo_path: &Path, remote: &str, base: &str) -> anyhow::Result<()> {
     let repo_path_str = repo_path
         .to_str()
         .ok_or_else(|| anyhow!("repo_path is not valid UTF-8: {:?}", repo_path))?;
 
-    run_git(&["-C", repo_path_str, "fetch", remote, base])
+    let refspec = format!("{base}:refs/remotes/{remote}/{base}");
+    run_git(&["-C", repo_path_str, "fetch", remote, &refspec])
         .await
         .with_context(|| format!("failed to fetch {remote} {base}"))?;
 
     Ok(())
+}
+
+/// True if `refname` resolves in the repo/worktree at `dir`
+/// (`git rev-parse --verify --quiet <refname>` exits 0). Used to detect whether
+/// a remote-tracking ref like `origin/main` is present before comparing against
+/// it. Any error (missing ref, bad dir) is treated as "not present".
+pub async fn ref_exists(dir: &Path, refname: &str) -> bool {
+    let Some(dir_str) = dir.to_str() else {
+        return false;
+    };
+    run_git(&["-C", dir_str, "rev-parse", "--verify", "--quiet", refname])
+        .await
+        .is_ok()
 }
 
 /// Delete a local branch. `force=true` uses `-D` (delete even if unmerged), else `-d`.
@@ -376,6 +466,29 @@ pub async fn untracked_files(worktree_path: &Path) -> Result<Vec<String>> {
     Ok(raw.lines().map(|l| l.to_string()).collect())
 }
 
+/// True if the worktree has any uncommitted changes or untracked files
+/// (`git status --porcelain` produces at least one line).
+pub async fn working_tree_dirty(worktree: &Path) -> Result<bool> {
+    let wt = worktree
+        .to_str()
+        .ok_or_else(|| anyhow!("worktree_path is not valid UTF-8: {:?}", worktree))?;
+    let out = run_git(&["-C", wt, "status", "--porcelain"]).await?;
+    Ok(!out.trim().is_empty())
+}
+
+/// True if `HEAD` has any commits not reachable from `base` (`git rev-list
+/// <base>..HEAD` is non-empty). Note: after a squash-merge the original commits
+/// never appear in base, so this stays true — callers combine it with the PR
+/// merged-state to decide "already merged".
+pub async fn commits_ahead_of_base(worktree: &Path, base: &str) -> Result<bool> {
+    let wt = worktree
+        .to_str()
+        .ok_or_else(|| anyhow!("worktree_path is not valid UTF-8: {:?}", worktree))?;
+    let range = format!("{base}..HEAD");
+    let out = run_git(&["-C", wt, "rev-list", &range]).await?;
+    Ok(!out.trim().is_empty())
+}
+
 /// Synthesized unified diff (all additions) for each untracked, non-ignored
 /// file, via `git -C <wt> diff --no-index /dev/null <file>`, concatenated.
 /// `--no-index` exits 1 when the files differ (normal for a new file), so exit
@@ -533,6 +646,117 @@ mod tests {
             .expect("git rev-parse");
         let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
         assert_eq!(branch, "feature-x");
+    }
+
+    // ── worktree_state (TASK-125): async glue over the pure classifier ───────────
+    // These exercise the real `git worktree list` + macOS /var→/private/var
+    // canonicalization that the pure unit tests in `worktree_state` can't.
+
+    #[tokio::test]
+    async fn worktree_state_vacant_for_a_fresh_path() {
+        let dir = init_test_repo();
+        let parent = TempDir::new().expect("create temp dir");
+        let target = parent.path().join("nope");
+
+        let state = worktree_state(dir.path(), &target, "feature-x", false).await;
+        assert_eq!(state, WorktreeAdoption::Vacant);
+    }
+
+    #[tokio::test]
+    async fn worktree_state_adopts_a_matching_existing_worktree() {
+        let dir = init_test_repo();
+        let parent = TempDir::new().expect("create temp dir");
+        let target = parent.path().join("wt");
+        create_worktree(dir.path(), &target, "feature-x", "main")
+            .await
+            .expect("create_worktree should succeed");
+
+        // Same branch at the same path → adopt (this is the leftover-worktree case).
+        let state = worktree_state(dir.path(), &target, "feature-x", false).await;
+        assert_eq!(state, WorktreeAdoption::Adopt);
+    }
+
+    #[tokio::test]
+    async fn worktree_state_conflicts_on_branch_mismatch() {
+        let dir = init_test_repo();
+        let parent = TempDir::new().expect("create temp dir");
+        let target = parent.path().join("wt");
+        create_worktree(dir.path(), &target, "feature-x", "main")
+            .await
+            .expect("create_worktree should succeed");
+
+        // A different intended branch at an occupied path → conflict, not adopt.
+        let state = worktree_state(dir.path(), &target, "feature-other", false).await;
+        assert!(matches!(state, WorktreeAdoption::Conflict { .. }), "got: {state:?}");
+    }
+
+    #[tokio::test]
+    async fn worktree_state_conflicts_on_bare_dir_not_a_worktree() {
+        let dir = init_test_repo();
+        let parent = TempDir::new().expect("create temp dir");
+        let target = parent.path().join("plain");
+        std::fs::create_dir_all(&target).expect("mkdir");
+
+        // A plain directory that isn't a registered worktree → conflict.
+        let state = worktree_state(dir.path(), &target, "feature-x", false).await;
+        assert!(matches!(state, WorktreeAdoption::Conflict { .. }), "got: {state:?}");
+    }
+
+    #[tokio::test]
+    async fn worktree_state_conflicts_when_already_task_owned() {
+        let dir = init_test_repo();
+        let parent = TempDir::new().expect("create temp dir");
+        let target = parent.path().join("wt");
+        create_worktree(dir.path(), &target, "feature-x", "main")
+            .await
+            .expect("create_worktree should succeed");
+
+        // Even a matching worktree is a conflict if a live task already owns it.
+        let state = worktree_state(dir.path(), &target, "feature-x", true).await;
+        assert!(matches!(state, WorktreeAdoption::Conflict { .. }), "got: {state:?}");
+    }
+
+    #[tokio::test]
+    async fn worktree_state_reclaims_an_orphaned_worktree() {
+        let dir = init_test_repo();
+        let parent = TempDir::new().expect("create temp dir");
+        let target = parent.path().join("wt");
+        create_worktree(dir.path(), &target, "feature-x", "main")
+            .await
+            .expect("create_worktree should succeed");
+
+        // Orphan it: delete the admin dir but keep the checkout + its `.git`
+        // pointer (exactly the user's stuck-`testing` state). git now omits it
+        // from `worktree list` and rejects it.
+        std::fs::remove_dir_all(dir.path().join(".git/worktrees/wt"))
+            .expect("remove admin dir");
+
+        let state = worktree_state(dir.path(), &target, "feature-x", false).await;
+        assert!(matches!(state, WorktreeAdoption::Reclaim { .. }), "got: {state:?}");
+    }
+
+    #[tokio::test]
+    async fn create_worktree_reuses_an_existing_branch() {
+        let dir = init_test_repo();
+        // A leftover branch with no worktree (deleted-task residue).
+        Command::new("git")
+            .args(["-C", dir.path().to_str().unwrap(), "branch", "feature-z"])
+            .output()
+            .expect("git branch");
+
+        let parent = TempDir::new().expect("create temp dir");
+        let target = parent.path().join("wt");
+        // Would fail with `-b` ("branch already exists"); branch-safe path reuses it.
+        create_worktree(dir.path(), &target, "feature-z", "main")
+            .await
+            .expect("create_worktree should reuse the existing branch");
+
+        assert!(target.exists());
+        let output = Command::new("git")
+            .args(["-C", target.to_str().unwrap(), "rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .expect("git rev-parse");
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "feature-z");
     }
 
     #[tokio::test]
@@ -1077,5 +1301,175 @@ mod tests {
 
         assert!(!worktree_path.exists(), "worktree path should be gone");
         assert!(branch_exists(dir.path(), "wt-keep"), "branch should still exist in keep mode");
+    }
+
+    // ── working_tree_dirty / commits_ahead_of_base tests ────────────────────────
+
+    #[tokio::test]
+    async fn working_tree_dirty_detects_untracked_and_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        let ps = p.to_str().unwrap();
+        run_git(&["init", "-q", ps]).await.unwrap();
+        run_git(&["-C", ps, "config", "user.email", "t@t"]).await.unwrap();
+        run_git(&["-C", ps, "config", "user.name", "t"]).await.unwrap();
+        std::fs::write(p.join("a.txt"), "x").unwrap();
+        run_git(&["-C", ps, "add", "."]).await.unwrap();
+        run_git(&["-C", ps, "commit", "-qm", "init"]).await.unwrap();
+
+        // Clean tree.
+        assert!(!working_tree_dirty(p).await.unwrap());
+
+        // Untracked file → dirty.
+        std::fs::write(p.join("b.txt"), "y").unwrap();
+        assert!(working_tree_dirty(p).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn commits_ahead_of_base_true_when_branch_has_extra_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        let ps = p.to_str().unwrap();
+        run_git(&["init", "-q", "-b", "main", ps]).await.unwrap();
+        run_git(&["-C", ps, "config", "user.email", "t@t"]).await.unwrap();
+        run_git(&["-C", ps, "config", "user.name", "t"]).await.unwrap();
+        std::fs::write(p.join("a.txt"), "x").unwrap();
+        run_git(&["-C", ps, "add", "."]).await.unwrap();
+        run_git(&["-C", ps, "commit", "-qm", "base"]).await.unwrap();
+
+        // On main == base: nothing ahead.
+        assert!(!commits_ahead_of_base(p, "main").await.unwrap());
+
+        // Create a branch with an extra commit → ahead of main.
+        run_git(&["-C", ps, "checkout", "-q", "-b", "feature"]).await.unwrap();
+        std::fs::write(p.join("c.txt"), "z").unwrap();
+        run_git(&["-C", ps, "add", "."]).await.unwrap();
+        run_git(&["-C", ps, "commit", "-qm", "feature work"]).await.unwrap();
+        assert!(commits_ahead_of_base(p, "main").await.unwrap());
+    }
+
+    // ── ref_exists / fetch refspec tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn ref_exists_true_for_present_ref_false_for_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git").args(args).current_dir(p).output().unwrap()
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "t"]);
+        std::fs::write(p.join("a.txt"), "a").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-qm", "c0"]);
+
+        assert!(ref_exists(p, "HEAD").await, "HEAD must resolve");
+        assert!(ref_exists(p, "main").await, "main must resolve");
+        assert!(!ref_exists(p, "origin/main").await, "no remote-tracking ref yet");
+        assert!(!ref_exists(p, "refs/remotes/origin/main").await, "explicit missing ref");
+    }
+
+    #[tokio::test]
+    async fn fetch_updates_remote_tracking_ref_via_refspec() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bare = tmp.path().join("origin.git");
+        let work = tmp.path().join("work");
+        let run_in = |dir: &std::path::Path, args: &[&str]| {
+            std::process::Command::new("git").args(args).current_dir(dir).output().unwrap()
+        };
+
+        // Bare "remote" with one commit on main.
+        std::fs::create_dir_all(&bare).unwrap();
+        run_in(tmp.path(), &["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()]);
+        let seed = tmp.path().join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        run_in(&seed, &["init", "-q", "-b", "main"]);
+        run_in(&seed, &["config", "user.email", "t@t"]);
+        run_in(&seed, &["config", "user.name", "t"]);
+        std::fs::write(seed.join("a.txt"), "a").unwrap();
+        run_in(&seed, &["add", "."]);
+        run_in(&seed, &["commit", "-qm", "c0"]);
+        run_in(&seed, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        run_in(&seed, &["push", "-q", "origin", "main"]);
+
+        // Fresh clone-like work repo with origin configured but no tracking ref fetched.
+        run_in(tmp.path(), &["init", "-q", "-b", "main", work.to_str().unwrap()]);
+        run_in(&work, &["config", "user.email", "t@t"]);
+        run_in(&work, &["config", "user.name", "t"]);
+        run_in(&work, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        assert!(!ref_exists(&work, "origin/main").await, "tracking ref absent before fetch");
+
+        fetch(&work, "origin", "main").await.expect("fetch should succeed");
+        assert!(ref_exists(&work, "origin/main").await, "tracking ref present after refspec fetch");
+    }
+
+    #[tokio::test]
+    async fn diff_and_ahead_exclude_merged_in_origin_commits() {
+        // Scenario (TASK-144): task branch forks from origin/main@C0, upstream advances
+        // origin/main to C1, the branch does its own work (C2) then merges origin/main
+        // (C1) in to resolve conflicts. Comparing against a stale base (C0) would show
+        // the merged-in upstream file as "ours"; comparing against fresh origin/main
+        // (C1) must show only the task's own file.
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(p)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {:?} failed: {}", args, String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "t"]);
+
+        // C0: the fork point.
+        std::fs::write(p.join("base.txt"), "base").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-qm", "c0"]);
+        let c0 = run(&["rev-parse", "HEAD"]);
+        run(&["update-ref", "refs/remotes/origin/main", &c0]);
+
+        // Task branch off C0.
+        run(&["checkout", "-q", "-b", "feat"]);
+
+        // Upstream advances origin/main to C1 on a side branch, then point the
+        // tracking ref at it (simulates someone else merging to main).
+        run(&["checkout", "-q", "-b", "upstream-tmp", &c0]);
+        std::fs::write(p.join("upstream.txt"), "upstream").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-qm", "c1 upstream"]);
+        let c1 = run(&["rev-parse", "HEAD"]);
+        run(&["update-ref", "refs/remotes/origin/main", &c1]);
+
+        // Back on feat: task's own work (C2), then merge origin/main (C1) in.
+        run(&["checkout", "-q", "feat"]);
+        std::fs::write(p.join("feat.txt"), "feat work").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-qm", "c2 feat"]);
+        run(&["merge", "-q", "--no-edit", "origin/main"]);
+
+        // Fresh base (origin/main = C1): only the task's own file.
+        let files_fresh = changed_files(p, "origin/main").await.unwrap();
+        let paths_fresh: Vec<&str> = files_fresh.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths_fresh.contains(&"feat.txt"), "fresh base must include task's own file; got {paths_fresh:?}");
+        assert!(!paths_fresh.contains(&"upstream.txt"), "fresh base must exclude merged-in upstream file; got {paths_fresh:?}");
+
+        let diff_fresh = diff_against_base(p, "origin/main").await.unwrap();
+        assert!(diff_fresh.contains("feat.txt"), "fresh diff must mention feat.txt");
+        assert!(!diff_fresh.contains("upstream.txt"), "fresh diff must not mention upstream.txt");
+
+        // Contrast: the stale base (C0) wrongly includes the merged-in upstream file —
+        // this is exactly the bug TASK-144 fixes by resolving to origin/main.
+        let files_stale = changed_files(p, &c0).await.unwrap();
+        let paths_stale: Vec<&str> = files_stale.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths_stale.contains(&"upstream.txt"), "stale base reproduces the bug (upstream shown as ours); got {paths_stale:?}");
+
+        // Teardown gate: still "ahead" of fresh base because of the task's own C2.
+        assert!(commits_ahead_of_base(p, "origin/main").await.unwrap(), "task has its own commit ahead of origin/main");
     }
 }

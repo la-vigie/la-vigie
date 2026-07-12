@@ -154,7 +154,7 @@
     }
     function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
 
-    // ---- agent-session chat (AC2-108): poll the transcript, post replies ----
+    // ---- agent-session chat (TASK-108): poll the transcript, post replies ----
     let chatTimer = null, chatCursor = 0, chatTaskId = null;
     function stopChat() {
       if (chatTimer) { clearInterval(chatTimer); chatTimer = null; }
@@ -396,7 +396,7 @@
         '<label for="title">Task title</label>' +
         '<input id="title" type="text" placeholder="what should the agent do?" />' +
         '<label for="ticket">Ticket key (optional)</label>' +
-        '<input id="ticket" type="text" placeholder="AC2-123" />' +
+        '<input id="ticket" type="text" placeholder="TASK-123" />' +
         '<label for="prompt">Initial prompt (optional)</label>' +
         '<textarea id="prompt" rows="3"></textarea>' +
         '<button id="create">Create task</button>' +
@@ -466,7 +466,7 @@
       startChat(taskId);
     }
 
-    // ---- boot: QR auto-pair (AC2-106) → sessionStorage → repos ----
+    // ---- boot: QR auto-pair (TASK-106) → sessionStorage → repos ----
     (function boot() {
       const m = /[#&]token=([^&]+)/.exec(location.hash || "");
       if (m) {

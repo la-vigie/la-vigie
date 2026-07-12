@@ -1,6 +1,6 @@
-//! Shared launch-task core (AC2-88). One place that turns a launch request into
+//! Shared launch-task core (TASK-88). One place that turns a launch request into
 //! a worktree-backed task, so every entry point (the `create_task` Tauri command
-//! today; a future MCP server (AC2-89) and REST endpoint (AC2-70)) shares exactly
+//! today; a future MCP server (TASK-89) and REST endpoint (TASK-70)) shares exactly
 //! one launch path.
 //!
 //! Two layers:
@@ -8,7 +8,7 @@
 //!     immediate-vs-pending decision — unit-tested here.
 //!   * async glue (`launch_task`): git/store side effects — verified via
 //!     the app, not unit-tested (Task 2). Setup is NOT run here: it's a
-//!     non-blocking background job the caller kicks off after launch (AC2-96).
+//!     non-blocking background job the caller kicks off after launch (TASK-96).
 //!
 //! Shape A: this core never spawns the agent/PTY. It returns the created task and
 //! the decision; the caller starts the agent (the frontend via `start_agent`).
@@ -33,6 +33,11 @@ pub struct LaunchArgs {
     pub agent: Option<String>,
     pub model: Option<String>,
     pub after_merge_of: Option<String>,
+    /// Seed prompt for a queued task; stored as `pending_prompt` and emitted at
+    /// promote-time. Ignored for immediate launches (the caller emits the
+    /// prompt via the task_launched event). TASK-90.
+    pub prompt: Option<String>,
+    pub auto_approve: Option<bool>,
 }
 
 /// Whether a launch happens now or is queued behind another task's merge.
@@ -67,7 +72,12 @@ pub struct ResolvedLaunch {
     pub ticket_key: Option<String>,
     pub agent: Option<String>,
     pub model: Option<String>,
+    pub auto_approve: Option<bool>,
     pub decision: LaunchDecision,
+    /// Normalized seed prompt for a queued (pending) launch. Not read by
+    /// `launch_task`'s `Immediate` path; consumed by the pending-insert path
+    /// (TASK-90).
+    pub pending_prompt: Option<String>,
 }
 
 /// Pure resolution: trim/normalize `ticket_key` and `agent` (empty ⇒ `None`),
@@ -92,6 +102,10 @@ pub fn resolve_launch(
         .model
         .map(|m| m.trim().to_string())
         .filter(|m| !m.is_empty());
+    let pending_prompt = args
+        .prompt
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty());
 
     if !has_task_identity(&args.title, ticket_key.as_deref()) {
         return Err("a task needs a title or a ticket ID".to_string());
@@ -118,7 +132,9 @@ pub fn resolve_launch(
         ticket_key,
         agent,
         model,
+        auto_approve: args.auto_approve,
         decision,
+        pending_prompt,
     })
 }
 
@@ -133,79 +149,191 @@ fn now_secs() -> i64 {
 pub struct LaunchOutcome {
     pub task: Task,
     /// The decision that produced this launch. Not read by `create_task` today
-    /// but will be consumed by the MCP (AC2-89) and REST (AC2-70) callers.
+    /// but will be consumed by the MCP (TASK-89) and REST (TASK-70) callers.
     #[allow(dead_code)]
     pub decision: LaunchDecision,
 }
 
+/// Create `worktree_path` for `branch`, based on the up-to-date remote base when
+/// the effective fetch-remote-base setting is on and the repo has a remote
+/// (falling back to the local base so creation never blocks on the network).
+/// Shared by the immediate launch and the TASK-90 start-on-merge promote path.
+pub(crate) async fn prepare_worktree(
+    state: &AppState,
+    repo: &Repo,
+    base_branch: &str,
+    branch: &str,
+    worktree_path: &Path,
+) -> Result<(), String> {
+    let app_fetch_remote_base = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        store
+            .get_app_setting("fetch_remote_base")
+            .map_err(|e| format!("{e:#}"))?
+            .as_deref()
+            .and_then(parse_bool_setting)
+    };
+    let repo_path = Path::new(&repo.path);
+    let use_remote = effective_fetch_remote_base(repo.fetch_remote_base, app_fetch_remote_base);
+    let fetch_ok = if use_remote && repo.remote_url.is_some() {
+        git::fetch(repo_path, "origin", base_branch).await.is_ok()
+    } else {
+        false
+    };
+    let start_ref = worktree_base_ref(use_remote, fetch_ok, "origin", base_branch);
+    git::create_worktree(repo_path, worktree_path, branch, &start_ref)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(())
+}
+
 /// The single launch path. Looks up the repo, resolves args, and — for an
-/// `Immediate` decision — creates the worktree and inserts the task row
-/// (rolling back the worktree on insert failure). Returns the created task plus
-/// its decision.
+/// `Immediate` decision (or a `Pending` decision whose dependency is already
+/// gone) — creates the worktree and inserts the task row (rolling back the
+/// worktree on insert failure). For a `Pending` decision with a live
+/// dependency, queues a dependency-less-yet task row (no worktree/branch) plus
+/// a `task_dependencies` edge instead, and returns early. Returns the created
+/// task plus its decision.
 ///
-/// Setup is intentionally NOT run here: AC2-96 made it a non-blocking background
+/// Setup is intentionally NOT run here: TASK-96 made it a non-blocking background
 /// job the caller kicks off after the task exists (the task is inserted first so
 /// it's immediately navigable). This keeps the core UI-agnostic.
 ///
 /// Shape A: this does NOT spawn the agent — the caller starts it (the frontend
 /// via `start_agent`).
 ///
-/// `Pending` is not yet implemented (the `pending_on` column lands in AC2-90);
-/// it returns an explanatory error. The `after_merge_of` arg is accepted now so
-/// AC2-89/90 don't have to change this signature.
-///
-/// Locking: the store Mutex is captured-then-dropped before each `.await`.
+/// Locking: the store Mutex is captured-then-dropped before each `.await` (and
+/// before/after the synchronous pending insert+edge, which needs no `.await`
+/// between them).
 pub async fn launch_task(
     state: &AppState,
     args: LaunchArgs,
 ) -> Result<LaunchOutcome, String> {
-    // 1. Look up the repo and the app-level fetch-remote-base setting (lock →
-    //    capture → drop before any await).
-    let (repo, app_fetch_remote_base) = {
+    // 1. Look up the repo (lock → capture → drop before any await).
+    let repo = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        let repo = store
+        store
             .get_repo(&args.repo_id)
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("repo not found: {}", args.repo_id))?;
-        let app_setting = store
-            .get_app_setting("fetch_remote_base")
-            .map_err(|e| format!("{e:#}"))?
-            .as_deref()
-            .and_then(parse_bool_setting);
-        (repo, app_setting)
+            .ok_or_else(|| format!("repo not found: {}", args.repo_id))?
     };
 
     // 2. Pure resolution (normalization, identity, branch/base/path, decision).
     let resolved = resolve_launch(args, &repo, &state.worktrees_root)?;
 
-    // 3. Pending launches are AC2-90 (no pending_on column yet).
-    if let LaunchDecision::Pending { .. } = resolved.decision {
-        return Err("start-on-merge not yet implemented (AC2-90)".to_string());
+    // 3. Pending launch (TASK-90): queue the task behind another task's merge.
+    if let LaunchDecision::Pending { after_merge_of } = &resolved.decision {
+        // Dangling dependency (missing / already-merged-and-deleted) ⇒ nothing
+        // will ever promote us, so launch immediately instead of queuing.
+        let now = now_secs();
+        let task = Task {
+            id: uuid::Uuid::new_v4().to_string(),
+            repo_id: resolved.repo_id.clone(),
+            title: resolved.title.clone(),
+            worktree_path: String::new(), // no worktree until promoted
+            branch: String::new(),        // derived at promote off updated base
+            base_branch: resolved.base_branch.clone(),
+            status: TaskStatus::Pending,
+            created_at: now,
+            updated_at: now,
+            pr_number: None,
+            pr_url: None,
+            ticket_key: resolved.ticket_key.clone(),
+            agent: resolved.agent.clone(),
+            model: resolved.model.clone(),
+            setup_status: None,
+            hidden: false,
+            pending_prompt: resolved.pending_prompt.clone(),
+            auto_approve: resolved.auto_approve,
+        };
+        // Defensive: a fresh uuid can never equal an existing id, so a
+        // self-cycle is unreachable — assert it anyway.
+        debug_assert_ne!(&task.id, after_merge_of);
+        // Dangling-check + insert + edge under a SINGLE lock so the queue op is
+        // atomic w.r.t. finish_task(merge): since finish deletes the dependency
+        // before reading its dependents, any interleaving resolves to either
+        // "queued and later promoted" or "dangling → immediate" — never a
+        // stranded Pending row with an edge to an already-merged dependency.
+        // (No `.await` inside the guard, so holding it here is legal.)
+        let queued = {
+            let store = state.store.lock().map_err(|e| e.to_string())?;
+            if store.get_task(after_merge_of).map_err(|e| e.to_string())?.is_some() {
+                store.insert_task(&task).map_err(|e| e.to_string())?;
+                if let Err(e) = store.add_task_dependency(&task.id, after_merge_of) {
+                    // Roll back the just-inserted row so a Pending task never
+                    // exists without its dependency edge (all-or-nothing).
+                    let _ = store.delete_task(&task.id);
+                    return Err(e.to_string());
+                }
+                true
+            } else {
+                false // dangling → fall through to the immediate path below
+            }
+        };
+        if queued {
+            return Ok(LaunchOutcome { task, decision: resolved.decision });
+        }
+        // else: dangling → fall through to the immediate path below.
     }
 
     let repo_path = Path::new(&repo.path);
 
-    // 4. Decide whether to base the worktree on the up-to-date remote branch.
-    //    Effective setting = repo override → app setting → default (On). When on
-    //    and the repo has a remote, fetch origin/<base>; any fetch failure
-    //    (offline / no origin) falls back to the local base so creation never
-    //    blocks on the network. The task's stored `base_branch` stays the logical
-    //    local base (`resolved.base_branch`); only the worktree start ref changes.
-    let use_remote = effective_fetch_remote_base(repo.fetch_remote_base, app_fetch_remote_base);
-    let fetch_ok = if use_remote && repo.remote_url.is_some() {
-        git::fetch(repo_path, "origin", &resolved.base_branch).await.is_ok()
-    } else {
-        false
+    // 4. Adopt-or-create (TASK-125). If the target worktree path is already a
+    //    registered worktree on the intended branch, reuse it instead of failing
+    //    on `git worktree add`. If it's occupied by something that doesn't match
+    //    (bare dir, different branch, already owned by another task), return a
+    //    clear error rather than a cryptic git one — the caller/UI warns first.
+    let already_task_owned = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        store
+            .list_tasks()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|t| Path::new(&t.worktree_path) == resolved.worktree_path)
     };
-    let start_ref = worktree_base_ref(use_remote, fetch_ok, "origin", &resolved.base_branch);
+    let adoption =
+        git::worktree_state(repo_path, &resolved.worktree_path, &resolved.branch, already_task_owned)
+            .await;
 
-    // 5. Create the worktree. `{:#}` surfaces git's stderr (e.g. bad base ref).
-    git::create_worktree(repo_path, &resolved.worktree_path, &resolved.branch, &start_ref)
-        .await
-        .map_err(|e| format!("{e:#}"))?;
+    // A leftover/orphaned (or stale-registered) worktree must be cleaned up before
+    // recreating; captured before the match consumes `adoption`.
+    let needs_reclaim = matches!(adoption, git::WorktreeAdoption::Reclaim { .. });
 
-    // 6. Build and insert the task row. (Setup runs as a background job the
-    //    caller starts after this returns — see AC2-96.)
+    // `created_here` gates rollback: never remove a worktree we merely adopted.
+    let created_here = match adoption {
+        // Existing worktree on the intended branch: adopt it, skip `worktree add`.
+        git::WorktreeAdoption::Adopt => false,
+        git::WorktreeAdoption::Conflict { reason } => return Err(reason),
+        // Vacant → create fresh. Reclaim → clean up the leftover, then create fresh
+        // (create_worktree reuses the existing branch, preserving its commits).
+        git::WorktreeAdoption::Vacant | git::WorktreeAdoption::Reclaim { .. } => {
+            if needs_reclaim {
+                // Removes the orphaned directory + prunes any stale admin entry
+                // (TASK-118 teardown handles the deregistered case). `{:#}` keeps
+                // git's stderr on the error path.
+                git::remove_worktree(repo_path, &resolved.worktree_path, true)
+                    .await
+                    .map_err(|e| format!("{e:#}"))?;
+            }
+
+            // Create the worktree via the shared helper (fetch-remote-base decision
+            // + create_worktree), also used by the TASK-90 promote path. The stored
+            // `base_branch` stays the logical local base; only the start ref changes.
+            prepare_worktree(
+                state,
+                &repo,
+                &resolved.base_branch,
+                &resolved.branch,
+                &resolved.worktree_path,
+            )
+            .await?;
+            true
+        }
+    };
+
+    // 5. Build and insert the task row. (Setup runs as a background job the
+    //    caller starts after this returns — see TASK-96.) This runs for both a
+    //    genuine `Immediate` decision and a dangling `Pending` fall-through.
     let now = now_secs();
     let worktree_path = resolved
         .worktree_path
@@ -229,6 +357,8 @@ pub async fn launch_task(
         model: resolved.model,
         setup_status: None,
         hidden: false,
+        pending_prompt: None,
+        auto_approve: resolved.auto_approve,
     };
 
     let insert_result = {
@@ -236,9 +366,12 @@ pub async fn launch_task(
         store.insert_task(&task)
     };
     if let Err(e) = insert_result {
-        // Worktree exists on disk but the DB insert failed: best-effort rollback
-        // so we don't leave disk state with no DB record.
-        let _ = git::remove_worktree(repo_path, Path::new(&task.worktree_path), true).await;
+        // Worktree we created here exists on disk but the DB insert failed:
+        // best-effort rollback so we don't leave disk state with no DB record.
+        // An *adopted* worktree pre-existed — leave it untouched.
+        if created_here {
+            let _ = git::remove_worktree(repo_path, Path::new(&task.worktree_path), true).await;
+        }
         return Err(e.to_string());
     }
 
@@ -265,6 +398,7 @@ mod tests {
             default_model: None,
             sound_settings: None,
             fetch_remote_base: None,
+            auto_approve: None,
         }
     }
 
@@ -277,6 +411,8 @@ mod tests {
             agent: None,
             model: None,
             after_merge_of: None,
+            prompt: None,
+            auto_approve: None,
         }
     }
 
@@ -293,8 +429,8 @@ mod tests {
     #[test]
     fn decision_some_is_pending_trimmed() {
         assert_eq!(
-            LaunchDecision::from(Some("  AC2-7 ")),
-            LaunchDecision::Pending { after_merge_of: "AC2-7".to_string() }
+            LaunchDecision::from(Some("  TASK-7 ")),
+            LaunchDecision::Pending { after_merge_of: "TASK-7".to_string() }
         );
     }
 
@@ -318,10 +454,10 @@ mod tests {
     #[test]
     fn resolve_branch_from_ticket_key() {
         let mut a = args("My Task");
-        a.ticket_key = Some("AC2-88".to_string());
+        a.ticket_key = Some("TASK-88".to_string());
         let r = resolve_launch(a, &repo(), Path::new("/wt")).unwrap();
-        assert_eq!(r.branch, "ac2-88");
-        assert_eq!(r.ticket_key.as_deref(), Some("AC2-88"));
+        assert_eq!(r.branch, "task-88");
+        assert_eq!(r.ticket_key.as_deref(), Some("TASK-88"));
     }
 
     #[test]
@@ -360,8 +496,29 @@ mod tests {
     #[test]
     fn resolve_carries_pending_decision() {
         let mut a = args("My Task");
-        a.after_merge_of = Some("AC2-7".to_string());
+        a.after_merge_of = Some("TASK-7".to_string());
         let r = resolve_launch(a, &repo(), Path::new("/wt")).unwrap();
-        assert_eq!(r.decision, LaunchDecision::Pending { after_merge_of: "AC2-7".to_string() });
+        assert_eq!(r.decision, LaunchDecision::Pending { after_merge_of: "TASK-7".to_string() });
+    }
+
+    #[test]
+    fn resolve_normalizes_pending_prompt() {
+        let mut a = args("My Task");
+        a.prompt = Some("  seed me  ".to_string());
+        let r = resolve_launch(a, &repo(), Path::new("/wt")).unwrap();
+        assert_eq!(r.pending_prompt.as_deref(), Some("seed me"));
+
+        let mut blank = args("My Task");
+        blank.prompt = Some("   ".to_string());
+        let r2 = resolve_launch(blank, &repo(), Path::new("/wt")).unwrap();
+        assert_eq!(r2.pending_prompt, None);
+    }
+
+    #[test]
+    fn resolve_launch_passes_through_auto_approve() {
+        let mut a = args("My Task");
+        a.auto_approve = Some(false);
+        let r = resolve_launch(a, &repo(), Path::new("/wt")).unwrap();
+        assert_eq!(r.auto_approve, Some(false));
     }
 }

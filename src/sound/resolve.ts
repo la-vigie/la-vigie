@@ -7,7 +7,7 @@ import type { SoundSettings, RepoSoundOverride, SoundEvent } from "./types";
  * supplied and the chosen sound is not among them (e.g. a deleted custom sound),
  * fall back to the event's default bundled sound so playback is never silent.
  *
- * `inMeeting` (AC2-105): when automute is on for this repo/app and the user is
+ * `inMeeting` (TASK-105): when automute is on for this repo/app and the user is
  * in a meeting, suppress the *sound only* — return `{ play: true }` with no
  * `sound`, so the caller still fires the OS notification but stays silent.
  */

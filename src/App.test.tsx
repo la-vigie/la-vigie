@@ -36,6 +36,14 @@ vi.mock("./hooks/useTaskRename", () => ({
   useTaskRename: vi.fn(),
 }));
 
+vi.mock("./hooks/useTaskRemoved", () => ({
+  useTaskRemoved: vi.fn(),
+}));
+
+vi.mock("./hooks/useTaskCreated", () => ({
+  useTaskCreated: vi.fn(),
+}));
+
 vi.mock("./hooks/useTerminalFileDrop", () => ({
   useTerminalFileDrop: vi.fn().mockReturnValue(false),
 }));
@@ -50,7 +58,7 @@ vi.mock("./components/Diff/DiffPanel", () => ({
   ),
 }));
 
-describe("App — sidebar resize handle (AC2-17)", () => {
+describe("App — sidebar resize handle (TASK-17)", () => {
   beforeEach(() => {
     localStorage.clear();
     invokeMock.mockReset();

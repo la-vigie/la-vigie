@@ -30,7 +30,7 @@ describe("Settings — Remote access", () => {
     fireEvent.click(await screen.findByRole("button", { name: /enable remote/i }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("enable_remote"));
     expect(await screen.findByText(/tok-123/)).toBeInTheDocument();
-    // AC2-104: held assertion is surfaced as a note.
+    // TASK-104: held assertion is surfaced as a note.
     expect(screen.getByText(/system sleep is/i)).toBeInTheDocument();
     expect(screen.getByText(/AC power only/i)).toBeInTheDocument();
   });

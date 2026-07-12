@@ -8,13 +8,13 @@ use crate::remote::{server, status_of, tailscale, ActiveRemote, RemoteStatus};
 use crate::state::AppState;
 
 /// Mint a high-entropy pairing token (two v4 UUIDs ⇒ 64 hex chars). Keychain
-/// storage + hashing are deferred (AC2-57); the token is in-memory only.
+/// storage + hashing are deferred (TASK-57); the token is in-memory only.
 fn mint_token() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
 /// Acquire a system-sleep-preventing power assertion for the lifetime of the
-/// enabled remote server (AC2-104). On macOS this is an IOPMAssertion
+/// enabled remote server (TASK-104). On macOS this is an IOPMAssertion
 /// (`PreventUserIdleSystemSleep`) released deterministically when the returned
 /// handle is dropped. `idle` only — display sleep is left untouched.
 ///
@@ -31,7 +31,7 @@ fn acquire_keep_awake() -> Option<keepawake::KeepAwake> {
     {
         Ok(k) => Some(k),
         Err(e) => {
-            eprintln!("AC2-104: failed to acquire sleep-prevention assertion: {e:#}");
+            eprintln!("TASK-104: failed to acquire sleep-prevention assertion: {e:#}");
             None
         }
     }
@@ -96,7 +96,7 @@ pub async fn enable_remote(
         return Ok(status_of(&remote));
     }
     // Hold a system-sleep assertion so the tailnet host stays reachable while
-    // remote is on (AC2-104). Best-effort: acquire failure leaves it `None` and
+    // remote is on (TASK-104). Best-effort: acquire failure leaves it `None` and
     // does not block enable. Acquired before the lock — `keepawake` is synchronous.
     let keep_awake = acquire_keep_awake();
     let mut remote = state.remote.lock().map_err(|e| format!("{e:#}"))?;
@@ -114,7 +114,7 @@ pub async fn disable_remote(state: State<'_, AppState>) -> Result<RemoteStatus, 
     }; // guard dropped here — no MutexGuard is live across any await below
     if let Some(a) = active {
         let _ = a.shutdown.send(());
-        // Dropping `a` releases the held power assertion (AC2-104).
+        // Dropping `a` releases the held power assertion (TASK-104).
         drop(a.keep_awake);
         let _ = tailscale::serve_reset().await;
     }

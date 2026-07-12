@@ -7,9 +7,9 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/evermax/la-vigie.git"
+    "url": "git+https://github.com/la-vigie/la-vigie.git"
   },
-  "homepage": "https://github.com/evermax/la-vigie",
+  "homepage": "https://github.com/la-vigie/la-vigie",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -34,11 +34,13 @@
     "react-diff-view": "^3.3.3",
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",
-    "refractor": "^3.6.0",
+    "refractor": "^5.0.0",
     "remark-gfm": "^4.0.1",
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@stryker-mutator/core": "^9.6.1",
+    "@stryker-mutator/vitest-runner": "^9.6.1",
     "@tauri-apps/cli": "^2",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
@@ -46,11 +48,15 @@
     "@testing-library/user-event": "^14.6.1",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
-    "@types/refractor": "^3.4.1",
     "@vitejs/plugin-react": "^4.6.0",
     "jsdom": "^29.1.1",
     "typescript": "~5.8.3",
-    "vite": "^7.0.4",
+    "vite": "^7.3.6",
     "vitest": "^4.1.9"
+  },
+  "overrides": {
+    "typed-rest-client": {
+      "qs": "6.15.3"
+    }
   }
 }

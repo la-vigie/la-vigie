@@ -10,10 +10,12 @@ mod launch;
 mod meeting;
 pub mod hooks;
 mod mcp;
+pub mod teardown;
 mod remote;
 mod session;
 mod concierge;
 mod setup;
+mod lavigie_plugin;
 mod shell_env;
 mod sound;
 mod sound_commands;
@@ -64,12 +66,13 @@ pub fn run() {
             std::fs::create_dir_all(&concierge_root)?;
 
             // Start the HookBridge server. Use block_on so setup remains sync.
-            let sink: Arc<dyn hooks::StatusSink> =
-                Arc::new(hooks::TauriSink::new(app.handle().clone()));
-            let hook_port = tauri::async_runtime::block_on(hooks::start_hook_server(sink))
+            let tauri_sink = Arc::new(hooks::TauriSink::new(app.handle().clone()));
+            let sink: Arc<dyn hooks::StatusSink> = tauri_sink.clone();
+            let teardown: Arc<dyn hooks::TaskTeardown> = tauri_sink;
+            let hook_port = tauri::async_runtime::block_on(hooks::start_hook_server(sink, teardown))
                 .map_err(|e| format!("failed to start hook server: {e}"))?;
 
-            // Start the MCP self-dispatch server (AC2-89). block_on keeps setup sync.
+            // Start the MCP self-dispatch server (TASK-89). block_on keeps setup sync.
             let mcp_port = tauri::async_runtime::block_on(mcp::start_mcp_server(app.handle().clone()))
                 .map_err(|e| format!("failed to start mcp server: {e}"))?;
 
@@ -88,9 +91,10 @@ pub fn run() {
                 remote: std::sync::Mutex::new(remote::RemoteState::default()),
                 transcripts: Mutex::new(std::collections::HashMap::new()),
                 concierge_spawn: Mutex::new(()),
+                base_fetch_at: Mutex::new(std::collections::HashMap::new()),
             });
 
-            // AC2-112: reap idle concierge sessions — the poll-based remote
+            // TASK-112: reap idle concierge sessions — the poll-based remote
             // transport gives no disconnect signal, so silence is the only cue.
             concierge::spawn_reaper(app.handle().clone());
 
@@ -103,9 +107,11 @@ pub fn run() {
             commands::set_sound_settings,
             commands::is_meeting_active,
             commands::set_fetch_remote_base,
+            commands::set_inject_lavigie_skills,
             commands::remove_repo,
             commands::list_repo_branches,
             commands::create_task,
+            commands::check_worktree_path,
             commands::get_setup_state,
             commands::delete_task,
             commands::finish_task,
@@ -135,6 +141,7 @@ pub fn run() {
             agent_commands::set_task_agent,
             agent_commands::set_repo_default_model,
             agent_commands::set_task_model,
+            agent_commands::set_task_auto_approve,
             agent_commands::list_agent_models,
             sound_commands::import_custom_sound,
             sound_commands::list_custom_sounds,
@@ -163,7 +170,7 @@ mod tests {
         );
     }
 
-    /// Regression guard for AC2-74: the custom HTML title bar drags the window
+    /// Regression guard for TASK-74: the custom HTML title bar drags the window
     /// via `data-tauri-drag-region`, which invokes the `start_dragging` command.
     /// That command is NOT part of `core:window:default`, so without an explicit
     /// grant every drag is silently denied and the window can't be moved.
@@ -180,11 +187,11 @@ mod tests {
                 .iter()
                 .any(|p| p.as_str() == Some("core:window:allow-start-dragging")),
             "capabilities/default.json must grant core:window:allow-start-dragging \
-             or the custom title bar cannot drag the window (AC2-74)"
+             or the custom title bar cannot drag the window (TASK-74)"
         );
     }
 
-    /// AC2-81: custom sounds play from a `blob:` URL built in the webview.
+    /// TASK-81: custom sounds play from a `blob:` URL built in the webview.
     /// Without `media-src blob:` in the CSP, <audio>/Audio falls back to
     /// default-src 'self' and the blob is blocked — so custom sounds go silent.
     #[test]

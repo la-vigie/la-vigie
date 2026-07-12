@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createTask, removeRepo, startAgent, writeSession, resizeSession, stopSession, onAgentStatus, getDiff, getChangedFiles, stageFiles, commitTask, finishTask, ghStatus, createPr, getPrStatus, getPrComments, openUrl, listAgents, setTaskAgent, upsertCustomAgent, deleteCustomAgent, listTaskDocs, readTaskDoc, setSoundSettings, notifyAgentEvent, listAgentModels, setTaskModel, createPrompt, reorderPrompts } from "./api";
+import { createTask, checkWorktreePath, removeRepo, startAgent, writeSession, resizeSession, stopSession, onAgentStatus, getDiff, getChangedFiles, stageFiles, commitTask, finishTask, ghStatus, createPr, getPrStatus, getPrComments, openUrl, listAgents, setTaskAgent, upsertCustomAgent, deleteCustomAgent, listTaskDocs, readTaskDoc, setSoundSettings, notifyAgentEvent, listAgentModels, setTaskModel, createPrompt, reorderPrompts } from "./api";
 
 const { invokeMock, ChannelMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
@@ -83,8 +83,40 @@ describe("createTask", () => {
       ticketKey: null,
       agent: null,
       model: null,
+      autoApprove: null,
     });
     expect(result).toEqual({ id: "t1" });
+  });
+});
+
+describe("checkWorktreePath", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+  });
+
+  it("invokes check_worktree_path with camelCase args (nulls for omitted) and returns the preview", async () => {
+    invokeMock.mockResolvedValueOnce({ state: "adopt", path: "/wt/r/x", message: "reused" });
+    const result = await checkWorktreePath("repo-1", "My task");
+
+    expect(invokeMock).toHaveBeenCalledWith("check_worktree_path", {
+      repoId: "repo-1",
+      title: "My task",
+      baseBranch: null,
+      ticketKey: null,
+    });
+    expect(result).toEqual({ state: "adopt", path: "/wt/r/x", message: "reused" });
+  });
+
+  it("forwards baseBranch and ticketKey when provided", async () => {
+    invokeMock.mockResolvedValueOnce({ state: "vacant", path: "", message: null });
+    await checkWorktreePath("repo-1", "My task", "develop", "TASK-125");
+
+    expect(invokeMock).toHaveBeenCalledWith("check_worktree_path", {
+      repoId: "repo-1",
+      title: "My task",
+      baseBranch: "develop",
+      ticketKey: "TASK-125",
+    });
   });
 });
 
@@ -401,18 +433,18 @@ describe("task docs api wrappers", () => {
   });
 
   it("listTaskDocs invokes list_task_docs with camelCase taskId", async () => {
-    invokeMock.mockResolvedValue([{ id: "memory/spec_AC2-54.md", label: "Spec (AC2-54)" }]);
+    invokeMock.mockResolvedValue([{ id: "memory/spec_TASK-54.md", label: "Spec (TASK-54)" }]);
     const docs = await listTaskDocs("task-1");
     expect(invokeMock).toHaveBeenCalledWith("list_task_docs", { taskId: "task-1" });
-    expect(docs).toEqual([{ id: "memory/spec_AC2-54.md", label: "Spec (AC2-54)" }]);
+    expect(docs).toEqual([{ id: "memory/spec_TASK-54.md", label: "Spec (TASK-54)" }]);
   });
 
   it("readTaskDoc invokes read_task_doc with taskId and id", async () => {
     invokeMock.mockResolvedValue("# hello");
-    const md = await readTaskDoc("task-1", "memory/spec_AC2-54.md");
+    const md = await readTaskDoc("task-1", "memory/spec_TASK-54.md");
     expect(invokeMock).toHaveBeenCalledWith("read_task_doc", {
       taskId: "task-1",
-      id: "memory/spec_AC2-54.md",
+      id: "memory/spec_TASK-54.md",
     });
     expect(md).toBe("# hello");
   });

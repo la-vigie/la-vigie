@@ -17,6 +17,12 @@ Built with **Tauri 2** (Rust) + **React/TypeScript**.
   notifications.
 - Local diff review (GitHub-style, syntax-highlighted) with stage & commit.
 - GitHub PR integration via the `gh` CLI: create PR, status/checks, read-only comments, squash-merge.
+- Optional bundled "way of working" skills: an off-by-default Settings toggle injects La Vigie's own
+  Claude Code skills (`/lavigie:rename`, `/lavigie:finished`, `/lavigie:spec-init`,
+  `/lavigie:verify-claims`, `/lavigie:await-merge`) into launched agents — namespaced, so they add to
+  rather than override your own `~/.claude` skills.
+- **Task dependencies ([start-on-merge](./docs/start-on-merge.md)):** queue a task behind another and
+  have it auto-start when the first one lands.
 - Collapsible sidebar, resizable panes, diff right-or-bottom.
 
 ## Prerequisites
@@ -39,6 +45,13 @@ npm run tauri build      # produce a release bundle
 
 Or run `./scripts/setup-worktree.sh` (also `npm run setup`) to install JS deps and warm the Rust
 build in one step.
+
+## Getting started
+
+New to La Vigie? The [Getting Started guide](./docs/getting-started.md) walks through the core
+loop — creating a task, running an agent, reviewing the diff, and steering the agent — with
+screenshots of each step. For a page on every feature, browse the full
+[documentation index](./docs/README.md).
 
 ## Testing
 

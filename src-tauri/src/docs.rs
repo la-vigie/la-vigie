@@ -37,7 +37,7 @@ pub fn resolve_docs(worktree: &Path, ticket: Option<&str>, branch_docs: &[String
 
     // 1. The task's own spec (per-worktree, gitignored, may not exist).
     if let Some(ticket) = ticket.filter(|t| !t.is_empty()) {
-        // Defense-in-depth: a ticket key is a short id like `AC2-54`, never a
+        // Defense-in-depth: a ticket key is a short id like `TASK-54`, never a
         // path. Reject separators so it can't escape the worktree via the spec
         // path (e.g. `../../foo`).
         if !(ticket.contains('/') || ticket.contains('\\') || ticket.contains("..")) {
@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn spec_rel_path_uses_ticket() {
-        assert_eq!(spec_rel_path("AC2-54"), "memory/spec_AC2-54.md");
+        assert_eq!(spec_rel_path("TASK-54"), "memory/spec_TASK-54.md");
     }
 
     #[test]
@@ -129,23 +129,23 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
         fs::create_dir_all(root.join("memory")).unwrap();
-        fs::write(root.join("memory/spec_AC2-54.md"), "# spec").unwrap();
+        fs::write(root.join("memory/spec_TASK-54.md"), "# spec").unwrap();
 
         // Design/plan docs are listed purely because they are new on the branch
         // (passed in `branch_docs`), regardless of ticket-name matching.
         let branch_docs = s(&[
-            "docs/superpowers/specs/2026-06-26-ac2-54-foo-design.md",
-            "docs/superpowers/plans/2026-06-26-ac2-54-foo.md",
+            "docs/superpowers/specs/2026-06-26-task-54-foo-design.md",
+            "docs/superpowers/plans/2026-06-26-task-54-foo.md",
         ]);
 
-        let docs = resolve_docs(root, Some("AC2-54"), &branch_docs);
+        let docs = resolve_docs(root, Some("TASK-54"), &branch_docs);
         let ids: Vec<&str> = docs.iter().map(|d| d.id.as_str()).collect();
         assert_eq!(
             ids,
             vec![
-                "memory/spec_AC2-54.md",
-                "docs/superpowers/specs/2026-06-26-ac2-54-foo-design.md",
-                "docs/superpowers/plans/2026-06-26-ac2-54-foo.md",
+                "memory/spec_TASK-54.md",
+                "docs/superpowers/specs/2026-06-26-task-54-foo-design.md",
+                "docs/superpowers/plans/2026-06-26-task-54-foo.md",
             ]
         );
     }
@@ -165,7 +165,7 @@ mod tests {
         let dir = tempdir().unwrap();
         // A doc that exists in the worktree but is *not* in `branch_docs` (i.e.
         // already on the base branch) must be omitted.
-        let docs = resolve_docs(dir.path(), Some("AC2-54"), &[]);
+        let docs = resolve_docs(dir.path(), Some("TASK-54"), &[]);
         assert!(docs.is_empty());
     }
 
@@ -187,7 +187,7 @@ mod tests {
     fn resolve_omits_missing_spec() {
         let dir = tempdir().unwrap();
         // No memory/ dir at all → no spec entry, no panic.
-        let docs = resolve_docs(dir.path(), Some("AC2-99"), &[]);
+        let docs = resolve_docs(dir.path(), Some("TASK-99"), &[]);
         assert!(docs.is_empty());
     }
 
@@ -195,9 +195,9 @@ mod tests {
     fn read_doc_rejects_unlisted_id() {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join("memory")).unwrap();
-        fs::write(dir.path().join("memory/spec_AC2-54.md"), "# spec").unwrap();
+        fs::write(dir.path().join("memory/spec_TASK-54.md"), "# spec").unwrap();
         // Path traversal / arbitrary read must be refused.
-        let err = read_doc(dir.path(), Some("AC2-54"), &[], "../secret.txt").unwrap_err();
+        let err = read_doc(dir.path(), Some("TASK-54"), &[], "../secret.txt").unwrap_err();
         assert!(err.contains("not available"));
     }
 
@@ -205,8 +205,8 @@ mod tests {
     fn read_doc_returns_listed_content() {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join("memory")).unwrap();
-        fs::write(dir.path().join("memory/spec_AC2-54.md"), "# hello").unwrap();
-        let body = read_doc(dir.path(), Some("AC2-54"), &[], "memory/spec_AC2-54.md").unwrap();
+        fs::write(dir.path().join("memory/spec_TASK-54.md"), "# hello").unwrap();
+        let body = read_doc(dir.path(), Some("TASK-54"), &[], "memory/spec_TASK-54.md").unwrap();
         assert_eq!(body, "# hello");
     }
 }

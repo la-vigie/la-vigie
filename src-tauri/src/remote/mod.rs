@@ -1,5 +1,5 @@
-//! Tailnet remote-control server (AC2-86). Default-off; see
-//! docs/superpowers/specs/2026-06-28-ac2-86-remote-control-poc-design.md.
+//! Tailnet remote-control server (TASK-86). Default-off; see
+//! docs/superpowers/specs/2026-06-28-task-86-remote-control-poc-design.md.
 pub mod auth;
 pub mod commands;
 pub mod server;
@@ -22,7 +22,7 @@ pub struct ActiveRemote {
     pub port: u16,
     pub shutdown: tokio::sync::oneshot::Sender<()>,
     /// Held power assertion (macOS IOPMAssertion `PreventUserIdleSystemSleep`) that
-    /// keeps the host reachable over the tailnet while remote is enabled (AC2-104).
+    /// keeps the host reachable over the tailnet while remote is enabled (TASK-104).
     /// Released deterministically when this `ActiveRemote` is dropped/taken; the OS
     /// also reclaims it on process exit/crash. Best-effort: `None` when the
     /// assertion could not be acquired (remote still works, sleep just isn't held).
@@ -38,7 +38,7 @@ pub struct RemoteStatus {
     pub token: Option<String>,
     pub url: Option<String>,
     /// Whether a system-sleep-preventing power assertion is currently held
-    /// (AC2-104). True only when remote is active *and* the assertion was
+    /// (TASK-104). True only when remote is active *and* the assertion was
     /// acquired; false otherwise, so the UI can warn on best-effort failure.
     pub sleep_inhibited: bool,
 }

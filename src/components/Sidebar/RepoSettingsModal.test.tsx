@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RepoSettingsModal } from "./RepoSettingsModal";
 import type { Repo, Task } from "../../store";
 import { useVigieStore } from "../../store";
+import * as api from "../../api";
 
 const { invokeMock, openMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
@@ -52,7 +53,7 @@ describe("RepoSettingsModal", () => {
     updatedAt: 0,
   });
 
-  describe("danger zone (AC2-69)", () => {
+  describe("danger zone (TASK-69)", () => {
     it("does not show the inline confirm until Remove repository is clicked", () => {
       render(<RepoSettingsModal repo={repo} onClose={() => {}} />);
       expect(screen.getByText("Remove repository")).toBeTruthy();
@@ -123,6 +124,7 @@ describe("RepoSettingsModal", () => {
         soundSettings: null,
         fetchRemoteBase: null,
         defaultAgent: "claude",
+        autoApprove: null,
       }),
     );
     await waitFor(() => {
@@ -197,6 +199,7 @@ describe("RepoSettingsModal", () => {
         soundSettings: null,
         fetchRemoteBase: null,
         defaultAgent: "claude",
+        autoApprove: null,
       }),
     );
   });
@@ -208,7 +211,7 @@ describe("RepoSettingsModal", () => {
   });
 
   it("saves the repo fetch-remote-base override", async () => {
-    const repoWithOverride: Repo = { ...repo, fetchRemoteBase: null };
+    const repoWithOverride: Repo = { ...repo, fetchRemoteBase: null, autoApprove: null };
     render(<RepoSettingsModal repo={repoWithOverride} onClose={() => {}} />);
     fireEvent.change(screen.getByLabelText("Fetch remote base"), {
       target: { value: "off" },
@@ -219,6 +222,22 @@ describe("RepoSettingsModal", () => {
         fetchRemoteBase: false,
       })),
     );
+  });
+
+  it("saves the repo auto-approve override", async () => {
+    const updateRepo = vi.spyOn(api, "updateRepo");
+    updateRepo.mockResolvedValue({ ...repo, autoApprove: false });
+    render(<RepoSettingsModal repo={{ ...repo, autoApprove: null }} onClose={() => {}} />);
+
+    fireEvent.change(screen.getByLabelText("Auto-approve agent actions"), {
+      target: { value: "off" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    await waitFor(() => expect(updateRepo).toHaveBeenCalled());
+    // autoApprove is the 11th positional arg of updateRepo (0-indexed 10)
+    expect(updateRepo.mock.calls[0][10]).toBe(false);
+    updateRepo.mockRestore();
   });
 
   it("saves an edited setup command", async () => {
@@ -240,11 +259,12 @@ describe("RepoSettingsModal", () => {
         soundSettings: null,
         fetchRemoteBase: null,
         defaultAgent: "claude",
+        autoApprove: null,
       }),
     );
   });
 
-  describe("default agent + model (AC2-21 / AC2-93)", () => {
+  describe("default agent + model (TASK-21 / TASK-93)", () => {
     it("falls back to 'claude' when repo has no defaultAgent", async () => {
       render(<RepoSettingsModal repo={repo} onClose={() => {}} />);
       expect(await screen.findByTestId("amp-trigger")).toHaveTextContent("Claude Code");
@@ -308,6 +328,7 @@ describe("RepoSettingsModal", () => {
         soundSettings: null,
         fetchRemoteBase: null,
         defaultAgent: "claude",
+        autoApprove: null,
       }),
     );
     await waitFor(() => expect(onClose).toHaveBeenCalled());

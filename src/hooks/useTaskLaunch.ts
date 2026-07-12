@@ -4,7 +4,7 @@ import { combineInitialPrompts } from "../lib/combineInitialPrompts";
 import { useVigieStore } from "../store";
 
 /// Listen for `task_launched` (emitted when an agent self-dispatches a task via
-/// MCP, AC2-89) and start the new task's agent on the existing path: refresh so
+/// MCP, TASK-89) and start the new task's agent on the existing path: refresh so
 /// the task is in the store, select it, then `startAgentSession`. The agent tab
 /// label defaults to "Claude" (cosmetic); the backend resolves the real agent.
 export function useTaskLaunch(): void {
