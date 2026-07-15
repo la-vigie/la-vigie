@@ -27,7 +27,7 @@ pub const BUNDLE_IGNORE: &str = "*\n";
 /// exactly as before (nothing is treated as tracked, everything is copied).
 /// TASK-201: used to never overwrite a file a repo genuinely commits under one of
 /// the injected dotdirs (`.agents/`, `.opencode/`, `.vibe/`).
-fn tracked_paths(worktree: &Path) -> HashSet<PathBuf> {
+pub(crate) fn tracked_paths(worktree: &Path) -> HashSet<PathBuf> {
     // `-z` → NUL-separated, so any filename (spaces, newlines) round-trips.
     let output = match Command::new("git")
         .arg("-C")

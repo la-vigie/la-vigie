@@ -1,6 +1,6 @@
 [package]
 name = "vigie"
-version = "0.3.0"
+version = "0.4.0"
 description = "Local desktop app to manage parallel AI coding agents and their git worktrees"
 authors = ["evermax"]
 edition = "2021"

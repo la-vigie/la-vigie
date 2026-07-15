@@ -10,6 +10,7 @@
 //! commands below) because it needs a running Tauri app to construct a
 //! `Channel`.
 
+pub mod mcp_bundle;
 pub mod models;
 pub mod skill_bundle;
 pub mod spec;
@@ -364,9 +365,16 @@ pub fn start_agent(
         None
     };
 
-    // TASK-89: mint a per-agent MCP token (auth + originating-context carrier) and
-    // inject the --mcp-config so this agent can self-dispatch tasks. Claude only.
-    let mcp_token = if spec.status == StatusMechanism::ClaudeHooks {
+    use crate::agent::spec::SkillInjection;
+
+    // TASK-89 / TASK-193: mint a per-agent Agent-tier MCP token (auth + originating
+    // task/repo carrier). Claude consumes it via an inline `--mcp-config`; the four
+    // WorktreeBundle engines consume it via a materialized project-local MCP config
+    // (below). Mint for either path; the token's lifecycle is owned by
+    // register_streaming_session/stop_session_inner regardless of engine.
+    let wants_mcp_injection =
+        app_inject_skills && matches!(spec.skill_injection, SkillInjection::WorktreeBundle { .. });
+    let mcp_token = if spec.status == StatusMechanism::ClaudeHooks || wants_mcp_injection {
         let token = uuid::Uuid::new_v4().to_string();
         state
             .mcp_tokens
@@ -383,9 +391,12 @@ pub fn start_agent(
     } else {
         None
     };
-    let mcp_config = mcp_token.as_deref().map(|t| build_mcp_config(state.mcp_port, t));
-
-    use crate::agent::spec::SkillInjection;
+    // Inline `--mcp-config` is Claude-only; Lifecycle engines get a materialized file.
+    let mcp_config = if spec.status == StatusMechanism::ClaudeHooks {
+        mcp_token.as_deref().map(|t| build_mcp_config(state.mcp_port, t))
+    } else {
+        None
+    };
 
     // TASK-153: Claude gets La Vigie's bundled skills out-of-tree via `--plugin-dir`.
     // Unresolvable/invalid bundle → omit the flag; launch never breaks.
@@ -416,6 +427,38 @@ pub fn start_agent(
                 }
                 None => {
                     eprintln!("TASK-35: no vendored skill bundle for {provider}; launching skill-free");
+                }
+            }
+        }
+    }
+
+    // TASK-193: the same WorktreeBundle engines get La Vigie's loopback MCP server
+    // registered via a project-local config materialized into the worktree, with
+    // the ephemeral port + this agent's bearer token substituted in. Git-excluded
+    // like the skills, never overwriting a repo-tracked config. Best-effort: any
+    // failure logs and the agent launches without the injected server. Runs before
+    // spawn_pty (KEEP-ALIVE safe).
+    if let (SkillInjection::WorktreeBundle { provider }, Some(token)) =
+        (&spec.skill_injection, mcp_token.as_deref())
+    {
+        if wants_mcp_injection {
+            match crate::lavigie_skills::resolve_mcp_bundle_dir(&app, provider) {
+                Some(bundle) => {
+                    match crate::agent::mcp_bundle::materialize_mcp(
+                        &bundle,
+                        Path::new(&worktree_path),
+                        state.mcp_port,
+                        token,
+                    ) {
+                        Ok(dirs) if dirs.is_empty() => {
+                            eprintln!("TASK-193: MCP bundle for {provider} was empty; launching without lavigie server");
+                        }
+                        Ok(_dirs) => {}
+                        Err(e) => eprintln!("TASK-193: MCP injection for {provider} failed: {e:#}"),
+                    }
+                }
+                None => {
+                    eprintln!("TASK-193: no vendored MCP bundle for {provider}; launching without lavigie server");
                 }
             }
         }
@@ -457,15 +500,45 @@ pub fn start_agent(
     if let Some(entry) = lavigie_task_ref_env(task_ticket_key.as_deref()) {
         agent_env.push(entry);
     }
+    // TASK-193: Codex reads its MCP bearer token from an env var (it has no
+    // static-header auth for HTTP MCP; its vendored config names LAVIGIE_MCP_TOKEN
+    // via `bearer_token_env_var`), so hand it the minted token when we injected an
+    // MCP config. Harmless for the other engines, which read the token from the
+    // static `Authorization` header in their own materialized config.
+    if wants_mcp_injection {
+        if let Some(t) = mcp_token.as_deref() {
+            agent_env.push(("LAVIGIE_MCP_TOKEN", t.to_string()));
+        }
+    }
 
-    let mut session = spawn_pty(&resolved, &args, Some(Path::new(&worktree_path)), 80, 24, &agent_env)
-        .map_err(|e| format!("{e:#}"))?;
+    // If spawn or the initial write fails we return early, before
+    // register_streaming_session (which owns the token's lifecycle on success)
+    // ever runs — so revoke the just-minted MCP token here, or a failed launch
+    // orphans a live credential (for a WorktreeBundle engine it was also just
+    // written into a worktree config file on disk). TASK-193 review.
+    let mut session = match spawn_pty(&resolved, &args, Some(Path::new(&worktree_path)), 80, 24, &agent_env) {
+        Ok(s) => s,
+        Err(e) => {
+            if let Some(t) = mcp_token.as_deref() {
+                let _ = state.mcp_tokens.lock().map(|mut m| m.remove(t));
+            }
+            return Err(format!("{e:#}"));
+        }
+    };
 
     // PromptMode::Stdin path (not exercised by the claude-only live route, but
     // wired so the TASK-21 thread inherits a complete delivery).
     if let Some(stdin) = delivery.stdin {
-        session.writer.write_all(stdin.as_bytes()).map_err(|e| format!("{e:#}"))?;
-        session.writer.flush().map_err(|e| format!("{e:#}"))?;
+        if let Err(e) = session
+            .writer
+            .write_all(stdin.as_bytes())
+            .and_then(|_| session.writer.flush())
+        {
+            if let Some(t) = mcp_token.as_deref() {
+                let _ = state.mcp_tokens.lock().map(|mut m| m.remove(t));
+            }
+            return Err(format!("{e:#}"));
+        }
     }
 
     register_streaming_session(&state, &agent_id, session, Some(on_event), mcp_token, SessionKind::Task, None)?;

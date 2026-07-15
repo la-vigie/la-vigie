@@ -18,14 +18,14 @@ pub fn is_valid_bundle_dir(dir: &Path) -> bool {
             .unwrap_or(false)
 }
 
-/// Resolve the vendored bundle dir for `provider`, or `None` if not found.
+/// Resolve a vendored bundle dir under `resources/<root>/<provider>`, or `None`.
 /// Tries the packaged Resource base dir (two candidate prefixes, as bundlers
 /// differ on whether the leading `resources/` segment survives), then a
 /// dev-tree fallback next to the crate. Never panics.
-pub fn resolve_skills_bundle_dir(app: &AppHandle, provider: &str) -> Option<PathBuf> {
+fn resolve_bundle_dir(app: &AppHandle, root: &str, provider: &str) -> Option<PathBuf> {
     let rels = [
-        format!("resources/lavigie-skills/{provider}"),
-        format!("lavigie-skills/{provider}"),
+        format!("resources/{root}/{provider}"),
+        format!("{root}/{provider}"),
     ];
     for rel in &rels {
         if let Ok(p) = app.path().resolve(rel, BaseDirectory::Resource) {
@@ -35,12 +35,23 @@ pub fn resolve_skills_bundle_dir(app: &AppHandle, provider: &str) -> Option<Path
         }
     }
     let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("resources/lavigie-skills")
+        .join("resources")
+        .join(root)
         .join(provider);
     if is_valid_bundle_dir(&dev) {
         return Some(dev);
     }
     None
+}
+
+/// Resolve the vendored per-provider *skill* bundle (TASK-35).
+pub fn resolve_skills_bundle_dir(app: &AppHandle, provider: &str) -> Option<PathBuf> {
+    resolve_bundle_dir(app, "lavigie-skills", provider)
+}
+
+/// Resolve the vendored per-provider *MCP config* bundle (TASK-193).
+pub fn resolve_mcp_bundle_dir(app: &AppHandle, provider: &str) -> Option<PathBuf> {
+    resolve_bundle_dir(app, "lavigie-mcp", provider)
 }
 
 #[cfg(test)]

@@ -1,0 +1,12 @@
+{
+  "mcp": {
+    "lavigie": {
+      "type": "remote",
+      "url": "http://127.0.0.1:__LAVIGIE_MCP_PORT__/mcp",
+      "enabled": true,
+      "headers": {
+        "Authorization": "Bearer __LAVIGIE_MCP_TOKEN__"
+      }
+    }
+  }
+}

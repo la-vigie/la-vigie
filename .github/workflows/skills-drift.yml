@@ -1,7 +1,7 @@
-# TASK-35: keep the generated per-provider skill bundles in sync with their single
-# canonical source (.rulesync/skills/). Regenerates from source and fails if the
-# committed resource trees differ — the same "generated artifacts stay fresh"
-# guard the repo already applies elsewhere. Advisory-independent of the tests gate.
+# TASK-35 / TASK-193: keep the generated per-provider skill bundles AND MCP configs
+# in sync with their single canonical source (.rulesync/). Regenerates from source
+# and fails if the committed resource trees differ — the same "generated artifacts
+# stay fresh" guard the repo already applies elsewhere. Independent of the tests gate.
 name: skills-drift
 
 on:
@@ -24,13 +24,14 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
-      - name: Regenerate skill bundles
+      - name: Regenerate skill + MCP bundles
         run: npm run skills:generate
       - name: Fail on drift
         run: |
           if ! git diff --exit-code -- \
               src-tauri/resources/lavigie-skills \
+              src-tauri/resources/lavigie-mcp \
               src-tauri/resources/lavigie-plugin/skills; then
-            echo "::error::Generated skill bundles are stale. Run 'npm run skills:generate' and commit the result."
+            echo "::error::Generated skill/MCP bundles are stale. Run 'npm run skills:generate' and commit the result."
             exit 1
           fi

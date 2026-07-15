@@ -13,6 +13,14 @@ The server speaks JSON-RPC over a loopback HTTP endpoint on an ephemeral port, a
 with a bearer token. Every running agent gets an MCP config pointing at it automatically —
 there's nothing to install or configure by hand.
 
+This works across agent engines, not just Claude. Claude Code receives the config inline as
+a launch flag; the other engines (Codex, Antigravity, OpenCode, Mistral Vibe) discover it
+from a project-local config file that La Vigie writes into the worktree at spawn — generated
+per engine at build time from one canonical source and materialized with that agent's
+ephemeral port and bearer token filled in, git-excluded so it never shows up in the Diff.
+Only La Vigie's own `lavigie` server is injected this way; any other MCP servers you use
+(your own, for another tracker, etc.) stay under your own per-engine config.
+
 ## How to use it
 
 Fourteen tools are registered, grouped by what they let a caller do:

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "lavigie": {
+      "type": "http",
+      "serverUrl": "http://127.0.0.1:__LAVIGIE_MCP_PORT__/mcp",
+      "headers": {
+        "Authorization": "Bearer __LAVIGIE_MCP_TOKEN__"
+      }
+    }
+  }
+}

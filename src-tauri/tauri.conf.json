@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "La Vigie",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "identifier": "com.lavigie",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -46,7 +46,8 @@
     "targets": "all",
     "resources": [
       "resources/lavigie-plugin",
-      "resources/lavigie-skills"
+      "resources/lavigie-skills",
+      "resources/lavigie-mcp"
     ],
     "icon": [
       "icons/32x32.png",
