@@ -1,6 +1,15 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 import { afterEach } from "vitest";
+
+// TASK-189: The default `waitFor`/`findBy*` timeout is 1000ms. Heavy component flows
+// (e.g. PrPanel's create round-trip, TaskDetail's finish flow) legitimately complete just
+// under that bound on an unloaded machine, but occasionally exceed it under CI resource
+// contention / unlucky file ordering — surfacing as a rare, re-run-green flake where a
+// correct assertion (`toHaveBeenCalledWith("create_pr", …)`) simply hasn't been reached in
+// time. Widen the async-utility timeout so transient slowness can't fail a correct test.
+// Genuine failures still fail (just a few seconds slower); this only adds headroom.
+configure({ asyncUtilTimeout: 3000 });
 
 // On newer Node versions an experimental global `localStorage` exists but is
 // `undefined` (it needs `--localstorage-file`), and it shadows jsdom's

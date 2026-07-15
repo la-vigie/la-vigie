@@ -37,11 +37,18 @@ Please keep `cargo build` and test output warning-free.
 - `git/` — `git` CLI wrapper (worktree add/remove, diff vs base, status, stage, commit, branch delete).
 - `agent/` — spawns an agent process in a worktree via a PTY, streams output over a Tauri channel,
   and handles write/resize/stop. Holds the live PTY registry in app state.
-- `lavigie_plugin.rs` — resolves La Vigie's bundled skill *plugin* (`src-tauri/resources/lavigie-plugin/`:
-  a Claude Code plugin, `.claude-plugin/plugin.json` + `skills/<name>/SKILL.md`, shipped as a Tauri
-  resource) and injects it into launched `claude` agents via `--plugin-dir` when the Settings toggle is
-  on (gated in `build_agent_command`). *Extend it:* add a skill by dropping a `skills/<name>/SKILL.md`
-  into that directory.
+- `lavigie_plugin.rs` / `lavigie_skills.rs` — resolve La Vigie's bundled "way of working" skills and
+  inject them into launched agents when the Settings toggle is on (per-engine, via the `AgentSpec`
+  `skill_injection` strategy). `claude` gets the skill *plugin* (`resources/lavigie-plugin/`, a Claude
+  Code plugin injected via `--plugin-dir`); the other engines — Codex, Antigravity, OpenCode, Mistral
+  Vibe — get a per-provider bundle (`resources/lavigie-skills/<provider>/`) materialized into the
+  worktree at spawn by `agent/skill_bundle.rs` and git-excluded so it stays out of the Diff. Both are
+  **generated** from one canonical source — do not hand-edit `resources/lavigie-plugin/skills/` or
+  `resources/lavigie-skills/`. *Extend it:* author the skill once in `.rulesync/skills/<name>/SKILL.md`,
+  then run `npm run skills:generate` (rulesync) to regenerate every provider bundle + the Claude plugin,
+  and commit the result. A CI drift guard (`.github/workflows/skills-drift.yml`) fails the PR if the
+  committed bundles are stale. Claude-only frontmatter (e.g. `allowed-tools`, `argument-hint`) goes in a
+  `claudecode:` block in the source.
 - `hooks/` — a loopback HTTP server (ephemeral port) that receives agent hook callbacks and emits
   `agent_status` Tauri events.
 - `github/` — `gh` CLI wrapper: PR status/comments/create/merge; pure JSON parsers unit-tested

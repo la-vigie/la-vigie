@@ -270,6 +270,56 @@ describe("SettingsModal", () => {
   });
 });
 
+describe("SettingsModal — tab switching", () => {
+  beforeEach(() => {
+    listAgentsMock.mockReset();
+    listAgentsMock.mockResolvedValue([]);
+  });
+
+  it("shows the Agents tab by default and switches panels on tab click", async () => {
+    render(<SettingsModal onClose={() => {}} />);
+
+    // Agents is the default tab: its "Add agent" control is visible…
+    expect(await screen.findByRole("button", { name: /add agent/i })).toBeInTheDocument();
+    // …and other tabs' content is not mounted yet.
+    expect(screen.queryByLabelText("Enable alerts")).toBeNull();
+    expect(screen.queryByRole("button", { name: /enable remote/i })).toBeNull();
+
+    // Switch to Notifications: its content mounts, Agents content unmounts.
+    fireEvent.click(screen.getByRole("tab", { name: "Notifications" }));
+    expect(screen.getByLabelText("Enable alerts")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /add agent/i })).toBeNull();
+
+    // Switch to General: worktree toggle mounts, notification content unmounts.
+    fireEvent.click(screen.getByRole("tab", { name: "General" }));
+    expect(
+      screen.getByLabelText("Base new worktrees on the latest remote base branch"),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Enable alerts")).toBeNull();
+
+    // Switch to Prompts: the prompt manager section mounts.
+    fireEvent.click(screen.getByRole("tab", { name: "Prompts" }));
+    expect(screen.getByRole("heading", { name: "Prompts" })).toBeInTheDocument();
+  });
+
+  it("marks the active tab with aria-selected", async () => {
+    render(<SettingsModal onClose={() => {}} />);
+    expect(screen.getByRole("tab", { name: "Agents" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Remote" }));
+    expect(screen.getByRole("tab", { name: "Remote" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByRole("tab", { name: "Agents" })).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
+  });
+});
+
 describe("SettingsModal — notification sounds section", () => {
   beforeEach(() => {
     listAgentsMock.mockReset();
@@ -288,6 +338,8 @@ describe("SettingsModal — notification sounds section", () => {
         useVigieStore.setState({ fetchRemoteBase: enabled }),
     } as never);
     render(<SettingsModal onClose={() => {}} />);
+    // "New worktrees" lives on the General tab now.
+    fireEvent.click(screen.getByRole("tab", { name: "General" }));
     const toggle = screen.getByLabelText("Base new worktrees on the latest remote base branch");
     expect(toggle).toBeChecked();
     fireEvent.click(toggle);
@@ -296,12 +348,14 @@ describe("SettingsModal — notification sounds section", () => {
 
   it("toggles a per-event enable", () => {
     render(<SettingsModal onClose={() => {}} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Notifications" }));
     fireEvent.click(screen.getByLabelText("Enable Completed alerts"));
     expect(useVigieStore.getState().soundSettings.events.completed.enabled).toBe(false);
   });
 
   it("changes a per-event sound", () => {
     render(<SettingsModal onClose={() => {}} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Notifications" }));
     fireEvent.change(screen.getByLabelText("Completed sound"), {
       target: { value: "ready-work" },
     });
@@ -313,6 +367,7 @@ describe("SettingsModal — notification sounds section", () => {
     useVigieStore.setState({ refreshCustomSounds, customSounds: [] } as never);
     const { pickAndImportSound } = await import("../../sound/import");
     render(<SettingsModal onClose={() => {}} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Notifications" }));
     fireEvent.click(screen.getByRole("button", { name: "Add sound…" }));
     await waitFor(() => expect(pickAndImportSound).toHaveBeenCalled());
   });

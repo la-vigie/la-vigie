@@ -37,6 +37,30 @@ pub enum StatusMechanism {
     Lifecycle,
 }
 
+/// How La Vigie injects its bundled way-of-working skills into a launched
+/// agent (TASK-35). Distinct from `StatusMechanism`: skill injection and
+/// status/hook wiring are independent concerns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillInjection {
+    /// No injection (default; custom agents and engines without a bundle).
+    None,
+    /// Claude Code: pass `--plugin-dir <resolved lavigie-plugin>` — out-of-tree,
+    /// namespaced `/lavigie:*`.
+    PluginDir,
+    /// Provider that discovers project-local skills from the worktree: the
+    /// vendored per-provider bundle `resources/lavigie-skills/<provider>/` is
+    /// copied into the worktree at spawn, git-excluded. `provider` is the
+    /// bundle subdirectory name.
+    WorktreeBundle { provider: String },
+}
+
+impl Default for SkillInjection {
+    fn default() -> Self {
+        SkillInjection::None
+    }
+}
+
 /// A definition of a launchable coding agent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -64,15 +88,22 @@ pub struct AgentSpec {
     /// How status is reported.
     pub status: StatusMechanism,
     /// Flag used to pass a selected model id, e.g. `--model`. `None` ⇒ the
-    /// agent takes no model selection (no Model control shown for it).
+    /// agent takes no model selection (no Model control shown for it). Set but
+    /// with `models_list_args` `None` ⇒ the agent takes a model but can't
+    /// enumerate them, so the picker offers free-text entry (TASK-209).
     #[serde(default)]
     pub model_arg: Option<String>,
     /// Argv appended to `binary` to enumerate available models (one id per
-    /// stdout line), e.g. `["models"]`. `None` ⇒ the agent lists no models.
+    /// stdout line), e.g. `["models"]`. `None` ⇒ the agent lists no models (the
+    /// picker falls back to free-text when `model_arg` is set).
     #[serde(default)]
     pub models_list_args: Option<Vec<String>>,
     /// True for code-defined presets (read-only in the UI).
     pub builtin: bool,
+    /// How La Vigie's bundled skills are injected for this agent (TASK-35).
+    /// Defaults to `None` so stored/custom specs and older rows decode safely.
+    #[serde(default)]
+    pub skill_injection: SkillInjection,
 }
 
 /// The id of the global default agent, used when neither task nor repo selects one.
@@ -92,9 +123,13 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
             auto_approve_args: vec![],
             prompt_mode: PromptMode::Arg,
             status: StatusMechanism::ClaudeHooks,
-            model_arg: None,
+            // TASK-209: Claude Code accepts `--model <id>` but has no `models`
+            // subcommand to enumerate ids, so `models_list_args` stays `None` and
+            // the picker offers free-text entry (see `AgentModelPicker`).
+            model_arg: Some("--model".into()),
             models_list_args: None,
             builtin: true,
+            skill_injection: SkillInjection::PluginDir,
         },
         AgentSpec {
             name: "aider".into(),
@@ -109,6 +144,7 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
             model_arg: None,
             models_list_args: None,
             builtin: true,
+            skill_injection: SkillInjection::None,
         },
         AgentSpec {
             name: "codex".into(),
@@ -123,6 +159,7 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
             model_arg: None,
             models_list_args: None,
             builtin: true,
+            skill_injection: SkillInjection::WorktreeBundle { provider: "codex".into() },
         },
         AgentSpec {
             name: "antigravity".into(),
@@ -137,6 +174,7 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
             model_arg: None,
             models_list_args: None,
             builtin: true,
+            skill_injection: SkillInjection::WorktreeBundle { provider: "antigravity".into() },
         },
         AgentSpec {
             name: "cursor".into(),
@@ -151,6 +189,7 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
             model_arg: None,
             models_list_args: None,
             builtin: true,
+            skill_injection: SkillInjection::None,
         },
         AgentSpec {
             name: "opencode".into(),
@@ -165,6 +204,7 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
             model_arg: Some("--model".into()),
             models_list_args: Some(vec!["models".into()]),
             builtin: true,
+            skill_injection: SkillInjection::WorktreeBundle { provider: "opencode".into() },
         },
         AgentSpec {
             name: "mistral".into(),
@@ -179,6 +219,7 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
             model_arg: None,
             models_list_args: None,
             builtin: true,
+            skill_injection: SkillInjection::WorktreeBundle { provider: "mistral".into() },
         },
     ]
 }
@@ -186,8 +227,8 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
 /// Build the `(binary, args)` to launch `spec`.
 ///
 /// Arg order: `base_args`, then `auto_approve_args` when `auto_approve`, then
-/// `resume_args` when `resume` and they are non-empty, then (for `ClaudeHooks`
-/// specs) `--plugin-dir <plugin_dir>` when provided, followed by
+/// `resume_args` when `resume` and they are non-empty, then (for
+/// `SkillInjection::PluginDir` specs) `--plugin-dir <plugin_dir>` when provided, followed by
 /// `--mcp-config <mcp_config>` when provided, followed by `--settings
 /// <hook_settings>` when provided — `--plugin-dir` takes a single path so it is
 /// safe ahead of the variadic `--mcp-config`, and `--mcp-config` in turn must
@@ -216,21 +257,19 @@ pub fn build_agent_command(
     if resume && !spec.resume_args.is_empty() {
         args.extend(spec.resume_args.iter().cloned());
     }
-    if spec.status == StatusMechanism::ClaudeHooks {
-        // Additive La Vigie skill plugin (TASK-153). `--plugin-dir` takes a single
-        // path, so it is safe before the variadic `--mcp-config`. Kept ahead of
-        // both, so the single-value `--settings` remains the last option before
-        // the positional prompt (appended later by start_agent).
+    // TASK-35: `--plugin-dir` is driven by the skill-injection strategy now, not
+    // the status mechanism. `claude` is both `PluginDir` and `ClaudeHooks`, so
+    // argv order (plugin-dir → mcp-config → settings) is unchanged for it.
+    if spec.skill_injection == SkillInjection::PluginDir {
         if let Some(dir) = plugin_dir {
             args.push("--plugin-dir".to_string());
             args.push(dir.to_string());
         }
+    }
+    if spec.status == StatusMechanism::ClaudeHooks {
         // `--mcp-config` is variadic in the claude CLI: it greedily consumes
-        // following non-option tokens. It must therefore NOT be the last option
-        // before the positional prompt (appended later by start_agent), or the
-        // prompt is parsed as a second config path and claude exits 1. Emit it
-        // before the single-value `--settings`, so `--settings` is the last
-        // option before the prompt.
+        // following non-option tokens. Emit it before the single-value
+        // `--settings`, so `--settings` is the last option before the prompt.
         if let Some(cfg) = mcp_config {
             args.push("--mcp-config".to_string());
             args.push(cfg.to_string());
@@ -323,15 +362,26 @@ mod tests {
     }
 
     #[test]
-    fn only_opencode_advertises_a_model_capability() {
+    fn model_capability_matrix_across_builtins() {
         let specs = builtin_specs();
         for s in &specs {
-            if s.name == "opencode" {
-                assert_eq!(s.model_arg.as_deref(), Some("--model"));
-                assert_eq!(s.models_list_args, Some(vec!["models".to_string()]));
-            } else {
-                assert_eq!(s.model_arg, None, "{} must not take a model yet", s.name);
-                assert_eq!(s.models_list_args, None, "{} must not list models yet", s.name);
+            match s.name.as_str() {
+                // OpenCode both takes a model and can enumerate them (list picker).
+                "opencode" => {
+                    assert_eq!(s.model_arg.as_deref(), Some("--model"));
+                    assert_eq!(s.models_list_args, Some(vec!["models".to_string()]));
+                }
+                // Claude Code takes `--model` but has no `models` subcommand, so it
+                // lists none — the picker offers free-text entry (TASK-209).
+                "claude" => {
+                    assert_eq!(s.model_arg.as_deref(), Some("--model"));
+                    assert_eq!(s.models_list_args, None, "claude cannot enumerate models");
+                }
+                // Every other built-in takes no model yet.
+                _ => {
+                    assert_eq!(s.model_arg, None, "{} must not take a model yet", s.name);
+                    assert_eq!(s.models_list_args, None, "{} must not list models yet", s.name);
+                }
             }
         }
     }
@@ -386,6 +436,7 @@ mod tests {
             model_arg: None,
             models_list_args: None,
             builtin: false,
+            skill_injection: SkillInjection::None,
         }
     }
 
@@ -496,9 +547,25 @@ mod tests {
 
     #[test]
     fn model_ignored_when_spec_has_no_model_arg() {
+        // aider has model_arg=None, so a passed model is ignored.
+        let aider = builtin_specs().into_iter().find(|s| s.name == "aider").unwrap();
+        let (_b, args) = build_agent_command(&aider, false, None, None, Some("gpt-4o"), None, false);
+        assert!(args.is_empty(), "aider takes no model; args: {args:?}");
+    }
+
+    #[test]
+    fn claude_command_appends_model_when_selected() {
+        // TASK-209: claude now takes `--model <id>`; the selected model reaches spawn.
         let claude = builtin_specs().into_iter().find(|s| s.name == "claude").unwrap();
-        // model passed but claude has model_arg=None ⇒ ignored.
         let (_b, args) = build_agent_command(&claude, false, Some("{\"hooks\":{}}"), None, Some("opus"), None, false);
+        assert_eq!(args, vec!["--settings", "{\"hooks\":{}}", "--model", "opus"]);
+    }
+
+    #[test]
+    fn claude_command_omits_model_when_unset() {
+        // No model chosen ⇒ no `--model` flag (Claude's own default).
+        let claude = builtin_specs().into_iter().find(|s| s.name == "claude").unwrap();
+        let (_b, args) = build_agent_command(&claude, false, Some("{\"hooks\":{}}"), None, None, None, false);
         assert_eq!(args, vec!["--settings", "{\"hooks\":{}}"]);
     }
 
@@ -610,6 +677,37 @@ mod tests {
     fn plugin_dir_absent_when_none() {
         let spec = builtin_specs().into_iter().find(|s| s.name == "claude").unwrap();
         let (_prog, args) = build_agent_command(&spec, false, None, None, None, None, false);
+        assert!(!args.iter().any(|a| a == "--plugin-dir"));
+    }
+
+    #[test]
+    fn builtins_carry_expected_skill_injection() {
+        let specs = builtin_specs();
+        let get = |n: &str| specs.iter().find(|s| s.name == n).unwrap().skill_injection.clone();
+        assert_eq!(get("claude"), SkillInjection::PluginDir);
+        assert_eq!(get("codex"), SkillInjection::WorktreeBundle { provider: "codex".into() });
+        assert_eq!(get("antigravity"), SkillInjection::WorktreeBundle { provider: "antigravity".into() });
+        assert_eq!(get("opencode"), SkillInjection::WorktreeBundle { provider: "opencode".into() });
+        assert_eq!(get("mistral"), SkillInjection::WorktreeBundle { provider: "mistral".into() });
+        assert_eq!(get("aider"), SkillInjection::None);
+        assert_eq!(get("cursor"), SkillInjection::None);
+    }
+
+    #[test]
+    fn skill_injection_defaults_to_none_when_absent_in_json() {
+        // A stored/custom AgentSpec JSON without the field decodes to None.
+        let json = r#"{"name":"x","displayName":"x","binary":"x","baseArgs":[],"resumeArgs":[],
+            "extraArgs":[],"promptMode":"none","status":"lifecycle","builtin":false}"#;
+        let spec: AgentSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.skill_injection, SkillInjection::None);
+    }
+
+    #[test]
+    fn plugin_dir_gated_on_skill_injection_not_status() {
+        // A WorktreeBundle engine must NOT receive --plugin-dir even if a dir is passed.
+        let mut spec = lifecycle_spec("codex");
+        spec.skill_injection = SkillInjection::WorktreeBundle { provider: "codex".into() };
+        let (_b, args) = build_agent_command(&spec, false, None, None, None, Some("/tmp/x"), false);
         assert!(!args.iter().any(|a| a == "--plugin-dir"));
     }
 }

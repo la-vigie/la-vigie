@@ -43,6 +43,30 @@
   flex: none;
 }
 
+/* ── Tabs ────────────────────────────────────────────────────────────────── */
+.settings__tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border-faint);
+  flex-shrink: 0;
+}
+
+.settings__tab {
+  background: none;
+  border: none;
+  padding: 8px 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  font-size: 13px;
+}
+
+.settings__tab--active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
 /* ── Body ────────────────────────────────────────────────────────────────── */
 .settings__body {
   display: flex;

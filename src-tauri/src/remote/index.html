@@ -13,8 +13,9 @@
     h2 { font-size: 16px; margin: 0; }
     a { color: inherit; text-decoration: none; }
     label { display: block; margin: 14px 0 4px; color: var(--muted); font-size: 14px; }
-    input, textarea, button { width: 100%; box-sizing: border-box; padding: 12px; font-size: 16px;
+    input, textarea, select, button { width: 100%; box-sizing: border-box; padding: 12px; font-size: 16px;
       border-radius: 10px; border: 1px solid var(--border); background: var(--panel); color: var(--fg); }
+    select { appearance: none; -webkit-appearance: none; }
     button, .btn { margin-top: 18px; background: var(--accent); border: none; color: #fff; font-weight: 600;
       display: block; text-align: center; }
     button:disabled { opacity: .5; }
@@ -28,6 +29,13 @@
     .row .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
     .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 4px 0 8px; }
     .head .btn { margin: 0; width: auto; padding: 8px 14px; border-radius: 10px; font-size: 14px; }
+    .head-actions { display: flex; gap: 8px; }
+    .sched-actions { display: flex; gap: 16px; align-items: center; margin-top: 10px; }
+    .sched-actions .linkbtn { margin: 0; padding: 0; width: auto; display: inline; background: none;
+      border: none; color: var(--accent); font-weight: 600; font-size: 14px; text-align: left; }
+    .radio-row { display: flex; gap: 20px; margin-top: 6px; }
+    .radio-row label { display: inline-flex; align-items: center; gap: 6px; margin: 0; color: var(--fg); }
+    .radio-row input[type="radio"] { width: auto; margin: 0; padding: 0; }
     .chip { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px;
       border: 1px solid var(--border); color: var(--muted); margin-left: 6px; }
     .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; background: var(--muted); }
@@ -56,7 +64,8 @@
     /* chat transcript as bubbles */
     .chatwrap { position: relative; margin-top: 14px; }
     .chatlog { display: flex; flex-direction: column; gap: 10px; max-height: 56vh;
-      overflow-y: auto; padding: 2px; scroll-behavior: smooth; -webkit-overflow-scrolling: touch; }
+      overflow-y: auto; overscroll-behavior: contain; padding: 2px; scroll-behavior: smooth;
+      -webkit-overflow-scrolling: touch; }
     .chatlog > .muted { align-self: center; margin: 24px 0; }
     .bubble { max-width: 85%; padding: 10px 13px; border-radius: 16px; font-size: 15px;
       line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -73,6 +82,22 @@
       max-width: 85%; font-size: 12.5px; color: var(--muted); background: #181b21;
       border: 1px solid var(--border); padding: 4px 11px; border-radius: 999px;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+
+    /* TASK-122: structured question card (pinned above the reply bar) */
+    .qcard { border: 1px solid #3a4a63; background: #16202f; border-radius: 14px;
+      padding: 14px; margin-top: 12px; }
+    .qcard .qhead { font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
+      color: #7db4ff; margin-bottom: 6px; }
+    .qcard .qtext { font-size: 15px; font-weight: 600; margin-bottom: 10px; }
+    .qopts { display: flex; flex-direction: column; gap: 8px; }
+    .qopt { text-align: left; margin: 0; width: 100%; background: var(--panel);
+      border: 1px solid var(--border); color: var(--fg); font-weight: 500; padding: 11px 13px; }
+    .qopt.sel { border-color: var(--accent); background: #1c3454; color: #eaf2ff; }
+    .qopt .qdesc { display: block; color: var(--muted); font-size: 13px; font-weight: 400; margin-top: 2px; }
+    .qother { margin-top: 8px; }
+    .qother input { margin: 0; }
+    .qsubmit { margin-top: 12px; }
+    .qcard.sending { opacity: .6; pointer-events: none; }
 
     .jump { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
       width: auto; margin: 0; padding: 6px 14px; font-size: 13px; font-weight: 600;
@@ -145,7 +170,9 @@
         // patch its live status pill in place. Forms (new) must not be clobbered.
         const rn = parseRoute(location.hash).name;
         if (rn === "task") refreshTaskMeta();
-        else if (rn !== "new") render();
+        // "new" and "schedules" own form state / self-loaded data not in the
+        // snapshot — a state-poll re-render would clobber typed input for no gain.
+        else if (rn !== "new" && rn !== "schedules") render();
       } catch (e) { /* auth handled in apiFetch; ignore */ }
     }
     function startPolling() {
@@ -160,6 +187,7 @@
       if (chatTimer) { clearInterval(chatTimer); chatTimer = null; }
       stopPill();
       chatTaskId = null;
+      qState = null; // TASK-122: drop any pending-question selection state
     }
     // Minimal, XSS-safe markdown: escape first, then format the escaped text so the
     // markers (`backticks`, **bold**) survive but no raw HTML can. Fenced ``` blocks
@@ -246,6 +274,7 @@
           log.innerHTML = '<p class="muted">No conversation yet.</p>';
           log.dataset.state = "empty";
         }
+        renderQuestionCard(taskId, data.pendingQuestion);
         if (typeof data.cursor === "number") chatCursor = data.cursor;
       } catch (e) { /* auth handled in apiFetch; ignore transient errors */ }
     }
@@ -272,6 +301,87 @@
       } catch (e) { /* auth handled in apiFetch */ }
       finally { btn.disabled = false; ta.disabled = false; btn.textContent = label; ta.focus(); }
     }
+
+    // ---- TASK-122: structured question card ----
+    let qState = null; // { sig, questions, sel:[Set per q], custom:[str per q] } while a card is shown
+    // Poll-driven entry: (re)build the card ONLY when the question set is new or
+    // the card isn't painted yet. Rebuilding the DOM on every 2s poll would blur a
+    // focused "Other" input (and dismiss the mobile keyboard) mid-type, so an
+    // unchanged poll leaves the existing DOM — and its focus + selection — intact.
+    function renderQuestionCard(taskId, pq) {
+      const host = document.getElementById("qcard");
+      if (!host) return;
+      const qs = (pq && pq.questions) || [];
+      if (!qs.length) { host.innerHTML = ""; host.dataset.painted = ""; qState = null; return; }
+      const sig = JSON.stringify(qs.map((q) => [q.prompt, q.options.map((o) => o.label), q.multiSelect]));
+      if (qState && qState.sig === sig && host.dataset.painted === sig) return;
+      qState = { sig, questions: qs, sel: qs.map(() => new Set()), custom: qs.map(() => "") };
+      paintQuestionCard(taskId);
+    }
+    // Build the card DOM from qState. Called on (re)init and on option clicks —
+    // NOT on every poll — so a repaint only happens right after a discrete tap.
+    function paintQuestionCard(taskId) {
+      const host = document.getElementById("qcard");
+      if (!host || !qState) return;
+      host.dataset.painted = qState.sig;
+      host.innerHTML = qState.questions.map((q, qi) => {
+        const opts = q.options.map((o, oi) =>
+          '<button class="qopt' + (qState.sel[qi].has(oi) ? " sel" : "") + '" data-q="' + qi + '" data-o="' + oi + '">' +
+            esc(o.label) + (o.description ? '<span class="qdesc">' + esc(o.description) + "</span>" : "") +
+          "</button>").join("");
+        return '<div class="qhead">' + esc(q.header || "Question") + "</div>" +
+          '<div class="qtext">' + esc(q.prompt) + "</div>" +
+          '<div class="qopts">' + opts + "</div>" +
+          '<div class="qother"><input type="text" placeholder="Other… (type a custom answer)" ' +
+            'data-qc="' + qi + '" value="' + esc(qState.custom[qi]) + '" /></div>';
+      }).join("") + '<button id="qsubmit" class="btn qsubmit">Send answer</button>';
+
+      host.querySelectorAll(".qopt").forEach((b) => b.addEventListener("click", () => {
+        const qi = +b.dataset.q, oi = +b.dataset.o;
+        const multi = qState.questions[qi].multiSelect;
+        if (multi) { qState.sel[qi].has(oi) ? qState.sel[qi].delete(oi) : qState.sel[qi].add(oi); }
+        else { qState.sel[qi] = new Set([oi]); }
+        qState.custom[qi] = ""; // picking an option abandons any typed custom answer
+        paintQuestionCard(taskId);
+      }));
+      host.querySelectorAll("input[data-qc]").forEach((inp) => inp.addEventListener("input", () => {
+        const qi = +inp.dataset.qc;
+        qState.custom[qi] = inp.value;
+        if (inp.value) qState.sel[qi] = new Set(); // custom text overrides option picks (no repaint: keep focus)
+      }));
+      document.getElementById("qsubmit").addEventListener("click", () => submitAnswer(taskId));
+    }
+    async function submitAnswer(taskId) {
+      if (!qState) return;
+      const answers = qState.questions.map((q, qi) => {
+        const custom = (qState.custom[qi] || "").trim();
+        if (custom) return { custom };
+        return { optionIndices: [...qState.sel[qi]].sort((a, b) => a - b) };
+      });
+      // Every question must have an answer (≥1 option or custom text).
+      const missing = answers.some((a) => a.custom === undefined && a.optionIndices.length === 0);
+      if (missing) { toast("Pick an option or type an answer for each question"); return; }
+      const host = document.getElementById("qcard");
+      host.classList.add("sending");
+      try {
+        const res = await apiFetch("/api/tasks/" + encodeURIComponent(taskId) + "/answer",
+          { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ answers }) });
+        if (res.status === 409) toast("No pending question / no running agent");
+        else if (!res.ok) toast("Answer failed (" + res.status + ")");
+        else {
+          // Optimistic echo + clear; the next poll drops the (now-cleared) card.
+          const echo = qState.questions.map((q, qi) => {
+            const a = answers[qi];
+            return a.custom !== undefined ? a.custom : a.optionIndices.map((i) => q.options[i].label).join(", ");
+          }).join(" · ");
+          const log = document.getElementById("chatlog");
+          if (log) { log.insertAdjacentHTML("beforeend", renderMsg({ role: "user", text: "✓ " + echo })); log.scrollTop = log.scrollHeight; }
+          host.innerHTML = ""; host.dataset.painted = ""; qState = null;
+          pollChat(taskId);
+        }
+      } catch (e) { /* auth handled in apiFetch */ }
+      finally { host.classList.remove("sending"); }
+    }
     function autogrow(ta) {
       ta.style.height = "auto";
       ta.style.height = Math.min(ta.scrollHeight, 120) + "px";
@@ -287,6 +397,7 @@
     function parseRoute(hash) {
       const h = (hash || "").replace(/^#/, "") || "/";
       let m;
+      if ((m = /^\/repo\/([^/]+)\/schedules$/.exec(h))) return { name: "schedules", repoId: decodeURIComponent(m[1]) };
       if ((m = /^\/repo\/([^/]+)\/new$/.exec(h))) return { name: "new", repoId: decodeURIComponent(m[1]) };
       if ((m = /^\/repo\/([^/]+)$/.exec(h))) return { name: "tasks", repoId: decodeURIComponent(m[1]) };
       if ((m = /^\/task\/([^/]+)$/.exec(h))) return { name: "task", taskId: decodeURIComponent(m[1]) };
@@ -298,6 +409,7 @@
       const r = parseRoute(location.hash);
       stopChat();
       if (r.name === "tasks") renderTasks(r.repoId);
+      else if (r.name === "schedules") renderSchedules(r.repoId);
       else if (r.name === "new") renderNew(r.repoId);
       else if (r.name === "task") renderTask(r.taskId);
       else renderRepos();
@@ -385,11 +497,146 @@
       app().innerHTML =
         '<a class="back" href="#/">‹ Repositories</a>' +
         '<div class="head"><h1>' + esc(repo ? repo.name : "Tasks") + '</h1>' +
-        '<a class="btn" href="#/repo/' + encodeURIComponent(repoId) + '/new">+ New</a></div>' +
+        '<span class="head-actions">' +
+          '<a class="btn" href="#/repo/' + encodeURIComponent(repoId) + '/schedules">Schedules</a>' +
+          '<a class="btn" href="#/repo/' + encodeURIComponent(repoId) + '/new">+ New</a>' +
+        '</span></div>' +
         (rows || '<p class="muted">No tasks yet — tap + New.</p>');
     }
+
+    function formatWhen(ts) {
+      if (ts === null || ts === undefined) return "—";
+      return new Date(ts * 1000).toLocaleString();
+    }
+
+    // ---- schedules view (TASK-196) ----
+    function renderSchedules(repoId) {
+      const repo = (snapshot.repos || []).find((r) => r.id === repoId);
+      const back = "#/repo/" + encodeURIComponent(repoId);
+      app().innerHTML =
+        '<a class="back" href="' + back + '">‹ Back</a>' +
+        '<div class="head"><h1>Schedules' + (repo ? ' — ' + esc(repo.name) : "") + '</h1></div>' +
+        '<div id="sched-list" class="muted">Loading…</div>' +
+        '<div class="head"><h2>New schedule</h2></div>' +
+        '<label for="s-name">Name</label>' +
+        '<input id="s-name" type="text" placeholder="e.g. weekly scan" />' +
+        '<label for="s-prompt">Prompt</label>' +
+        '<textarea id="s-prompt" rows="2" placeholder="e.g. /security-scan"></textarea>' +
+        '<label>Type</label>' +
+        '<div class="radio-row">' +
+          '<label><input type="radio" name="s-type" value="recurring" checked /> Recurring</label>' +
+          '<label><input type="radio" name="s-type" value="once" /> One-time</label>' +
+        '</div>' +
+        '<div id="s-recurring"><label for="s-cron">Cron</label>' +
+          '<input id="s-cron" type="text" value="0 7 * * 1" />' +
+          '<div class="sub">Standard 5-field cron, local time (e.g. 0 7 * * 1 = Mondays 07:00).</div></div>' +
+        '<div id="s-once" style="display:none"><label for="s-hours">In hours</label>' +
+          '<input id="s-hours" type="number" min="0" step="0.5" value="3" /></div>' +
+        '<button id="s-create">Add schedule</button>' +
+        '<div id="s-err" class="err"></div>';
+
+      const typeRadios = document.getElementsByName("s-type");
+      const syncType = () => {
+        const once = document.querySelector('input[name="s-type"]:checked').value === "once";
+        document.getElementById("s-recurring").style.display = once ? "none" : "";
+        document.getElementById("s-once").style.display = once ? "" : "none";
+      };
+      Array.prototype.forEach.call(typeRadios, (r) => r.addEventListener("change", syncType));
+
+      const errEl = document.getElementById("s-err");
+
+      async function load() {
+        try {
+          const res = await apiFetch("/api/repos/" + encodeURIComponent(repoId) + "/schedules");
+          if (!res.ok) throw new Error(await res.text());
+          renderList(await res.json());
+        } catch (e) {
+          const el = document.getElementById("sched-list");
+          if (el) el.innerHTML = '<p class="err">' + esc(e.message || String(e)) + '</p>';
+        }
+      }
+
+      function renderList(items) {
+        const el = document.getElementById("sched-list");
+        if (!el) return;
+        if (!items.length) { el.innerHTML = '<p class="muted">No schedules yet.</p>'; return; }
+        el.classList.remove("muted");
+        el.innerHTML = items.map((s) => {
+          const when = (s.oneShot ? "Fires: " : "Next: ") + esc(formatWhen(s.nextRunAt));
+          const kind = s.oneShot ? (s.enabled ? "One-time" : "One-time · ran") : esc(s.cron);
+          return '<div class="row">' +
+            '<div><b>' + esc(s.name) + '</b><div class="sub mono">' + kind + '</div>' +
+              '<div class="sub">' + when + '</div></div>' +
+            '<div class="sched-actions">' +
+              '<button class="linkbtn s-toggle" data-id="' + esc(s.id) + '" data-enabled="' + (s.enabled ? "1" : "0") + '">' +
+                (s.enabled ? "On" : "Off") + '</button>' +
+              '<button class="linkbtn s-del" data-id="' + esc(s.id) + '">Delete</button>' +
+            '</div></div>';
+        }).join("");
+        Array.prototype.forEach.call(el.querySelectorAll(".s-toggle"), (b) =>
+          b.addEventListener("click", () => toggle(b.dataset.id, b.dataset.enabled === "1")));
+        Array.prototype.forEach.call(el.querySelectorAll(".s-del"), (b) =>
+          b.addEventListener("click", () => remove(b.dataset.id)));
+      }
+
+      async function toggle(id, enabled) {
+        try {
+          const res = await apiFetch("/api/schedules/" + encodeURIComponent(id) + "/enabled", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ enabled: !enabled }),
+          });
+          if (!res.ok) throw new Error(await res.text());
+          load();
+        } catch (e) { errEl.textContent = e.message || String(e); }
+      }
+
+      async function remove(id) {
+        try {
+          const res = await apiFetch("/api/schedules/" + encodeURIComponent(id), { method: "DELETE" });
+          if (!res.ok) throw new Error(await res.text());
+          load();
+        } catch (e) { errEl.textContent = e.message || String(e); }
+      }
+
+      document.getElementById("s-create").addEventListener("click", async () => {
+        errEl.textContent = "";
+        const name = document.getElementById("s-name").value.trim();
+        const prompt = document.getElementById("s-prompt").value.trim();
+        if (!name || !prompt) { errEl.textContent = "Name and prompt are required."; return; }
+        const once = document.querySelector('input[name="s-type"]:checked').value === "once";
+        const payload = { name, prompt };
+        if (once) {
+          const hours = Number(document.getElementById("s-hours").value);
+          if (!Number.isFinite(hours) || hours <= 0) { errEl.textContent = "Enter a positive number of hours."; return; }
+          payload.inSeconds = Math.round(hours * 3600);
+        } else {
+          payload.cron = document.getElementById("s-cron").value.trim();
+          if (!payload.cron) { errEl.textContent = "Enter a cron expression."; return; }
+        }
+        try {
+          const res = await apiFetch("/api/repos/" + encodeURIComponent(repoId) + "/schedules", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (!res.ok) throw new Error(await res.text());
+          document.getElementById("s-name").value = "";
+          document.getElementById("s-prompt").value = "";
+          load();
+        } catch (e) { errEl.textContent = e.message || String(e); }
+      });
+
+      load();
+    }
+
+    // TASK-199: richer create options (agent / model / base branch / auto-approve).
+    // Every extra control is optional — leaving it at "Default" sends null, which the
+    // backend maps to the exact pre-TASK-199 minimal-launch behavior. Option lists are
+    // fetched lazily here (not carried on the polled /api/state).
     function renderNew(repoId) {
       const repo = (snapshot.repos || []).find((r) => r.id === repoId);
+      const defBranch = repo && repo.defaultBranch ? repo.defaultBranch : "default";
       app().innerHTML =
         '<a class="back" href="#/repo/' + encodeURIComponent(repoId) + '">‹ Back</a>' +
         '<h1>New task' + (repo ? ' — ' + esc(repo.name) : "") + '</h1>' +
@@ -397,23 +644,102 @@
         '<input id="title" type="text" placeholder="what should the agent do?" />' +
         '<label for="ticket">Ticket key (optional)</label>' +
         '<input id="ticket" type="text" placeholder="TASK-123" />' +
+        '<label for="agent">Agent</label>' +
+        '<select id="agent"><option value="">Default (repo)</option></select>' +
+        '<div id="modelrow" style="display:none">' +
+          '<label for="model">Model (optional)</label>' +
+          '<input id="model" type="text" list="modellist" placeholder="agent default" />' +
+          '<datalist id="modellist"></datalist>' +
+        '</div>' +
+        '<label for="branch">Base branch</label>' +
+        '<select id="branch"><option value="">Default (' + esc(defBranch) + ')</option></select>' +
+        '<label for="autoapprove">Auto-approve</label>' +
+        '<select id="autoapprove">' +
+          '<option value="">Default (repo)</option>' +
+          '<option value="on">On</option>' +
+          '<option value="off">Off</option>' +
+        '</select>' +
         '<label for="prompt">Initial prompt (optional)</label>' +
         '<textarea id="prompt" rows="3"></textarea>' +
         '<button id="create">Create task</button>' +
         '<div id="nerr" class="err"></div>';
       const errEl = document.getElementById("nerr");
       const btn = document.getElementById("create");
+      const agentSel = document.getElementById("agent");
+      const branchSel = document.getElementById("branch");
+      const modelRow = document.getElementById("modelrow");
+      const modelInput = document.getElementById("model");
+      const modelList = document.getElementById("modellist");
+
+      // Lazily populate the option lists. Best-effort: a failed fetch leaves the
+      // control at its "Default" row, which preserves the minimal-launch behavior.
+      let agents = [];
+      (async () => {
+        try {
+          const res = await apiFetch("/api/agents");
+          if (res.ok) {
+            agents = await res.json();
+            for (const a of agents) {
+              const o = document.createElement("option");
+              o.value = a.name; o.textContent = a.displayName || a.name;
+              agentSel.appendChild(o);
+            }
+          }
+        } catch (e) { /* keep Default */ }
+      })();
+      (async () => {
+        try {
+          const res = await apiFetch("/api/repos/" + encodeURIComponent(repoId) + "/branches");
+          if (res.ok) {
+            for (const b of await res.json()) {
+              const o = document.createElement("option");
+              o.value = b; o.textContent = b;
+              branchSel.appendChild(o);
+            }
+          }
+        } catch (e) { /* keep Default */ }
+      })();
+
+      // Show the Model control only for an agent that takes a model (modelArg set).
+      // When the agent can enumerate models (modelsListArgs), fill the datalist;
+      // otherwise it stays a free-text input (mirrors desktop TASK-209).
+      agentSel.addEventListener("change", async () => {
+        const spec = agents.find((a) => a.name === agentSel.value);
+        const takesModel = !!(spec && spec.modelArg);
+        modelRow.style.display = takesModel ? "block" : "none";
+        modelInput.value = "";
+        modelList.innerHTML = "";
+        if (takesModel && spec.modelsListArgs) {
+          try {
+            const res = await apiFetch("/api/agents/" + encodeURIComponent(spec.name) + "/models");
+            if (res.ok) {
+              for (const m of await res.json()) {
+                const o = document.createElement("option");
+                o.value = m;
+                modelList.appendChild(o);
+              }
+            }
+          } catch (e) { /* free-text still works */ }
+        }
+      });
+
       btn.addEventListener("click", async () => {
         const title = document.getElementById("title").value.trim();
         const ticketKey = document.getElementById("ticket").value.trim() || null;
         const prompt = document.getElementById("prompt").value.trim() || null;
+        const agent = agentSel.value || null;
+        const baseBranch = branchSel.value || null;
+        const model = (agent && modelRow.style.display !== "none")
+          ? (modelInput.value.trim() || null) : null;
+        const aa = document.getElementById("autoapprove").value;
+        const autoApprove = aa === "on" ? true : aa === "off" ? false : null;
         if (!title && !ticketKey) { errEl.textContent = "Enter a title or a ticket key."; return; }
         btn.disabled = true; errEl.textContent = "";
         try {
           const res = await apiFetch("/api/tasks", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ repoId, title, ticketKey, prompt }),
+            body: JSON.stringify({ repoId, title, ticketKey, prompt, agent, model, baseBranch, autoApprove }),
           });
           if (!res.ok) {
             errEl.textContent = "Create failed (" + res.status + "): " + (await res.text());
@@ -448,6 +774,7 @@
           '<div id="chatlog" class="chatlog"><p class="muted">Loading conversation…</p></div>' +
           '<button id="jump" class="btn jump">↓ Latest</button>' +
         '</div>' +
+        '<div id="qcard"></div>' +
         '<div class="replybar">' +
           '<textarea id="reply" rows="1" placeholder="Reply to Claude…"></textarea>' +
           '<button id="send">Send</button>' +

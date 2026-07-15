@@ -12,6 +12,7 @@ function sampleTask(id: string, title: string): Task {
     status: "idle",
     createdAt: 0,
     updatedAt: 0,
+    inPlace: false,
   };
 }
 

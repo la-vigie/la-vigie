@@ -6,6 +6,8 @@
 
 use serde::Serialize;
 
+pub mod question;
+
 /// A chat-shaped item distilled from one transcript content block. Kept loose on
 /// purpose — the real mobile UI lands with TASK-107. Serialized camelCase; `None`
 /// fields are omitted.
@@ -136,9 +138,35 @@ pub fn read_session(state: &AppState, task_id: &str, since: usize) -> Result<Ses
     let Some(path) = path else {
         return Ok(SessionRead { messages: Vec::new(), cursor: 0 });
     };
-    let bytes = std::fs::read(&path).map_err(|e| format!("{e:#}"))?;
-    let (messages, cursor) = parse_transcript(&bytes, since);
-    Ok(SessionRead { messages, cursor })
+    // Seek to `since` instead of reading the whole file: a long-running agent's
+    // transcript grows to many MB and the phone re-polls every ~2s, so a
+    // whole-file read made per-poll I/O O(filesize) forever. We now read only the
+    // bytes after the cursor (TASK-116).
+    let mut file = std::fs::File::open(&path).map_err(|e| format!("{e:#}"))?;
+    let len = file.metadata().map_err(|e| format!("{e:#}"))?.len();
+    read_delta_from(&mut file, len, since).map_err(|e| format!("{e:#}"))
+}
+
+/// Seek to byte offset `since` (clamped to `len`) in an already-open transcript,
+/// read the bytes from there to EOF, and parse them — returning the chat delta
+/// plus the absolute cursor `since + delta_cursor`. Because `since` always lands
+/// on a line boundary (it's a cursor a prior poll returned), parsing the delta
+/// from offset 0 is equivalent to parsing the whole file from `since`, but reads
+/// only O(delta) bytes. The clamp mirrors `parse_transcript`'s: a stale cursor
+/// past EOF (or a truncated/rotated file) reads nothing and reports the file end.
+/// Split out from `read_session` so the seek + offset arithmetic is unit-testable
+/// over any `Read + Seek` source without an `AppState`/real file.
+fn read_delta_from<R: std::io::Read + std::io::Seek>(
+    src: &mut R,
+    len: u64,
+    since: usize,
+) -> std::io::Result<SessionRead> {
+    let start = (since as u64).min(len);
+    src.seek(std::io::SeekFrom::Start(start))?;
+    let mut delta = Vec::new();
+    src.read_to_end(&mut delta)?;
+    let (messages, delta_cursor) = parse_transcript(&delta, 0);
+    Ok(SessionRead { messages, cursor: start as usize + delta_cursor })
 }
 
 use std::collections::{HashMap, HashSet};
@@ -233,6 +261,62 @@ mod tests {
         let (msgs, _) = parse_transcript(data, 0);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].text.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn read_delta_from_seeks_and_returns_absolute_since_plus_delta_cursor() {
+        use std::io::Cursor;
+        // Two complete records followed by a partial trailing line. Poll from a
+        // `since` sitting exactly on the first line's boundary: only the second
+        // record parses, the partial is not consumed, and the returned cursor is
+        // the ABSOLUTE offset `since + delta_cursor` (just past line 2's newline).
+        let line1 = b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"one\"}}\n";
+        let line2 = b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"two\"}}\n";
+        let mut data = Vec::new();
+        data.extend_from_slice(line1);
+        data.extend_from_slice(line2);
+        data.extend_from_slice(b"{\"type\":\"user\",\"messa"); // partial, must not advance
+        let len = data.len() as u64;
+
+        let mut src = Cursor::new(data.clone());
+        let read = read_delta_from(&mut src, len, line1.len()).unwrap();
+        assert_eq!(read.messages.len(), 1);
+        assert_eq!(read.messages[0].text.as_deref(), Some("two"));
+        // Absolute cursor = since (line1.len()) + delta_cursor (line2.len()).
+        assert_eq!(read.cursor, line1.len() + line2.len());
+    }
+
+    #[test]
+    fn read_delta_from_matches_whole_file_parse_at_every_cursor() {
+        use std::io::Cursor;
+        // Seek-based incremental reads must be byte-for-byte equivalent to the old
+        // whole-file `parse_transcript(SAMPLE, since)` at each cursor — no dropped
+        // or duplicated messages, identical wire cursor.
+        let len = SAMPLE.len() as u64;
+        let mut since = 0;
+        loop {
+            let (want_msgs, want_cursor) = parse_transcript(SAMPLE, since);
+            let mut src = Cursor::new(SAMPLE.to_vec());
+            let got = read_delta_from(&mut src, len, since).unwrap();
+            assert_eq!(got.messages, want_msgs);
+            assert_eq!(got.cursor, want_cursor);
+            if want_cursor == since {
+                break;
+            }
+            since = want_cursor;
+        }
+    }
+
+    #[test]
+    fn read_delta_from_clamps_since_past_eof_and_truncation() {
+        use std::io::Cursor;
+        let len = SAMPLE.len() as u64;
+        // `since` past EOF (stale cursor / truncated-rotated file): read nothing,
+        // report the current file end rather than the out-of-range `since`.
+        let mut src = Cursor::new(SAMPLE.to_vec());
+        let got = read_delta_from(&mut src, len, SAMPLE.len() + 999).unwrap();
+        assert!(got.messages.is_empty());
+        assert_eq!(got.cursor, SAMPLE.len());
     }
 
     #[test]

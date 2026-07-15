@@ -29,6 +29,23 @@ pub fn parse_env(output: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Sentinel the login shell prints immediately before the `env -0` dump. It is
+/// NUL-wrapped so it can't collide with plain-text stdout a banner might emit —
+/// interactive rc files write text, effectively never raw NUL bytes.
+const ENV_SENTINEL: &str = "\0__VIGIE_ENV__\0";
+
+/// Discard any leading stdout an interactive rc file wrote (banners, MOTDs)
+/// before the env dump, returning only the bytes after the sentinel. If the
+/// sentinel is absent (unexpected — e.g. a shell whose `printf` swallowed it),
+/// the whole input is returned so we degrade to the old best-effort parse
+/// rather than dropping everything.
+fn strip_rc_banner(output: &str) -> &str {
+    match output.split_once(ENV_SENTINEL) {
+        Some((_banner, env)) => env,
+        None => output,
+    }
+}
+
 /// True if `key` is a valid env var name: `[A-Za-z_][A-Za-z0-9_]*`.
 fn is_valid_key(key: &str) -> bool {
     let mut chars = key.chars();
@@ -39,15 +56,24 @@ fn is_valid_key(key: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Capture the user's login-shell environment by running `$SHELL -ilc 'env -0'`.
+/// Capture the user's login-shell environment by running the login shell with
+/// `printf '\0__VIGIE_ENV__\0'; env -0`. The `-i` (interactive) flag sources rc
+/// files, so we emit a sentinel before the env dump and parse only what follows
+/// it — otherwise any banner an rc file echoes to stdout would prepend onto the
+/// first `env` record and silently drop that variable.
+///
 /// Returns the parsed pairs, or an empty vec on any failure (spawn error or
 /// non-zero exit; non-UTF-8 bytes are lossily decoded, not a failure). `$SHELL` falls back to `/bin/zsh`.
 fn capture_login_env() -> Vec<(String, String)> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let output = Command::new(&shell).args(["-ilc", "env -0"]).output();
+    let output = Command::new(&shell)
+        .args(["-ilc", "printf '\\0__VIGIE_ENV__\\0'; env -0"])
+        .output();
 
     match output {
-        Ok(out) if out.status.success() => parse_env(&String::from_utf8_lossy(&out.stdout)),
+        Ok(out) if out.status.success() => {
+            parse_env(strip_rc_banner(&String::from_utf8_lossy(&out.stdout)))
+        }
         _ => vec![],
     }
 }
@@ -117,5 +143,28 @@ mod tests {
     #[test]
     fn empty_input_yields_empty() {
         assert_eq!(parse_env(""), Vec::<(String, String)>::new());
+    }
+
+    #[test]
+    fn sentinel_drops_leading_rc_banner_without_losing_first_var() {
+        // An interactive rc file echoed a multi-line banner to stdout before the
+        // env dump. Without the sentinel this banner would fuse onto the first
+        // record ("Welcome!\n...\0PATH=/usr/bin"), failing key validation and
+        // silently dropping PATH. Stripping to the sentinel keeps every var.
+        let out = "Welcome to your shell!\nLast login: today\0__VIGIE_ENV__\0PATH=/usr/bin\0HOME=/home/user\0";
+        assert_eq!(
+            parse_env(strip_rc_banner(out)),
+            vec![
+                ("PATH".to_string(), "/usr/bin".to_string()),
+                ("HOME".to_string(), "/home/user".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn strip_rc_banner_passthrough_without_sentinel() {
+        // No sentinel present → degrade to parsing the whole output verbatim.
+        let out = "PATH=/usr/bin\0HOME=/home/user\0";
+        assert_eq!(strip_rc_banner(out), out);
     }
 }

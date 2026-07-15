@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { onAgentStatus, notifyAgentEvent, setNotificationFocusHandler, isMeetingActive } from "../api";
 import { useVigieStore } from "../store";
+import { debounce, keyedDebounce } from "../lib/debounce";
 import { SoundPlayer } from "../sound/player";
 import { resolveSound } from "../sound/resolve";
 import { activityToEvent, knownSoundIds } from "../sound/types";
@@ -35,6 +36,18 @@ export function useAgentStatus() {
     });
 
     const setup = async () => {
+      // TASK-120: coalesce out-of-band refreshes. Snapshot is cheap (list_state);
+      // review/pr hit git/gh so they debounce longer and per-task.
+      const debouncedSnapshot = debounce(() => {
+        void useVigieStore.getState().refreshSnapshot();
+      }, 750);
+      const debouncedReview = keyedDebounce((id) => {
+        useVigieStore.getState().bumpReview(id);
+      }, 1500);
+      const debouncedPr = keyedDebounce((id) => {
+        useVigieStore.getState().bumpPr(id);
+      }, 8000);
+
       // Route notification taps to selecting the owning task.
       setNotificationFocusHandler((taskId) => {
         useVigieStore.getState().setSelectedTask(taskId);
@@ -49,6 +62,14 @@ export function useAgentStatus() {
           sessions.some((s) => s.kind === "agent" && s.backendId === agentId),
         )?.[0];
         const task = taskId ? state.tasks.find((t) => t.id === taskId) : undefined;
+
+        // TASK-120: keep sidebar/status live on every transition; refetch the
+        // Review pane (git/fs + gh) only when the agent finished working.
+        debouncedSnapshot();
+        if (taskId && (status === "idle" || status === "error")) {
+          debouncedReview(taskId);
+          debouncedPr(taskId);
+        }
 
         const event = activityToEvent(status);
         if (event) {

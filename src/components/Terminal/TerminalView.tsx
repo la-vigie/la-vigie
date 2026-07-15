@@ -1,13 +1,20 @@
-import { useEffect, useRef } from "react";
+import { useContext, useEffect, useRef } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { startAgent, startShell, writeSession, resizeSession, stopSession, openUrl } from "../../api";
+import { startAgent, startShell, openOrchestratorTerminal, writeSession, resizeSession, stopSession, openUrl } from "../../api";
 import type { PtyEvent } from "../../api";
-import { useVigieStore } from "../../store";
+import { useVigieStore, repoIdFromSurface } from "../../store";
 import type { SessionKind } from "../../store";
+import {
+  TerminalPaneMetricsContext,
+  computeGrid,
+  getCachedCell,
+  setCachedCell,
+  readCellSize,
+} from "./TerminalPaneMetrics";
+import type { PaneMetrics } from "./TerminalPaneMetrics";
 
 export interface TerminalViewProps {
   taskId: string;
@@ -49,8 +56,15 @@ export function shouldActivateLink(e: { metaKey: boolean; ctrlKey: boolean }): b
 
 export function TerminalView({ taskId, localId, kind, hidden }: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  // The invariant pane's size + subscription (TASK-227). Null only when a
+  // TerminalView is rendered outside a provider (bare, e.g. some unit tests);
+  // then sizing is simply skipped.
+  const paneMetrics = useContext(TerminalPaneMetricsContext);
+  const paneMetricsRef = useRef<PaneMetrics | null>(paneMetrics);
+  paneMetricsRef.current = paneMetrics;
   const setSessionInfo = useVigieStore((state) => state.setSessionInfo);
   const removeAgentSession = useVigieStore((state) => state.removeAgentSession);
+  const removeOrchestratorSession = useVigieStore((state) => state.removeOrchestratorSession);
   // Read the resume flag once, at mount time, from whatever the store holds
   // for this task/session right now.
   const resumeRef = useRef(
@@ -69,17 +83,38 @@ export function TerminalView({ taskId, localId, kind, hidden }: TerminalViewProp
   // onData can be translated to a newline (see translatePtyInput).
   const shiftEnterPendingRef = useRef<boolean>(false);
   const termRef = useRef<Terminal | null>(null);
-  const fitRef = useRef<FitAddon | null>(null);
+  // Last grid we synced to the PTY, deduped independently of xterm's own grid:
+  // a resize can be applied to xterm before the session id exists (so the PTY
+  // sync is deferred), and the post-spawn sync must still fire even though the
+  // grid is unchanged. Tracking the PTY separately keeps that first sync from
+  // being deduped away.
+  const lastPtyGridRef = useRef<{ cols: number; rows: number } | null>(null);
+  // The mount effect's pane-derived sizing fn, exposed so the becomes-visible
+  // effect can re-derive the size on show without duplicating the logic.
+  const applyGridRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
-    const term = new Terminal({ allowProposedApi: true, fontSize: 13 });
-    const fitAddon = new FitAddon();
+    const term = new Terminal({
+      allowProposedApi: true,
+      fontSize: 13,
+      // Handle OSC 8 hyperlinks — text that carries an embedded URL distinct from
+      // what's shown (e.g. Claude Code's "PR #123" link at the bottom of its TUI).
+      // The WebLinksAddon below only regex-matches plaintext URLs, so OSC 8 links
+      // need this handler to be Cmd/Ctrl+clickable. Opens via the opener plugin,
+      // mirroring the WebLinksAddon handler. allowNonHttpProtocols defaults to
+      // false, so non-http(s) link targets are ignored (no XSS surface).
+      linkHandler: {
+        activate: (event, uri) => {
+          if (shouldActivateLink(event)) {
+            openUrl(uri).catch(() => {});
+          }
+        },
+      },
+    });
     termRef.current = term;
-    fitRef.current = fitAddon;
-    term.loadAddon(fitAddon);
     // Make http(s) URLs Cmd/Ctrl+clickable, opening in the OS default browser via
     // the opener plugin (not window.open, which a Tauri webview can't honor).
     term.loadAddon(
@@ -90,7 +125,6 @@ export function TerminalView({ taskId, localId, kind, hidden }: TerminalViewProp
       }),
     );
     term.open(container);
-    fitAddon.fit();
 
     let disposed = false;
     agentIdRef.current = undefined;
@@ -98,6 +132,13 @@ export function TerminalView({ taskId, localId, kind, hidden }: TerminalViewProp
 
     const channel = new Channel<PtyEvent>();
     channel.onmessage = (event) => {
+      // A disposed/unmounted view must not process PTY events — mirrors the
+      // `disposed` guard on the spawn promise below. Without this, an exit event
+      // delivered to an orphaned channel (e.g. React StrictMode's double-mount,
+      // where the orchestrator's stop-and-respawn kills the first mount's process)
+      // would call removeAgentSession/removeOrchestratorSession and tear down the
+      // live store session, reverting the surface to its placeholder.
+      if (disposed) return;
       if (event.type === "data") {
         term.write(base64ToUint8Array(event.data));
       } else {
@@ -106,6 +147,12 @@ export function TerminalView({ taskId, localId, kind, hidden }: TerminalViewProp
           // Remove the agent session so the Claude terminal reverts to a
           // placeholder and the next startAgentSession mounts a fresh one.
           removeAgentSession(taskId);
+        } else if (kind === "orchestrator") {
+          // taskId is the `orchestrator:{repoId}` surface key. Drop the session
+          // so the pane shows the "Open orchestrator" affordance; reopening
+          // starts a fresh session (the desktop path spawns without `--continue`;
+          // see open_orchestrator_terminal).
+          removeOrchestratorSession(repoIdFromSurface(taskId));
         } else {
           // Keep the shell's exited output readable.
           setSessionInfo(taskId, localId, { status: "exited" });
@@ -137,17 +184,53 @@ export function TerminalView({ taskId, localId, kind, hidden }: TerminalViewProp
       return true;
     });
 
-    const refit = () => {
-      fitAddon.fit();
+    // Deterministically size the terminal from the invariant pane (TASK-227),
+    // never from measuring this (possibly just-unhidden, still-collapsed) child.
+    // Read the pane's cached pixel box + the shared char-cell size and compute
+    // the grid directly; apply to xterm and the PTY. Because the pane is always
+    // laid out, this is correct on every surface switch with no settle loop.
+    const applyGrid = () => {
+      const metrics = paneMetricsRef.current;
+      if (!metrics) return;
+      // Harvest the char-cell size from this terminal if it's the first one
+      // laid out (renderer measured); otherwise reuse the shared cache.
+      const measured = readCellSize(term);
+      if (measured) setCachedCell(measured);
+      const cell = getCachedCell() ?? measured;
+      if (!cell) return;
+      const { width, height } = metrics.getSize();
+      const grid = computeGrid(width, height, cell);
+      if (!grid) return;
+      // Resize xterm only when its grid actually changes.
+      if (term.cols !== grid.cols || term.rows !== grid.rows) {
+        term.resize(grid.cols, grid.rows);
+      }
+      // Sync the PTY only when the session is live AND the size it last saw
+      // changed. Deduped separately from xterm so the first post-spawn sync
+      // always lands, even if an earlier (pre-spawn) resize already sized xterm
+      // to the same grid.
       if (agentIdRef.current) {
-        resizeSession(agentIdRef.current, term.cols, term.rows);
+        const lastPty = lastPtyGridRef.current;
+        if (!lastPty || lastPty.cols !== grid.cols || lastPty.rows !== grid.rows) {
+          lastPtyGridRef.current = grid;
+          resizeSession(agentIdRef.current, grid.cols, grid.rows);
+        }
       }
     };
+    applyGridRef.current = applyGrid;
+
+    // Re-fit on every genuine pane resize (window, split-drag, sidebar). All
+    // mounted surfaces subscribe and share one pane size + one cell cache, so
+    // each keeps its own xterm+PTY synced even while hidden — which is exactly
+    // why a later surface switch has nothing to correct (zero transient).
+    const unsubscribe = paneMetricsRef.current?.subscribe(applyGrid);
 
     const spawn =
       kind === "shell"
         ? startShell(taskId, channel)
-        : startAgent(taskId, resumeRef.current, channel, initialPromptRef.current);
+        : kind === "orchestrator"
+          ? openOrchestratorTerminal(repoIdFromSurface(taskId), channel)
+          : startAgent(taskId, resumeRef.current, channel, initialPromptRef.current);
 
     spawn.then((id) => {
       if (disposed) return;
@@ -158,48 +241,42 @@ export function TerminalView({ taskId, localId, kind, hidden }: TerminalViewProp
         return;
       }
       // The PTY was spawned at a default size before the session id was known,
-      // so the earlier fit() couldn't resize it. Now that the session is
-      // running, sync the PTY to the fitted terminal size.
-      refit();
+      // so no earlier sizing could resize it. Now that the session is running,
+      // sync the PTY to the pane-derived grid.
+      applyGrid();
     });
-
-    const resizeObserver = new ResizeObserver(refit);
-    resizeObserver.observe(container);
-    // Also listen for window resizes directly: in some webviews a flex child's
-    // ResizeObserver doesn't fire reliably when the OS window is resized.
-    window.addEventListener("resize", refit);
 
     return () => {
       disposed = true;
-      resizeObserver.disconnect();
-      window.removeEventListener("resize", refit);
+      unsubscribe?.();
       term.dispose();
       termRef.current = null;
-      fitRef.current = null;
     };
     // Mount-only effect: this terminal/session is created once and kept alive
     // for the lifetime of this component (see KEEP-ALIVE rule).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // When this terminal becomes visible again (its task is re-selected), the
-  // container may have been size 0 while hidden, leaving xterm fit to a tiny
-  // height. Re-fit on the next frame (after layout) so it fills the pane, and
-  // move keyboard focus into it so typing reaches the agent without a manual
-  // click (auto-focus on task/agent switch — KEEP-ALIVE: the terminal is the
-  // already-mounted instance, never remounted).
+  // When this terminal becomes visible again (its task/surface is re-selected),
+  // re-derive its size and move keyboard focus into it so typing reaches the
+  // agent without a manual click (auto-focus on task/agent switch — KEEP-ALIVE:
+  // the terminal is the already-mounted instance, never remounted).
   useEffect(() => {
     if (hidden) return;
     const raf = requestAnimationFrame(() => {
-      fitRef.current?.fit();
-      const term = termRef.current;
-      if (term && agentIdRef.current) {
-        resizeSession(agentIdRef.current, term.cols, term.rows);
-      }
+      // Apply the pane-derived grid (TASK-227). Because sizing comes from the
+      // always-laid-out pane — not from measuring this just-unhidden child —
+      // the size is already correct: there is no collapse transient to settle,
+      // so this is a single deterministic apply, not a frame-budget loop. It
+      // also picks up the shared char-cell size if THIS is the first terminal
+      // to actually lay out.
+      applyGridRef.current();
       // xterm freezes its renderer while the container is display:none, so on a
-      // plain session switch (same size) fit() is a no-op and the viewport stays
-      // stale/blank until an interaction forces a refresh. Repaint the visible
-      // rows explicitly so the output shows immediately (TASK-84).
+      // plain session switch (same size) the buffer is unchanged and the
+      // viewport stays stale/blank until an interaction forces a refresh.
+      // Repaint the visible rows explicitly so the output shows immediately
+      // (TASK-84); focus once (no repeated focus-stealing — there's no loop).
+      const term = termRef.current;
       term?.refresh(0, term.rows - 1);
       term?.focus();
     });

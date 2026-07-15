@@ -1,8 +1,10 @@
 ---
-description: Pressure-test factual claims before implementation. Run after planning, before any code is written.
-allowed-tools: Bash, Read, Glob, Grep, WebFetch, Skill
+name: verify-claims
+description: >-
+  Pressure-test factual claims before implementation. Run after planning, before
+  any code is written.
+allowed-tools: 'Bash, Read, Glob, Grep, WebFetch, Skill'
 ---
-
 # Verify Claims: Reality-check before code
 
 List every factual claim the spec, task description, or your own plan depends on. Verify each one. Block implementation until claims are confirmed, falsified, or explicitly flagged as unknown.

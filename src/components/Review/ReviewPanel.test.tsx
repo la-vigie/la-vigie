@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ReviewPanel } from "./ReviewPanel";
 import { useVigieStore } from "../../store";
@@ -17,20 +17,20 @@ vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 // Mock DiffPanel + PrPanel — we assert the Option D layout (diff owns the pane,
 // PR is a collapsible dock), not their internals.
 vi.mock("../Diff/DiffPanel", () => ({
-  DiffPanel: ({ taskId }: { taskId: string }) => (
-    <div data-testid="diff-panel" data-task-id={taskId} />
+  DiffPanel: ({ taskId, refreshToken }: { taskId: string; refreshToken?: number }) => (
+    <div data-testid="diff-panel" data-task-id={taskId} data-refresh={String(refreshToken)} />
   ),
 }));
 
 vi.mock("../Pr/PrPanel", () => ({
-  PrPanel: ({ taskId }: { taskId: string }) => (
-    <div data-testid="pr-panel" data-task-id={taskId} />
+  PrPanel: ({ taskId, refreshToken }: { taskId: string; refreshToken?: number }) => (
+    <div data-testid="pr-panel" data-task-id={taskId} data-refresh={String(refreshToken)} />
   ),
 }));
 
 vi.mock("../Spec/SpecDock", () => ({
-  SpecDock: ({ taskId, maximized }: { taskId: string; maximized?: boolean }) => (
-    <div data-testid="spec-dock" data-task-id={taskId} data-maximized={String(!!maximized)} />
+  SpecDock: ({ taskId, maximized, refreshToken }: { taskId: string; maximized?: boolean; refreshToken?: number }) => (
+    <div data-testid="spec-dock" data-task-id={taskId} data-maximized={String(!!maximized)} data-refresh={String(refreshToken)} />
   ),
 }));
 
@@ -186,5 +186,85 @@ describe("ReviewPanel — Option D (PR bottom dock)", () => {
   it("renders the SpecDock alongside the diff and PR dock", () => {
     render(<ReviewPanel {...defaultProps} />);
     expect(screen.getByTestId("spec-dock")).toHaveAttribute("data-task-id", "task-1");
+  });
+});
+
+describe("ReviewPanel — event-driven refresh (TASK-120)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    invokeMock.mockReset();
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "gh_status") return Promise.resolve({ available: true, authenticated: true });
+      if (cmd === "get_pr_status") return Promise.resolve(null);
+      if (cmd === "get_changed_files") return Promise.resolve([]);
+      return Promise.resolve(null);
+    });
+    useVigieStore.setState({
+      repos: [{ id: "repo-1", name: "repo", path: "/r", defaultBranch: "main", remoteUrl: "x" }],
+      tasks: [{ id: "task-1", repoId: "repo-1", title: "T", worktreePath: "/wt", branch: "feature", baseBranch: "main", status: "idle", createdAt: 1, updatedAt: 1 }],
+      selectedTaskId: "task-1",
+      reviewNonceByTask: {},
+      prNonceByTask: {},
+    } as any);
+  });
+
+  const props = {
+    taskId: "task-1",
+    showDiff: true,
+    onToggleDiff: vi.fn(),
+    diffPosition: "right" as const,
+    onSetDiffPosition: vi.fn(),
+    specMaximized: false,
+    onToggleSpecMaximize: vi.fn(),
+  };
+
+  it("bumpReview re-tokens Diff + Spec but not the PR dock", () => {
+    render(<ReviewPanel {...props} />);
+    // Expand the dock so PrPanel (and its refreshToken) is mounted.
+    fireEvent.click(screen.getByRole("button", { name: /expand pull request dock/i }));
+
+    const before = {
+      diff: screen.getByTestId("diff-panel").getAttribute("data-refresh"),
+      spec: screen.getByTestId("spec-dock").getAttribute("data-refresh"),
+      pr: screen.getByTestId("pr-panel").getAttribute("data-refresh"),
+    };
+
+    act(() => useVigieStore.getState().bumpReview("task-1"));
+
+    expect(screen.getByTestId("diff-panel").getAttribute("data-refresh")).not.toBe(before.diff);
+    expect(screen.getByTestId("spec-dock").getAttribute("data-refresh")).not.toBe(before.spec);
+    expect(screen.getByTestId("pr-panel").getAttribute("data-refresh")).toBe(before.pr);
+  });
+
+  it("bumpPr re-tokens the PR dock but not Diff/Spec", () => {
+    render(<ReviewPanel {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: /expand pull request dock/i }));
+
+    const before = {
+      diff: screen.getByTestId("diff-panel").getAttribute("data-refresh"),
+      pr: screen.getByTestId("pr-panel").getAttribute("data-refresh"),
+    };
+
+    act(() => useVigieStore.getState().bumpPr("task-1"));
+
+    expect(screen.getByTestId("pr-panel").getAttribute("data-refresh")).not.toBe(before.pr);
+    expect(screen.getByTestId("diff-panel").getAttribute("data-refresh")).toBe(before.diff);
+  });
+
+  it("manual ↻ re-tokens all three docks", () => {
+    render(<ReviewPanel {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: /expand pull request dock/i }));
+
+    const before = {
+      diff: screen.getByTestId("diff-panel").getAttribute("data-refresh"),
+      spec: screen.getByTestId("spec-dock").getAttribute("data-refresh"),
+      pr: screen.getByTestId("pr-panel").getAttribute("data-refresh"),
+    };
+
+    fireEvent.click(screen.getByRole("button", { name: /refresh changes/i }));
+
+    expect(screen.getByTestId("diff-panel").getAttribute("data-refresh")).not.toBe(before.diff);
+    expect(screen.getByTestId("spec-dock").getAttribute("data-refresh")).not.toBe(before.spec);
+    expect(screen.getByTestId("pr-panel").getAttribute("data-refresh")).not.toBe(before.pr);
   });
 });

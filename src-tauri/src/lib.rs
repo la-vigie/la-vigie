@@ -14,13 +14,17 @@ pub mod teardown;
 mod remote;
 mod session;
 mod concierge;
+pub mod schedule;
+mod schedule_commands;
 mod setup;
 mod lavigie_plugin;
+mod lavigie_skills;
 mod shell_env;
 mod sound;
 mod sound_commands;
 mod state;
 mod store;
+mod tray;
 
 use std::sync::{Arc, Mutex};
 
@@ -90,13 +94,25 @@ pub fn run() {
                 mcp_tokens: Mutex::new(std::collections::HashMap::new()),
                 remote: std::sync::Mutex::new(remote::RemoteState::default()),
                 transcripts: Mutex::new(std::collections::HashMap::new()),
+                pending_questions: Mutex::new(std::collections::HashMap::new()),
                 concierge_spawn: Mutex::new(()),
                 base_fetch_at: Mutex::new(std::collections::HashMap::new()),
             });
 
+            // TASK-180: drop orchestrator resume-markers for repos deleted while
+            // the app was closed, so we never resurrect a gone repo's orchestrator.
+            concierge::prune_orphan_orchestrator_markers(app.state::<AppState>().inner());
+
             // TASK-112: reap idle concierge sessions — the poll-based remote
             // transport gives no disconnect signal, so silence is the only cue.
             concierge::spawn_reaper(app.handle().clone());
+
+            // TASK-173: fire recurring schedules when due.
+            schedule::spawn_scheduler(app.handle().clone());
+
+            // TASK-204: stand up the system-tray menu (in-progress tasks by repo).
+            // Main-thread-only on macOS — `setup` runs on the main thread.
+            tray::init(app.handle()).map_err(|e| format!("failed to init tray: {e}"))?;
 
             Ok(())
         })
@@ -153,6 +169,15 @@ pub fn run() {
             commands::delete_prompt,
             commands::reorder_prompts,
             concierge::list_remote_sessions,
+            concierge::open_orchestrator,
+            concierge::open_orchestrator_terminal,
+            schedule_commands::list_schedules,
+            schedule_commands::create_schedule,
+            schedule_commands::create_one_shot_schedule,
+            schedule_commands::update_schedule,
+            schedule_commands::set_schedule_enabled,
+            schedule_commands::delete_schedule,
+            schedule_commands::preview_next_run,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

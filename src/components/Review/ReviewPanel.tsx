@@ -35,8 +35,13 @@ export function ReviewPanel({ taskId, diffPosition, onSetDiffPosition, onToggleD
   const [scope, setScope] = useState<DiffScope>(
     () => (localStorage.getItem("vigie.diffScope") === "base" ? "base" : "uncommitted"),
   );
-  // Bumping this asks the diff, the scope counts, and the PR dock to re-fetch.
-  const [refreshToken, setRefreshToken] = useState(0);
+  // Manual ↻ counter; folded together with the store nonces below so a manual
+  // refresh re-fetches everything (Diff + Spec + PR) immediately.
+  const [manualToken, setManualToken] = useState(0);
+  const reviewNonce = useVigieStore((s) => s.reviewNonceByTask[taskId] ?? 0);
+  const prNonce = useVigieStore((s) => s.prNonceByTask[taskId] ?? 0);
+  const reviewToken = manualToken + reviewNonce; // git/fs: Diff + Spec + counts
+  const prToken = manualToken + prNonce;         // gh: PR dock
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const [counts, setCounts] = useState<{ uncommitted: number | null; base: number | null }>({
@@ -79,7 +84,7 @@ export function ReviewPanel({ taskId, diffPosition, onSetDiffPosition, onToggleD
     return () => {
       cancelled = true;
     };
-  }, [taskId, refreshToken]);
+  }, [taskId, reviewToken]);
 
   return (
     <div className={"review-panel" + (specMaximized ? " review-panel--spec-max" : "")}>
@@ -122,7 +127,7 @@ export function ReviewPanel({ taskId, diffPosition, onSetDiffPosition, onToggleD
             type="button"
             className="icon-btn"
             aria-label="Refresh changes"
-            onClick={() => setRefreshToken((t) => t + 1)}
+            onClick={() => setManualToken((t) => t + 1)}
           >
             ↻
           </button>
@@ -143,18 +148,18 @@ export function ReviewPanel({ taskId, diffPosition, onSetDiffPosition, onToggleD
             scope={scope}
             readOnly={scope === "base"}
             commentable={scope === "base"}
-            refreshToken={refreshToken}
+            refreshToken={reviewToken}
           />
         </div>
       </div>
       )}
       <SpecDock
         taskId={taskId}
-        refreshToken={refreshToken}
+        refreshToken={reviewToken}
         maximized={specMaximized}
         onToggleMaximize={onToggleSpecMaximize}
       />
-      {!specMaximized && <PrDock taskId={taskId} refreshToken={refreshToken} />}
+      {!specMaximized && <PrDock taskId={taskId} refreshToken={prToken} />}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { addRepo, createTask, checkWorktreePath, type WorktreePreview } from "../../api";
+import { addRepo, createTask, checkWorktreePath, createOneShotSchedule, type WorktreePreview } from "../../api";
 import { useVigieStore } from "../../store";
 import type { Repo } from "../../store";
 import { taskName } from "../../lib/taskName";
@@ -37,6 +37,9 @@ export function NewTaskForm({ repo, onClose }: NewTaskFormProps) {
   // Per-task launch toggle; defaults from the repo's auto-start setting and can
   // be overridden per task. This (not the repo setting directly) gates launch.
   const [startImmediately, setStartImmediately] = useState(repo.autoStartAgent ?? false);
+  // TASK-179: launch-time deferred one-shot — mutually exclusive with "start immediately".
+  const [startLater, setStartLater] = useState(false);
+  const [startLaterHours, setStartLaterHours] = useState("3");
   const [agentName, setAgentName] = useState(repo.defaultAgent ?? "claude");
   const [modelName, setModelName] = useState<string | null>(repo.defaultModel ?? null);
   const [autoApprove, setAutoApprove] = useState<boolean | null>(null);
@@ -45,6 +48,9 @@ export function NewTaskForm({ repo, onClose }: NewTaskFormProps) {
   const [error, setError] = useState<string | null>(null);
   // TASK-125: warn when the derived worktree path already exists on disk.
   const [worktreePreview, setWorktreePreview] = useState<WorktreePreview | null>(null);
+  // TASK-163: run this task in the repo's existing checkout (no worktree).
+  const [inPlace, setInPlace] = useState(repo.inPlaceDefault ?? false);
+  const [inPlaceBranch, setInPlaceBranch] = useState("");
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -59,6 +65,10 @@ export function NewTaskForm({ repo, onClose }: NewTaskFormProps) {
   // non-vacant preview (adopt/conflict) is surfaced; a stale in-flight request
   // is discarded via the `cancelled` guard.
   useEffect(() => {
+    if (inPlace) {
+      setWorktreePreview(null);
+      return;
+    }
     const t = title.trim();
     const tk = ticketId.trim();
     if (!t && !tk) {
@@ -79,7 +89,7 @@ export function NewTaskForm({ repo, onClose }: NewTaskFormProps) {
       cancelled = true;
       clearTimeout(handle);
     };
-  }, [title, ticketId, baseBranch, repo.id]);
+  }, [title, ticketId, baseBranch, repo.id, inPlace]);
 
   const selectedAgent = agents.find((a) => a.name === agentName);
 
@@ -102,6 +112,29 @@ export function NewTaskForm({ repo, onClose }: NewTaskFormProps) {
     setPhase("running");
     setError(null);
     try {
+      if (startLater) {
+        const hours = Number(startLaterHours);
+        if (!Number.isFinite(hours) || hours <= 0) {
+          throw new Error("Enter a positive number of hours.");
+        }
+        // Deferred: create a one-shot schedule instead of a task now. We store
+        // the RAW task prompt (matching MCP start_task / recurring); the fire-time
+        // launch combines repo.initialPrompt via useTaskLaunch unless skipped.
+        // TASK-181: thread the TASK-160 skip checkbox so the deferred run honors the
+        // same include/skip choice as the immediate path (Sidebar create below).
+        await createOneShotSchedule({
+          repoId: repo.id,
+          name: title.trim() || ticketId.trim(),
+          prompt: taskPrompt,
+          inSeconds: Math.round(hours * 3600),
+          agent: agentName,
+          model: modelName,
+          baseBranch: baseBranch.trim() || null,
+          skipRepoPrompt: hasRepoPrompt ? skipRepoPrompt : false,
+        });
+        onClose();
+        return;
+      }
       const task = await createTask(
         repo.id,
         title.trim(),
@@ -110,6 +143,8 @@ export function NewTaskForm({ repo, onClose }: NewTaskFormProps) {
         agentName,
         modelName,
         autoApprove,
+        inPlace,
+        inPlace ? inPlaceBranch.trim() || null : null,
       );
       await refresh();
       setSelectedTask(task.id);
@@ -311,12 +346,88 @@ export function NewTaskForm({ repo, onClose }: NewTaskFormProps) {
             <label className="new-task-form__checkbox">
               <input
                 type="checkbox"
+                checked={inPlace}
+                disabled={startLater}
+                onChange={(e) => setInPlace(e.target.checked)}
+                aria-label="Work in place (no worktree)"
+              />
+              <span>
+                Work in place — no worktree
+                <span
+                  className="new-task-form__info"
+                  tabIndex={0}
+                  role="img"
+                  aria-label="Runs the agent in the repo's existing checkout instead of a git worktree. Only one in-place task per repo."
+                  data-tooltip="Runs the agent in the repo's existing checkout instead of a git worktree. Only one in-place task per repo."
+                  onClick={(e) => e.preventDefault()}
+                >
+                  ⓘ
+                </span>
+              </span>
+            </label>
+
+            {inPlace && !startLater && (
+              <label className="new-task-form__group">
+                <span className="new-task-form__label">New branch name</span>
+                <input
+                  type="text"
+                  className="field"
+                  placeholder="optional — blank uses the current branch"
+                  value={inPlaceBranch}
+                  onChange={(e) => setInPlaceBranch(e.target.value)}
+                  aria-label="New branch name"
+                />
+              </label>
+            )}
+
+            <label className="new-task-form__checkbox">
+              <input
+                type="checkbox"
                 checked={startImmediately}
+                disabled={startLater}
                 onChange={(e) => setStartImmediately(e.target.checked)}
                 aria-label="Start the agent immediately"
               />
               <span>Start the agent immediately</span>
             </label>
+
+            <label className="new-task-form__checkbox">
+              <input
+                type="checkbox"
+                checked={startLater}
+                onChange={(e) => {
+                  setStartLater(e.target.checked);
+                  if (e.target.checked) {
+                    setStartImmediately(false);
+                    setInPlace(false);
+                  }
+                }}
+                aria-label="Start the agent later"
+              />
+              <span>Start later (deferred one-shot)</span>
+            </label>
+
+            {startLater && (
+              <label className="new-task-form__group">
+                <span className="new-task-form__label">Start in hours</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.5"
+                  className="field"
+                  aria-label="Start in hours"
+                  value={startLaterHours}
+                  onChange={(e) => setStartLaterHours(e.target.value)}
+                />
+                <span className="new-task-form__label-hint">
+                  {(() => {
+                    const h = Number(startLaterHours);
+                    if (!Number.isFinite(h) || h <= 0) return "Enter a positive number of hours.";
+                    return `Launches once at ${new Date(Date.now() + h * 3600 * 1000).toLocaleString()}. The repository prompt still applies.`;
+                  })()}
+                </span>
+              </label>
+            )}
           </div>
 
           <footer className="new-task-modal__footer">
@@ -334,10 +445,13 @@ interface RepoSectionProps {
   search: string;
 }
 
-function RepoSection({ repo, search }: RepoSectionProps) {
+export function RepoSection({ repo, search }: RepoSectionProps) {
   const allTasks = useVigieStore((state) => state.tasks);
   const selectedTaskId = useVigieStore((state) => state.selectedTaskId);
   const setSelectedTask = useVigieStore((state) => state.setSelectedTask);
+  const selectedOrchestratorRepoId = useVigieStore((state) => state.selectedOrchestratorRepoId);
+  const setSelectedOrchestrator = useVigieStore((state) => state.setSelectedOrchestrator);
+  const startOrchestratorSession = useVigieStore((state) => state.startOrchestratorSession);
   const sessionsByTask = useVigieStore((state) => state.sessionsByTask);
   const attentionByTask = useVigieStore((state) => state.attentionByTask);
   const setupByTask = useVigieStore((state) => state.setupByTask);
@@ -409,6 +523,20 @@ function RepoSection({ repo, search }: RepoSectionProps) {
           ⚙
         </button>
       </div>
+      <button
+        type="button"
+        className={
+          "sidebar__orchestrator-row" +
+          (selectedOrchestratorRepoId === repo.id ? " sidebar__orchestrator-row--selected" : "")
+        }
+        onClick={() => {
+          setSelectedOrchestrator(repo.id);
+          startOrchestratorSession(repo.id);
+        }}
+      >
+        <span className="sidebar__orchestrator-icon" aria-hidden>◇</span>
+        <span className="sidebar__orchestrator-label">Orchestrator</span>
+      </button>
       {showNewTaskForm && (
         <NewTaskForm repo={repo} onClose={() => setShowNewTaskForm(false)} />
       )}
@@ -457,6 +585,14 @@ function RepoSection({ repo, search }: RepoSectionProps) {
                   {task.prNumber != null && (
                     <span className="sidebar__task-pr" title={`PR #${task.prNumber}`}>
                       PR
+                    </span>
+                  )}
+                  {task.status === "pending" && task.blockedBy && task.blockedBy.length > 0 && (
+                    <span
+                      className="sidebar__task-blockers"
+                      title={`Blocked by: ${task.blockedBy.map((b) => b.title ?? b.taskId).join(", ")}`}
+                    >
+                      ⛓ {task.blockedBy.length}
                     </span>
                   )}
                 </button>
@@ -528,6 +664,14 @@ function RepoSection({ repo, search }: RepoSectionProps) {
                       {task.prNumber != null && (
                         <span className="sidebar__task-pr" title={`PR #${task.prNumber}`}>
                           PR
+                        </span>
+                      )}
+                      {task.status === "pending" && task.blockedBy && task.blockedBy.length > 0 && (
+                        <span
+                          className="sidebar__task-blockers"
+                          title={`Blocked by: ${task.blockedBy.map((b) => b.title ?? b.taskId).join(", ")}`}
+                        >
+                          ⛓ {task.blockedBy.length}
                         </span>
                       )}
                     </button>

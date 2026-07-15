@@ -167,6 +167,31 @@ pub struct AppSnapshot {
     pub sound_settings: Option<String>,
     pub fetch_remote_base: Option<bool>,
     pub inject_lavigie_skills: Option<bool>,
+    pub blocked_by: std::collections::HashMap<String, Vec<Blocker>>,
+}
+
+/// One outstanding blocker of a pending task, described for the UI (TASK-177).
+/// `title`/`status` are `None` when the blocker row no longer exists (dangling).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Blocker {
+    pub task_id: String,
+    pub title: Option<String>,
+    pub status: Option<crate::store::TaskStatus>,
+}
+
+/// Resolve a task's outstanding blocker edges into displayable `Blocker`s.
+/// Caller holds the store lock. Missing rows surface as id-only (dangling).
+fn blockers_detail(store: &crate::store::TaskStore, task_id: &str) -> Vec<Blocker> {
+    store
+        .blockers_of(task_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|dep_id| match store.get_task(&dep_id) {
+            Ok(Some(t)) => Blocker { task_id: dep_id, title: Some(t.title), status: Some(t.status) },
+            _ => Blocker { task_id: dep_id, title: None, status: None },
+        })
+        .collect()
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -321,6 +346,7 @@ pub async fn update_repo(
     fetch_remote_base: Option<bool>,
     default_agent: Option<String>,
     auto_approve: Option<bool>,
+    in_place_default: bool,
 ) -> Result<Repo, String> {
     let name = name.trim().to_string();
     let default_branch = default_branch.trim().to_string();
@@ -371,6 +397,9 @@ pub async fn update_repo(
         .map_err(|e| format!("{e:#}"))?;
     store
         .set_repo_auto_approve(&repo_id, auto_approve)
+        .map_err(|e| format!("{e:#}"))?;
+    store
+        .set_repo_in_place_default(&repo_id, in_place_default)
         .map_err(|e| format!("{e:#}"))?;
     let repo = store
         .get_repo(&repo_id)
@@ -502,6 +531,7 @@ pub async fn remove_repo(state: State<'_, AppState>, repo_id: String) -> Result<
             .list_tasks_for_repo(&repo_id)
             .map_err(|e| format!("{e:#}"))?
             .into_iter()
+            .filter(|t| !t.in_place)
             .map(|t| t.worktree_path)
             .collect();
         (repo.path, worktree_paths)
@@ -511,6 +541,11 @@ pub async fn remove_repo(state: State<'_, AppState>, repo_id: String) -> Result<
         let store = state.store.lock().map_err(|e| e.to_string())?;
         store.delete_repo(&repo_id).map_err(|e| format!("{e:#}"))?;
     }
+
+    // TASK-180: revoke this repo's orchestrator — stop its live session (dropping
+    // the MCP token) and delete its resume marker so a deleted repo can't
+    // resurrect an orchestrator. Synchronous; no guard held across the await below.
+    crate::concierge::revoke_orchestrator_for_repo(state.inner(), &repo_id);
 
     for worktree_path in worktree_paths {
         // Best-effort: a worktree the user already removed by hand shouldn't
@@ -529,10 +564,18 @@ pub async fn list_repo_branches(
     state: State<'_, AppState>,
     repo_id: String,
 ) -> Result<Vec<String>, String> {
+    repo_branches(state.inner(), &repo_id).await
+}
+
+/// Core for `list_repo_branches`, taking `&AppState` so the remote server's
+/// `GET /api/repos/{id}/branches` reuses the exact same path (TASK-199). Locks the
+/// store only to resolve the repo path, dropping the guard before the async git
+/// call (locking invariant).
+pub async fn repo_branches(state: &AppState, repo_id: &str) -> Result<Vec<String>, String> {
     let repo_path = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         store
-            .get_repo(&repo_id)
+            .get_repo(repo_id)
             .map_err(|e| format!("{e:#}"))?
             .ok_or_else(|| format!("repo not found: {repo_id}"))?
             .path
@@ -556,10 +599,16 @@ pub async fn launch_and_kickoff_setup(
 
     // A queued (Pending) task has no worktree yet — setup runs at promote-time.
     if task.status == TaskStatus::Pending {
+        // Pending tasks aren't shown in the tray, but refresh anyway so a later
+        // promote/status change starts from an accurate menu (TASK-204). Cheap.
+        crate::tray::refresh(app);
         return Ok(task);
     }
 
     kickoff_setup(state, app, &task)?;
+    // TASK-204: the desktop create path emits no event of its own — refresh the
+    // tray here so a newly-created task appears in the menu live.
+    crate::tray::refresh(app);
     Ok(task)
 }
 
@@ -607,31 +656,45 @@ pub(crate) fn kickoff_setup(
     Ok(())
 }
 
+/// Request payload for the `create_task` command. Bundling the fields into one
+/// struct keeps the command signature under clippy's `too_many_arguments` bound
+/// (TASK-100). The frontend passes these camelCase-keyed under `args`; the field
+/// names/values are byte-identical to the former flat params.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateTaskArgs {
+    pub repo_id: String,
+    pub title: String,
+    pub base_branch: Option<String>,
+    pub ticket_key: Option<String>,
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub auto_approve: Option<bool>,
+    pub in_place: bool,
+    pub branch_name: Option<String>,
+}
+
 #[tauri::command]
 pub async fn create_task(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
-    repo_id: String,
-    title: String,
-    base_branch: Option<String>,
-    ticket_key: Option<String>,
-    agent: Option<String>,
-    model: Option<String>,
-    auto_approve: Option<bool>,
+    args: CreateTaskArgs,
 ) -> Result<Task, String> {
     // Durable creation + background setup go through the shared launch path so
     // the `create_task` command and the MCP `start_task` tool share one path.
     let args = crate::launch::LaunchArgs {
-        repo_id,
-        title,
-        base_branch,
-        ticket_key,
-        agent,
-        model,
-        auto_approve,
+        repo_id: args.repo_id,
+        title: args.title,
+        base_branch: args.base_branch,
+        ticket_key: args.ticket_key,
+        agent: args.agent,
+        model: args.model,
+        auto_approve: args.auto_approve,
         // The frontend create path never queues on another task (TASK-90).
-        after_merge_of: None,
+        after_merge_of: Vec::new(),
         prompt: None,
+        in_place: args.in_place,
+        branch_name: args.branch_name,
     };
     let task = launch_and_kickoff_setup(state.inner(), &app, args).await?;
     Ok(task)
@@ -676,9 +739,12 @@ pub async fn check_worktree_path(
         ticket_key,
         agent: None,
         model: None,
-        after_merge_of: None,
+        after_merge_of: Vec::new(),
         prompt: None,
         auto_approve: None,
+        // TASK-163: placeholder default — this preview path doesn't model in-place yet.
+        in_place: false,
+        branch_name: None,
     };
     // Resolution can fail on incomplete input (no identity yet, flag-like base):
     // there's nothing to warn about, so present a vacant preview.
@@ -779,8 +845,9 @@ pub async fn delete_task(
 
     // A queued (Pending, TASK-90) task has no worktree/branch on disk — skip the
     // git teardown; the DB row delete above already cascaded its dependency
-    // edges away.
-    if !task.worktree_path.is_empty() {
+    // edges away. An in-place task's `worktree_path` is the repo's main
+    // checkout — never removed (TASK-163).
+    if crate::teardown::should_remove_worktree(task.in_place, &task.worktree_path) {
         git::remove_worktree(
             Path::new(&repo.path),
             Path::new(&task.worktree_path),
@@ -841,7 +908,7 @@ pub async fn finish_task(
     }
 
     // Lock, capture what we need, drop lock before any await.
-    let (worktree_path, branch, repo_path) = {
+    let (worktree_path, branch, repo_path, in_place) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let task = store
             .get_task(&task_id)
@@ -851,7 +918,7 @@ pub async fn finish_task(
             .get_repo(&task.repo_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("repo not found: {}", task.repo_id))?;
-        (task.worktree_path.clone(), task.branch.clone(), repo.path.clone())
+        (task.worktree_path.clone(), task.branch.clone(), repo.path.clone(), task.in_place)
     };
 
     // merge mode: resolve PR number and squash-merge before cleanup.
@@ -867,14 +934,17 @@ pub async fn finish_task(
             .map_err(|e| format!("{e:#}"))?;
     }
 
-    // Remove worktree — propagate error; DB row not yet deleted.
-    git::remove_worktree(
-        Path::new(&repo_path),
-        Path::new(&worktree_path),
-        true,
-    )
-    .await
-    .map_err(|e| format!("{e:#}"))?;
+    // Remove worktree — propagate error; DB row not yet deleted. In-place tasks
+    // skip this: `worktree_path` is the repo's main checkout (TASK-163).
+    if crate::teardown::should_remove_worktree(in_place, &worktree_path) {
+        git::remove_worktree(
+            Path::new(&repo_path),
+            Path::new(&worktree_path),
+            true,
+        )
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    }
 
     // Delete the DB row.
     {
@@ -882,8 +952,9 @@ pub async fn finish_task(
         store.delete_task(&task_id).map_err(|e| e.to_string())?;
     }
 
-    // discard/merge mode — best-effort branch deletion (ignore error).
-    if mode == "discard" || mode == "merge" {
+    // discard/merge mode — best-effort branch deletion (ignore error). Never
+    // for in-place tasks — the branch is the checkout's current branch (TASK-163).
+    if !in_place && (mode == "discard" || mode == "merge") {
         let _ = git::delete_branch(Path::new(&repo_path), &branch, true).await;
     }
 
@@ -928,7 +999,7 @@ async fn promote_pending_task(
 
     let initial_prompt = task.pending_prompt.clone();
 
-    // 2. Re-resolve branch/worktree off the now-updated base (after_merge_of=None).
+    // 2. Re-resolve branch/worktree off the now-updated base (no deps ⇒ Immediate).
     let args = crate::launch::LaunchArgs {
         repo_id: task.repo_id.clone(),
         title: task.title.clone(),
@@ -936,9 +1007,13 @@ async fn promote_pending_task(
         ticket_key: task.ticket_key.clone(),
         agent: task.agent.clone(),
         model: task.model.clone(),
-        after_merge_of: None,
+        after_merge_of: Vec::new(),
         prompt: None,
         auto_approve: None,
+        // TASK-163: placeholder default — a pending task's promote path always
+        // created a worktree; in-place pending tasks are out of this task's scope.
+        in_place: false,
+        branch_name: None,
     };
     let resolved = crate::launch::resolve_launch(args, &repo, &state.worktrees_root)?;
 
@@ -979,7 +1054,8 @@ async fn promote_pending_task(
     kickoff_setup(state, app, &live_task)?;
 
     // 5. Tell the frontend to start the agent (reuses TASK-89 useTaskLaunch).
-    crate::mcp::emit_task_launched(app, dep_id.to_string(), initial_prompt);
+    // TASK-181: promote path keeps the repo-prompt combine (skip = false).
+    crate::mcp::emit_task_launched(app, dep_id.to_string(), initial_prompt, false);
     Ok(())
 }
 
@@ -997,15 +1073,18 @@ pub(crate) async fn promote_dependents_of(
     repo_path: &str,
     bypass: bool,
 ) {
-    // 1. Cheap indexed lookup. No dependents ⇒ exit with no gh call, no work.
-    let dependents = {
+    // 1. Cheap indexed peek. No dependents ⇒ exit with no gh call, no work.
+    //    This is ONLY an early-exit optimisation — the authoritative promotion set
+    //    is re-read atomically with edge removal at step 3 (TASK-182), so an edge
+    //    inserted during the landed-check await below is still seen there.
+    let has_dependents = {
         let store = match state.store.lock() { Ok(s) => s, Err(e) => { eprintln!("TASK-90: store lock: {e}"); return; } };
         match store.dependents_of(task_id) {
-            Ok(d) => d,
+            Ok(d) => !d.is_empty(),
             Err(e) => { eprintln!("TASK-90: dependents_of({task_id}): {e:#}"); return; }
         }
     };
-    if dependents.is_empty() {
+    if !has_dependents {
         return;
     }
     // 2. Only now pay for the landed check. bypass short-circuits (no PR / no gh).
@@ -1017,14 +1096,17 @@ pub(crate) async fn promote_dependents_of(
     if !landed {
         return; // dependents stay queued; edges left intact
     }
-    // 3. Satisfied ⇒ clear this dependency's edges, promote each 0-unmet dependent.
-    {
+    // 3. Satisfied ⇒ atomically capture the promotion set AND clear this
+    //    dependency's edges (TASK-182). A dependent edge queued concurrently during
+    //    the await window is included here (or not yet inserted) — never removed
+    //    without being promoted. Then promote each 0-unmet dependent.
+    let dependents = {
         let store = match state.store.lock() { Ok(s) => s, Err(e) => { eprintln!("TASK-90: store lock: {e}"); return; } };
-        if let Err(e) = store.remove_dependencies_on(task_id) {
-            eprintln!("TASK-90: remove_dependencies_on({task_id}): {e:#}");
-            return;
+        match store.take_dependents_on(task_id) {
+            Ok(d) => d,
+            Err(e) => { eprintln!("TASK-90: take_dependents_on({task_id}): {e:#}"); return; }
         }
-    }
+    };
     for dep_id in dependents {
         let ready = {
             let store = match state.store.lock() { Ok(s) => s, Err(_) => continue };
@@ -1061,7 +1143,12 @@ pub fn build_snapshot(state: &AppState) -> Result<AppSnapshot, String> {
         .as_deref()
         .and_then(parse_bool_setting);
     let worktrees_root = state.worktrees_root.to_string_lossy().to_string();
-    Ok(AppSnapshot { repos, tasks, worktrees_root, sound_settings, fetch_remote_base, inject_lavigie_skills })
+    let blocked_by: std::collections::HashMap<String, Vec<Blocker>> = tasks
+        .iter()
+        .filter(|t| t.status == crate::store::TaskStatus::Pending)
+        .map(|t| (t.id.clone(), blockers_detail(&store, &t.id)))
+        .collect();
+    Ok(AppSnapshot { repos, tasks, worktrees_root, sound_settings, fetch_remote_base, inject_lavigie_skills, blocked_by })
 }
 
 #[tauri::command]
@@ -1600,5 +1687,40 @@ mod tests {
         assert_eq!(bool_setting_str(false), "false");
     }
 
+    #[test]
+    fn blockers_detail_resolves_titles_and_flags_dangling() {
+        use crate::store::{Repo, Task, TaskStatus, TaskStore};
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(&dir.path().join("v.sqlite3")).unwrap();
+        store
+            .insert_repo(&Repo {
+                id: "r1".into(), name: "r".into(), path: "/r".into(),
+                default_branch: "main".into(), remote_url: None, worktree_root: None,
+                setup_command: None, default_agent: None, auto_start_agent: false,
+                initial_prompt: None, default_model: None, sound_settings: None,
+                fetch_remote_base: None, auto_approve: None, in_place_default: false,
+            })
+            .unwrap();
+        let mk = |id: &str, status: TaskStatus| Task {
+            id: id.into(), repo_id: "r1".into(), title: format!("Title {id}"),
+            worktree_path: String::new(), branch: String::new(), base_branch: "main".into(),
+            status, created_at: 0, updated_at: 0, pr_number: None, pr_url: None,
+            ticket_key: None, agent: None, model: None, setup_status: None, hidden: false,
+            pending_prompt: None, auto_approve: None, in_place: false,
+        };
+        store.insert_task(&mk("b1", TaskStatus::Idle)).unwrap();
+        store.insert_task(&mk("waiter", TaskStatus::Pending)).unwrap();
+        store.add_task_dependency("waiter", "b1").unwrap();
+        store.add_task_dependency("waiter", "ghost").unwrap(); // dangling: no row
 
+        let mut blockers = blockers_detail(&store, "waiter");
+        blockers.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+        assert_eq!(blockers.len(), 2);
+        assert_eq!(blockers[0].task_id, "b1");
+        assert_eq!(blockers[0].title.as_deref(), Some("Title b1"));
+        assert_eq!(blockers[0].status, Some(TaskStatus::Idle));
+        assert_eq!(blockers[1].task_id, "ghost");
+        assert_eq!(blockers[1].title, None);
+        assert_eq!(blockers[1].status, None);
+    }
 }

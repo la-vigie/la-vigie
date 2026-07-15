@@ -33,6 +33,8 @@ pub struct AgentLaunchContext {
 /// TASK-112; this ticket only defines and enforces the tier.
 pub enum McpToken {
     Agent(AgentLaunchContext),
+    /// Per-repo orchestrator (TASK-180): broad MCP powers scoped to one repo.
+    Orchestrator { repo_id: String },
     Concierge,
 }
 
@@ -68,6 +70,10 @@ pub struct AppState {
     /// current file (resume overwrites); retained after the agent stops so the
     /// conversation stays readable post-stop.
     pub transcripts: Mutex<HashMap<String, String>>,
+    /// task_id → the questions an agent is currently blocked on (TASK-122),
+    /// captured from the `AskUserQuestion` `PreToolUse` hook. Present ⇒ the
+    /// mobile card shows; cleared when answered or the agent moves on.
+    pub pending_questions: Mutex<HashMap<String, crate::session::question::PendingQuestion>>,
     /// Serializes the concierge create path (TASK-112) so concurrent
     /// `POST /api/concierge` calls cannot both pass the liveness check and
     /// stack processes. Synchronous critical section — never held across `.await`.

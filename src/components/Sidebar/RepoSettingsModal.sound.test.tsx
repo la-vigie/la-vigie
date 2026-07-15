@@ -23,6 +23,7 @@ const repo: Repo = {
   path: "/tmp/repo-a",
   defaultBranch: "main",
   soundSettings: null,
+  inPlaceDefault: false,
 };
 
 /** Returns the soundSettings arg (8th positional, 0-based index 7) from the last call. */

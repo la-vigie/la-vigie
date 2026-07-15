@@ -14,6 +14,7 @@ const repo: Repo = {
   name: "home-mgmt",
   path: "/tmp/repo-a",
   defaultBranch: "main",
+  inPlaceDefault: false,
 };
 
 const overview: Task = {
@@ -27,6 +28,7 @@ const overview: Task = {
   createdAt: 1,
   updatedAt: 1,
   prNumber: 128,
+  inPlace: false,
 };
 
 const flaky: Task = {
@@ -39,6 +41,7 @@ const flaky: Task = {
   status: "needs_attention",
   createdAt: 1,
   updatedAt: 1,
+  inPlace: false,
 };
 
 describe("Sidebar — search and PR badge", () => {

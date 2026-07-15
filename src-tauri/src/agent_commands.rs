@@ -11,6 +11,12 @@ use crate::state::AppState;
 /// All selectable agents: built-in presets first, then custom definitions.
 #[tauri::command]
 pub fn list_agents(state: State<'_, AppState>) -> Result<Vec<AgentSpec>, String> {
+    agents_list(state.inner())
+}
+
+/// Core for `list_agents`, taking `&AppState` so the remote server's
+/// `GET /api/agents` reuses the exact same list (TASK-199).
+pub fn agents_list(state: &AppState) -> Result<Vec<AgentSpec>, String> {
     let custom = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         store.list_custom_agents().map_err(|e| format!("{e:#}"))?
@@ -35,6 +41,7 @@ pub fn upsert_custom_agent(state: State<'_, AppState>, spec: AgentSpec) -> Resul
         name,
         builtin: false,
         status: StatusMechanism::Lifecycle,
+        skill_injection: crate::agent::spec::SkillInjection::None,
         ..spec
     };
     let store = state.store.lock().map_err(|e| e.to_string())?;
@@ -92,12 +99,18 @@ pub fn list_agent_models(
     state: State<'_, AppState>,
     agent_name: String,
 ) -> Result<Vec<String>, String> {
+    agent_models(state.inner(), &agent_name)
+}
+
+/// Core for `list_agent_models`, taking `&AppState` so the remote server's
+/// `GET /api/agents/{name}/models` reuses the exact same enumeration (TASK-199).
+pub fn agent_models(state: &AppState, agent_name: &str) -> Result<Vec<String>, String> {
     use crate::agent::spec::resolve_agent;
     let custom = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         store.list_custom_agents().map_err(|e| format!("{e:#}"))?
     };
-    let spec = match resolve_agent(&agent_name, &custom) {
+    let spec = match resolve_agent(agent_name, &custom) {
         Some(s) => s,
         None => return Ok(vec![]),
     };

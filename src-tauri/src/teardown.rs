@@ -38,6 +38,13 @@ fn unsafe_reason(dirty: bool, commits_ahead: bool, pr_merged: bool) -> Option<St
     None
 }
 
+/// Whether teardown should physically `git worktree remove` the task's path.
+/// False for in-place tasks (TASK-163) — their `worktree_path` IS the repo's main
+/// checkout, which must never be removed — and for path-less queued tasks.
+pub fn should_remove_worktree(in_place: bool, worktree_path: &str) -> bool {
+    !in_place && !worktree_path.is_empty()
+}
+
 /// Captured, safety-passed data for a task committed to teardown. Produced by
 /// [`prepare_teardown`], consumed by [`perform_teardown`]. All-owned so it can
 /// be moved into a detached task. `agent_id` is the task's live agent (whose PTY
@@ -50,6 +57,9 @@ pub struct TeardownPlan {
     pub worktree_path: String,
     pub repo_path: String,
     pub branch: String,
+    /// TASK-163: an in-place task's `worktree_path` is the repo's main checkout;
+    /// `perform_teardown` must skip `remove_worktree` for it.
+    pub in_place: bool,
 }
 
 /// Outcome of the prepare phase: either an early terminal result (nothing to
@@ -73,7 +83,7 @@ pub async fn prepare_teardown(
     force: bool,
 ) -> Result<TeardownStep, String> {
     // 1. Capture task + repo + fetch setting by task_id; drop the store guard before await.
-    let (worktree_path, branch, base_branch, repo_path, use_remote, has_remote) = {
+    let (worktree_path, branch, base_branch, repo_path, use_remote, has_remote, in_place) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let task = match store.get_task(task_id).map_err(|e| format!("{e:#}"))? {
             Some(t) => t,
@@ -97,6 +107,7 @@ pub async fn prepare_teardown(
             repo.path,
             use_remote,
             repo.remote_url.is_some(),
+            task.in_place,
         )
     };
 
@@ -115,8 +126,9 @@ pub async fn prepare_teardown(
         crate::session::resolve_live_agent(&map, &live, task_id)
     };
 
-    // 3. Safety gate.
-    if !force {
+    // 3. Safety gate. In-place tasks never destroy anything (teardown detaches
+    //    only), so the gate never blocks them (TASK-163).
+    if !force && !in_place {
         let dirty = crate::git::working_tree_dirty(Path::new(&worktree_path))
             .await
             .map_err(|e| format!("{e:#}"))?;
@@ -168,6 +180,7 @@ pub async fn prepare_teardown(
         worktree_path,
         repo_path,
         branch,
+        in_place,
     }))
 }
 
@@ -201,9 +214,13 @@ pub async fn perform_teardown(
 
     // 6. Remove the worktree, then delete the DB row (worktree-first so a git
     //    failure leaves the row intact rather than orphaning a live worktree).
-    crate::git::remove_worktree(Path::new(&plan.repo_path), Path::new(&plan.worktree_path), true)
-        .await
-        .map_err(|e| format!("{e:#}"))?;
+    // TASK-163: in-place tasks skip this — `worktree_path` is the repo's main
+    // checkout, never a task-owned worktree to remove.
+    if should_remove_worktree(plan.in_place, &plan.worktree_path) {
+        crate::git::remove_worktree(Path::new(&plan.repo_path), Path::new(&plan.worktree_path), true)
+            .await
+            .map_err(|e| format!("{e:#}"))?;
+    }
     {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         store.delete_task(&plan.task_id).map_err(|e| format!("{e:#}"))?;
@@ -214,14 +231,26 @@ pub async fn perform_teardown(
     // teardown has no webview round-trip that would otherwise refresh). Best-effort.
     let _ = app.emit("task_removed", TaskRemovedPayload { task_id: plan.task_id.clone() });
 
+    // TASK-204: drop the torn-down task from the system-tray menu live.
+    crate::tray::refresh(app);
+
     Ok(())
 }
 
 /// Compose prepare + perform synchronously. Awaited directly by non-self-teardown
 /// callers (e.g. TASK-140 MCP finish_task) that tear down a DIFFERENT task and so
-/// have no request-cancellation hazard. Before the destructive `perform_teardown`,
-/// promotes any dependents queued on this task once its work has landed (TASK-90);
-/// `promote` is the `?promote` bypass (skip the landed check, e.g. no-PR flows).
+/// have no request-cancellation hazard. `perform_teardown` (which deletes the
+/// blocker's DB row) runs BEFORE promoting any dependents queued on this task
+/// (TASK-90); `promote` is the `?promote` bypass (skip the landed check, e.g.
+/// no-PR flows).
+///
+/// TASK-182: promote AFTER the row is deleted, mirroring the direct `finish_task`
+/// path. Once the blocker row is gone, a concurrent `launch_task` can no longer
+/// queue a new dependent behind it (`live_blockers` filters the now-dangling
+/// blocker and launches immediately instead), so the queue-vs-finish window that
+/// left a waiter stranded Pending — an edge inserted during teardown's
+/// `git worktree remove` await and then orphaned — is closed. A dependent queued
+/// before the row deletion is still captured by `promote_dependents_of`.
 pub async fn teardown_task(
     state: &AppState,
     app: &tauri::AppHandle,
@@ -232,10 +261,10 @@ pub async fn teardown_task(
     match prepare_teardown(state, task_id, force).await? {
         TeardownStep::Early(outcome) => Ok(outcome),
         TeardownStep::Ready(plan) => {
+            perform_teardown(state, app, &plan).await?;
             crate::commands::promote_dependents_of(
                 state, app, &plan.task_id, &plan.branch, &plan.repo_path, promote,
             ).await;
-            perform_teardown(state, app, &plan).await?;
             Ok(TeardownOutcome::Done)
         }
     }
@@ -266,6 +295,16 @@ mod tests {
         assert_eq!(unsafe_reason(false, true, true), None);
     }
 
+    #[test]
+    fn should_remove_worktree_never_for_in_place() {
+        // In-place task: worktree_path IS the repo's main checkout — never remove.
+        assert!(!should_remove_worktree(true, "/repo/root"));
+        // Queued/path-less task: nothing to remove.
+        assert!(!should_remove_worktree(false, ""));
+        // Normal worktree task: remove it.
+        assert!(should_remove_worktree(false, "/worktrees/r1/branch"));
+    }
+
     // ── TASK-151: teardown resolves by task_id, independent of the in-memory map ──
 
     use crate::store::{Repo, Task, TaskStatus, TaskStore};
@@ -294,6 +333,7 @@ mod tests {
                 sound_settings: None,
                 fetch_remote_base: None,
                 auto_approve: None,
+                in_place_default: false,
             })
             .unwrap();
         store
@@ -316,6 +356,7 @@ mod tests {
                 hidden: false,
                 pending_prompt: None,
                 auto_approve: None,
+                in_place: false,
             })
             .unwrap();
 
@@ -333,6 +374,7 @@ mod tests {
             mcp_tokens: Mutex::new(HashMap::new()),
             remote: Mutex::new(crate::remote::RemoteState::default()),
             transcripts: Mutex::new(HashMap::new()),
+            pending_questions: Mutex::new(HashMap::new()),
             concierge_spawn: Mutex::new(()),
             base_fetch_at: Mutex::new(HashMap::new()),
         }

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { shellEscapePath, buildDropPayload, isWithinRect, resolveActiveBackendId } from "./fileDrop";
-import { useVigieStore, AGENT_TAB } from "../../store";
+import { useVigieStore, AGENT_TAB, orchestratorSurfaceId } from "../../store";
 
 describe("shellEscapePath", () => {
   it("backslash-escapes spaces and shell metacharacters", () => {
@@ -36,6 +36,7 @@ describe("resolveActiveBackendId", () => {
   beforeEach(() => {
     useVigieStore.setState({
       selectedTaskId: "t1",
+      selectedOrchestratorRepoId: null,
       activeTabByTask: { t1: AGENT_TAB },
       sessionsByTask: { t1: [{ localId: AGENT_TAB, kind: "agent", status: "running", backendId: "be-1", title: "Claude" }] },
     });
@@ -46,5 +47,19 @@ describe("resolveActiveBackendId", () => {
   it("returns undefined when no task is selected", () => {
     useVigieStore.setState({ selectedTaskId: null });
     expect(resolveActiveBackendId(useVigieStore.getState())).toBeUndefined();
+  });
+  it("resolves the orchestrator surface when its repo is selected (TASK-221)", () => {
+    const surface = orchestratorSurfaceId("r1");
+    useVigieStore.setState({
+      // selectedTaskId is stale but must be ignored while an orchestrator is selected.
+      selectedTaskId: "t1",
+      selectedOrchestratorRepoId: "r1",
+      activeTabByTask: { t1: AGENT_TAB, [surface]: AGENT_TAB },
+      sessionsByTask: {
+        t1: [{ localId: AGENT_TAB, kind: "agent", status: "running", backendId: "be-1", title: "Claude" }],
+        [surface]: [{ localId: AGENT_TAB, kind: "orchestrator", status: "running", backendId: "be-orch", title: "Orchestrator" }],
+      },
+    });
+    expect(resolveActiveBackendId(useVigieStore.getState())).toBe("be-orch");
   });
 });

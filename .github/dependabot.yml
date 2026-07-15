@@ -1,0 +1,24 @@
+# Dependabot (TASK-71) — the continuous dependency-update layer that complements
+# the weekly advisory audit in .github/workflows/security-scan.yml. Opens weekly
+# version-update PRs for both Tauri attack surfaces (Rust crates + npm) plus the
+# CI actions themselves.
+#
+# NOTE: this file configures version-update PRs only. Dependabot SECURITY alerts
+# / security-update PRs are a separate repo setting (Settings → Code security) —
+# confirm they are enabled; they cannot be turned on from this file.
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/src-tauri"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

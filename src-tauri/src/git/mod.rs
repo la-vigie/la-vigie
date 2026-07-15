@@ -121,7 +121,31 @@ pub async fn add_repo(path: &Path) -> anyhow::Result<Repo> {
         sound_settings: None,
         fetch_remote_base: None,
         auto_approve: None,
+        in_place_default: false,
     })
+}
+
+/// The branch currently checked out in `repo_path`, via
+/// `git -C <repo_path> rev-parse --abbrev-ref HEAD`. Returns the branch name
+/// (or `"HEAD"` when detached). Used by in-place tasks (TASK-163) that adopt the
+/// checkout's current branch rather than creating one.
+pub async fn current_branch(repo_path: &Path) -> anyhow::Result<String> {
+    let path_str = repo_path
+        .to_str()
+        .ok_or_else(|| anyhow!("repo_path is not valid UTF-8: {:?}", repo_path))?;
+    run_git(&["-C", path_str, "rev-parse", "--abbrev-ref", "HEAD"]).await
+}
+
+/// Create and check out a new branch `branch` in the repo's existing checkout:
+/// `git -C <repo_path> checkout -b <branch>`. Used by in-place tasks (TASK-163);
+/// unlike `create_worktree` this mutates the shared checkout's HEAD. Surfaces
+/// git's stderr on failure (e.g. the branch already exists).
+pub async fn create_branch_in_place(repo_path: &Path, branch: &str) -> anyhow::Result<()> {
+    let path_str = repo_path
+        .to_str()
+        .ok_or_else(|| anyhow!("repo_path is not valid UTF-8: {:?}", repo_path))?;
+    run_git(&["-C", path_str, "checkout", "-b", branch]).await?;
+    Ok(())
 }
 
 /// `git -C <repo_path> worktree add -b <branch> <worktree_path> <base_branch>`.
@@ -646,6 +670,50 @@ mod tests {
             .expect("git rev-parse");
         let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
         assert_eq!(branch, "feature-x");
+    }
+
+    #[tokio::test]
+    async fn current_branch_reports_the_checked_out_branch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(["-C", dir.path().to_str().unwrap()])
+                .args(args)
+                .output()
+                .expect("git");
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "t"]);
+        run(&["commit", "-q", "--allow-empty", "-m", "init"]);
+
+        let branch = current_branch(dir.path()).await.expect("current_branch");
+        assert_eq!(branch, "main");
+    }
+
+    #[tokio::test]
+    async fn create_branch_in_place_switches_and_rejects_duplicates() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(["-C", dir.path().to_str().unwrap()])
+                .args(args)
+                .output()
+                .expect("git");
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "t"]);
+        run(&["commit", "-q", "--allow-empty", "-m", "init"]);
+
+        create_branch_in_place(dir.path(), "feature-x")
+            .await
+            .expect("create_branch_in_place");
+        assert_eq!(current_branch(dir.path()).await.unwrap(), "feature-x");
+
+        // Creating the same branch again fails (git: already exists).
+        let err = create_branch_in_place(dir.path(), "feature-x").await;
+        assert!(err.is_err(), "duplicate branch must surface an error");
     }
 
     // ── worktree_state (TASK-125): async glue over the pure classifier ───────────

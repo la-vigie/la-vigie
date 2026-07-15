@@ -28,6 +28,7 @@ const repo: Repo = {
   path: "/repos/my-repo",
   defaultBranch: "main",
   remoteUrl: "https://github.com/foo/bar",
+  inPlaceDefault: false,
 };
 
 const repoNoRemote: Repo = {
@@ -36,6 +37,7 @@ const repoNoRemote: Repo = {
   path: "/repos/my-repo",
   defaultBranch: "main",
   remoteUrl: undefined,
+  inPlaceDefault: false,
 };
 
 const task: Task = {
@@ -46,6 +48,7 @@ const task: Task = {
   branch: "fix-login",
   baseBranch: "main",
   status: "idle",
+  inPlace: false,
   createdAt: 1,
   updatedAt: 1,
 };

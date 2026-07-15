@@ -1,9 +1,9 @@
 ---
+name: spec-init
 description: Create a spec file for the current task to record thinking and decisions
-allowed-tools: Bash, Read, Write, Glob
-argument-hint: '<problem statement summary>'
+allowed-tools: 'Bash, Read, Write, Glob'
+argument-hint: <problem statement summary>
 ---
-
 # Spec Init: Create a spec file for this task
 
 You are creating a local spec/decision log for the current task.

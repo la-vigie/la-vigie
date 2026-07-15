@@ -4,13 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NewTaskForm } from "./Sidebar";
 import { useVigieStore } from "../../store";
 import type { AgentSpec, Repo } from "../../store";
+import type { Schedule } from "../../api";
 import * as agentHooks from "../../hooks/useAgents";
 
 vi.mock("../../hooks/useAgents");
 
-const { createTaskMock, checkWorktreePathMock } = vi.hoisted(() => ({
+const { createTaskMock, checkWorktreePathMock, createOneShotScheduleMock } = vi.hoisted(() => ({
   createTaskMock: vi.fn(),
   checkWorktreePathMock: vi.fn(),
+  createOneShotScheduleMock: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({}));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
@@ -18,6 +20,7 @@ vi.mock("../../api", () => ({
   createTask: createTaskMock,
   checkWorktreePath: checkWorktreePathMock,
   addRepo: vi.fn(),
+  createOneShotSchedule: createOneShotScheduleMock,
 }));
 
 // Default safe hook mocks.
@@ -36,6 +39,7 @@ const repo = (over: Partial<Repo> = {}): Repo => ({
   defaultBranch: "main",
   autoStartAgent: false,
   initialPrompt: null,
+  inPlaceDefault: false,
   ...over,
 });
 
@@ -288,6 +292,46 @@ describe("NewTaskForm worktree-path warning (TASK-125)", () => {
   });
 });
 
+describe("NewTaskForm in-place mode (TASK-163)", () => {
+  beforeEach(() => {
+    useVigieStore.setState({ refresh: vi.fn(), setSelectedTask: vi.fn(), startAgentSession: vi.fn() });
+  });
+
+  it("in-place checkbox passes inPlace + branchName and hides the worktree preview", async () => {
+    createTaskMock.mockResolvedValue({ id: "t1" });
+
+    render(<NewTaskForm repo={repo({ inPlaceDefault: false, initialPrompt: "" })} onClose={vi.fn()} />);
+
+    await userEvent.type(screen.getByLabelText("Task title"), "Fix infra");
+    await userEvent.click(screen.getByLabelText(/Work in place/i));
+    await userEvent.type(screen.getByLabelText(/New branch name/i), "hotfix");
+    await userEvent.click(screen.getByRole("button", { name: "Create task" }));
+
+    await waitFor(() => expect(createTaskMock).toHaveBeenCalled());
+    const args = createTaskMock.mock.calls[0];
+    // createTask(repoId, title, baseBranch, ticketKey, agent, model, autoApprove, inPlace, branchName)
+    expect(args[7]).toBe(true); // inPlace
+    expect(args[8]).toBe("hotfix"); // branchName
+    // No worktree preview banner while in-place.
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("checking 'Start later' clears and disables in-place, hiding the branch-name field", async () => {
+    render(<NewTaskForm repo={repo({ inPlaceDefault: false, initialPrompt: "" })} onClose={vi.fn()} />);
+
+    await userEvent.type(screen.getByLabelText("Task title"), "Fix infra");
+    await userEvent.click(screen.getByLabelText(/Work in place/i));
+    expect(screen.getByLabelText(/New branch name/i)).toBeTruthy();
+
+    await userEvent.click(screen.getByLabelText("Start the agent later"));
+
+    // In-place is cleared and disabled, and its branch-name field is hidden.
+    expect(screen.getByLabelText(/Work in place/i)).not.toBeChecked();
+    expect(screen.getByLabelText(/Work in place/i)).toBeDisabled();
+    expect(screen.queryByLabelText(/New branch name/i)).toBeNull();
+  });
+});
+
 describe("NewTaskForm prompt library picker", () => {
   it("closes the Library dropdown after selecting a prompt (a wrapping <label> must not re-toggle it)", async () => {
     useVigieStore.setState({
@@ -395,6 +439,8 @@ describe("NewTaskForm agent picker (TASK-21)", () => {
         "antigravity",
         null,
         null,
+        false,
+        null,
       ),
     );
   });
@@ -439,5 +485,53 @@ describe("NewTaskForm agent picker (TASK-21)", () => {
         undefined,
       ),
     );
+  });
+});
+
+describe("NewTaskForm deferred launch (TASK-179)", () => {
+  const seedSpies = () => {
+    const startSpy = vi.fn();
+    useVigieStore.setState({
+      startAgentSession: startSpy,
+      refresh: vi.fn(),
+      setSelectedTask: vi.fn(),
+    });
+    return startSpy;
+  };
+
+  it("defers the launch as a one-shot when 'Start later' is checked", async () => {
+    createOneShotScheduleMock.mockResolvedValue({} as Schedule);
+    seedSpies();
+    const onClose = vi.fn();
+    render(<NewTaskForm repo={repo()} onClose={onClose} />);
+    await userEvent.type(screen.getByLabelText("Task title"), "Quota resume");
+    await userEvent.type(screen.getByLabelText("Initial prompt"), "/resume");
+    await userEvent.click(screen.getByLabelText("Start the agent later"));
+    await userEvent.clear(screen.getByLabelText("Start in hours"));
+    await userEvent.type(screen.getByLabelText("Start in hours"), "3");
+    await userEvent.click(screen.getByRole("button", { name: "Create task" }));
+
+    await waitFor(() =>
+      expect(createOneShotScheduleMock).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "Quota resume", prompt: "/resume", inSeconds: 10800 }),
+      ),
+    );
+    expect(createTaskMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty 'Start in hours' value and does not create anything", async () => {
+    seedSpies();
+    const onClose = vi.fn();
+    render(<NewTaskForm repo={repo()} onClose={onClose} />);
+    await userEvent.type(screen.getByLabelText("Task title"), "Quota resume");
+    await userEvent.click(screen.getByLabelText("Start the agent later"));
+    await userEvent.clear(screen.getByLabelText("Start in hours"));
+    await userEvent.click(screen.getByRole("button", { name: "Create task" }));
+
+    await waitFor(() =>
+      expect(screen.getByText("Enter a positive number of hours.")).toBeInTheDocument(),
+    );
+    expect(createOneShotScheduleMock).not.toHaveBeenCalled();
+    expect(createTaskMock).not.toHaveBeenCalled();
   });
 });

@@ -1,5 +1,5 @@
 import { wrapBracketedPaste } from "../Diff/comments";
-import type { VigieState } from "../../store";
+import { orchestratorSurfaceId, type VigieState } from "../../store";
 
 // Backslash-escape characters a POSIX shell treats specially, mirroring what
 // Terminal.app inserts when you drag a file in. Claude Code shell-unescapes the
@@ -28,12 +28,17 @@ export function isWithinRect(physical: DropPoint, rect: DOMRect, dpr: number): b
   return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
-// The PTY backendId of the session shown in the selected task's active tab, or
-// undefined if there is no selection / no spawned session.
+// The PTY backendId of the session shown in the selected surface's active tab, or
+// undefined if there is no selection / no spawned session. The selected surface is
+// the orchestrator chat (`orchestrator:{repoId}`) if one is selected, else the task
+// — mirroring TerminalHost's `selectedSurfaceId` precedence so a drop over the
+// orchestrator terminal resolves its PTY too (TASK-221).
 export function resolveActiveBackendId(state: VigieState): string | undefined {
-  const taskId = state.selectedTaskId;
-  if (!taskId) return undefined;
-  const activeLocalId = state.activeTabByTask[taskId];
-  const session = state.sessionsByTask[taskId]?.find((s) => s.localId === activeLocalId);
+  const surfaceId = state.selectedOrchestratorRepoId
+    ? orchestratorSurfaceId(state.selectedOrchestratorRepoId)
+    : state.selectedTaskId;
+  if (!surfaceId) return undefined;
+  const activeLocalId = state.activeTabByTask[surfaceId];
+  const session = state.sessionsByTask[surfaceId]?.find((s) => s.localId === activeLocalId);
   return session?.backendId;
 }

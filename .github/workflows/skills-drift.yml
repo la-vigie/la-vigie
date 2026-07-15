@@ -1,0 +1,36 @@
+# TASK-35: keep the generated per-provider skill bundles in sync with their single
+# canonical source (.rulesync/skills/). Regenerates from source and fails if the
+# committed resource trees differ — the same "generated artifacts stay fresh"
+# guard the repo already applies elsewhere. Advisory-independent of the tests gate.
+name: skills-drift
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          # .nvmrc pins Node 24, which satisfies rulesync's `engines.node >= 22`.
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Regenerate skill bundles
+        run: npm run skills:generate
+      - name: Fail on drift
+        run: |
+          if ! git diff --exit-code -- \
+              src-tauri/resources/lavigie-skills \
+              src-tauri/resources/lavigie-plugin/skills; then
+            echo "::error::Generated skill bundles are stale. Run 'npm run skills:generate' and commit the result."
+            exit 1
+          fi

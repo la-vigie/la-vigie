@@ -11,6 +11,7 @@
 //! `Channel`.
 
 pub mod models;
+pub mod skill_bundle;
 pub mod spec;
 pub mod status;
 
@@ -52,6 +53,13 @@ pub struct PtySession {
 /// dotfiles sound hooks) can detect they're running inside the app and defer.
 fn apply_lavigie_env(cmd: &mut CommandBuilder) {
     cmd.env("LAVIGIE", "1");
+    // Advertise OSC 8 hyperlink support to CLIs that gate it on terminal
+    // detection (e.g. Claude Code's `supports-hyperlinks` check). Our embedded
+    // xterm.js genuinely supports OSC 8 (see TerminalView's linkHandler), but it
+    // sets no recognized TERM_PROGRAM, so tools would otherwise fall back to
+    // plain text — leaving footer badges like the "PR #123" link unclickable
+    // (TASK-170). FORCE_HYPERLINK=1 is the documented opt-in override.
+    cmd.env("FORCE_HYPERLINK", "1");
 }
 
 /// Spawn `program` with `args` in a new PTY, optionally with working
@@ -99,7 +107,8 @@ pub fn spawn_pty(
 }
 
 /// What a registered PTY session represents. Drives the desktop "Remote
-/// sessions" surface and the idle reaper (only `Concierge` is reaped).
+/// sessions" surface and the idle reaper (rootless `Concierge`/`Orchestrator`
+/// sessions are reaped; `Task`/`Shell` are not).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionKind {
     /// A task-bound agent (worktree + DB Task row).
@@ -108,6 +117,10 @@ pub enum SessionKind {
     Shell,
     /// The worktree-less mobile concierge (TASK-112).
     Concierge,
+    /// A worktree-less, repo-scoped orchestrator session (TASK-180). Like the
+    /// concierge but bound to one repo via its MCP token; the repo id lives on
+    /// `SessionHandle.repo_id`.
+    Orchestrator,
 }
 
 /// A registered, running PTY session: everything needed to write input,
@@ -121,11 +134,21 @@ pub struct SessionHandle {
     /// The agent's MCP bearer token, if any (None for shells / non-Claude
     /// agents). Removed from `AppState.mcp_tokens` when the session stops.
     pub mcp_token: Option<String>,
-    /// What this session is (task agent / shell / concierge).
+    /// What this session is (task agent / shell / concierge / orchestrator).
     pub kind: SessionKind,
+    /// The repo this rootless session is scoped to, when applicable. `Some` for
+    /// a per-repo `Orchestrator` (TASK-180); `None` for tasks, shells, and the
+    /// legacy global concierge.
+    pub repo_id: Option<String>,
     /// Last client activity (poll/reply). Updated via `bump_activity`; read by
     /// the idle reaper and the desktop "Remote sessions" list.
     pub last_activity: std::time::Instant,
+    /// True when a live frontend `Channel` is attached — a directly-attached
+    /// desktop terminal, exempt from the idle reaper (TASK-126). Task/Shell
+    /// sessions also pass a channel, but they're already exempt by `kind`; this
+    /// field only changes reaper behavior for rootless (`Concierge`/
+    /// `Orchestrator`) sessions.
+    pub has_frontend_channel: bool,
 }
 
 /// Resolve the user's interactive login shell: `$SHELL` if set, else
@@ -149,6 +172,7 @@ pub(crate) fn register_streaming_session(
     on_event: Option<Channel<PtyEvent>>,
     mcp_token: Option<String>,
     kind: SessionKind,
+    repo_id: Option<String>,
 ) -> Result<(), String> {
     let reader = session.reader.take().expect("freshly spawned PtySession always has a reader");
     let child_for_thread = std::sync::Arc::clone(&session.child);
@@ -172,13 +196,16 @@ pub(crate) fn register_streaming_session(
             let _ = ch.send(PtyEvent::Exit { code });
         }
     });
+    let has_frontend_channel = on_event.is_some();
     let handle = SessionHandle {
         master: session.master,
         writer: session.writer,
         child: session.child,
         mcp_token,
         kind,
+        repo_id,
         last_activity: std::time::Instant::now(),
+        has_frontend_channel,
     };
     state.sessions.lock().map_err(|e| e.to_string())?.insert(session_id.to_string(), handle);
     Ok(())
@@ -244,6 +271,19 @@ pub fn build_mcp_config(port: u16, token: &str) -> String {
     .to_string()
 }
 
+/// TASK-174: the optional `LAVIGIE_TASK_REF` env entry for a launched agent —
+/// the provider ticket ref (e.g. `TASK-174`, `#123`, `owner/repo#123`) passed
+/// through verbatim so a `task-provider` adapter skill can route/act on it.
+/// `None` when the task has no ticket key (the adapter then degrades to reading
+/// the launch prompt). The ref is handed over rather than recovered from the
+/// branch because `slugify` is lossy for issue ids (`#123` → `123`).
+fn lavigie_task_ref_env(ticket_key: Option<&str>) -> Option<(&'static str, String)> {
+    match ticket_key {
+        Some(key) if !key.trim().is_empty() => Some(("LAVIGIE_TASK_REF", key.to_string())),
+        _ => None,
+    }
+}
+
 /// Spawn the task's resolved agent in its worktree and stream its PTY output
 /// to the frontend over `on_event`. The agent is determined by the task →
 /// repo default → global default (`claude`) precedence chain. Returns the new
@@ -267,6 +307,7 @@ pub fn start_agent(
         repo_auto_approve,
         custom_agents,
         app_inject_skills,
+        task_ticket_key,
     ) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let task = store
@@ -294,6 +335,7 @@ pub fn start_agent(
             repo_auto_approve,
             custom,
             app_inject_skills,
+            task.ticket_key,
         )
     };
 
@@ -343,14 +385,42 @@ pub fn start_agent(
     };
     let mcp_config = mcp_token.as_deref().map(|t| build_mcp_config(state.mcp_port, t));
 
-    // TASK-153: when enabled, layer La Vigie's bundled skills via `--plugin-dir`.
-    // Namespaced (`/lavigie:*`) so they never shadow the operator's own skills.
+    use crate::agent::spec::SkillInjection;
+
+    // TASK-153: Claude gets La Vigie's bundled skills out-of-tree via `--plugin-dir`.
     // Unresolvable/invalid bundle → omit the flag; launch never breaks.
-    let plugin_dir: Option<String> = if app_inject_skills {
+    let plugin_dir: Option<String> = if app_inject_skills
+        && spec.skill_injection == SkillInjection::PluginDir
+    {
         crate::lavigie_plugin::resolve_plugin_dir(&app).map(|p| p.to_string_lossy().into_owned())
     } else {
         None
     };
+
+    // TASK-35: providers that discover project-local skills from the worktree get
+    // their vendored per-provider bundle materialized into the worktree
+    // (git-excluded, so it never shows in the Diff). Best-effort: any failure
+    // logs and the agent still launches, skill-free. Runs before spawn_pty so it
+    // never races the PTY (KEEP-ALIVE safe).
+    if app_inject_skills {
+        if let SkillInjection::WorktreeBundle { provider } = &spec.skill_injection {
+            match crate::lavigie_skills::resolve_skills_bundle_dir(&app, provider) {
+                Some(bundle) => {
+                    match crate::agent::skill_bundle::materialize(&bundle, Path::new(&worktree_path)) {
+                        Ok(dirs) if dirs.is_empty() => {
+                            eprintln!("TASK-35: bundle for {provider} had no skill dirs; launching skill-free");
+                        }
+                        Ok(_dirs) => {}
+                        Err(e) => eprintln!("TASK-35: skill injection for {provider} failed: {e:#}"),
+                    }
+                }
+                None => {
+                    eprintln!("TASK-35: no vendored skill bundle for {provider}; launching skill-free");
+                }
+            }
+        }
+    }
+
     let (program, mut args) = build_agent_command(
         &spec,
         resume,
@@ -376,11 +446,17 @@ pub fn start_agent(
     // /rename/{task_id} and /finish/{task_id} (TASK-40/TASK-139/TASK-151) — so they
     // resolve even after an app restart empties the in-memory agent→task map.
     // LAVIGIE_AGENT_ID stays for the per-agent hook URLs (status/transcript).
-    let agent_env: [(&str, String); 3] = [
+    // TASK-174: also hand over LAVIGIE_TASK_REF — the provider ticket ref
+    // verbatim — so a task-provider adapter skill can route/act on it. Only
+    // present when the task carries a ticket key.
+    let mut agent_env: Vec<(&str, String)> = vec![
         ("LAVIGIE_HOOK_PORT", state.hook_port.to_string()),
         ("LAVIGIE_AGENT_ID", agent_id.clone()),
         ("LAVIGIE_TASK_ID", task_id.clone()),
     ];
+    if let Some(entry) = lavigie_task_ref_env(task_ticket_key.as_deref()) {
+        agent_env.push(entry);
+    }
 
     let mut session = spawn_pty(&resolved, &args, Some(Path::new(&worktree_path)), 80, 24, &agent_env)
         .map_err(|e| format!("{e:#}"))?;
@@ -392,7 +468,7 @@ pub fn start_agent(
         session.writer.flush().map_err(|e| format!("{e:#}"))?;
     }
 
-    register_streaming_session(&state, &agent_id, session, Some(on_event), mcp_token, SessionKind::Task)?;
+    register_streaming_session(&state, &agent_id, session, Some(on_event), mcp_token, SessionKind::Task, None)?;
 
     // Emit initial console status with permission mode for agents whose auto-approve
     // is resolved on. Lifecycle agents (e.g. Mistral Vibe) don't use hooks. (TASK-135)
@@ -438,7 +514,7 @@ pub fn start_shell(
     let session = spawn_pty(&program, &args, Some(Path::new(&worktree_path)), 80, 24, &[])
         .map_err(|e| format!("{e:#}"))?;
 
-    register_streaming_session(&state, &session_id, session, Some(on_event), None, SessionKind::Shell)?;
+    register_streaming_session(&state, &session_id, session, Some(on_event), None, SessionKind::Shell, None)?;
 
     Ok(session_id)
 }
@@ -556,6 +632,19 @@ mod tests {
         assert_eq!(program, "/bin/zsh");
     }
 
+    #[test]
+    fn apply_lavigie_env_marks_process_and_forces_hyperlinks() {
+        let mut cmd = CommandBuilder::new("true");
+        apply_lavigie_env(&mut cmd);
+        assert_eq!(cmd.get_env("LAVIGIE"), Some(std::ffi::OsStr::new("1")));
+        // FORCE_HYPERLINK=1 makes hyperlink-gating CLIs (e.g. Claude Code) emit
+        // OSC 8 links our xterm.js terminal can render clickably (TASK-170).
+        assert_eq!(
+            cmd.get_env("FORCE_HYPERLINK"),
+            Some(std::ffi::OsStr::new("1"))
+        );
+    }
+
     fn read_to_end(mut reader: Box<dyn Read + Send>) -> Vec<u8> {
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).expect("read_to_end failed");
@@ -581,6 +670,31 @@ mod tests {
         assert!(
             output.contains("hello"),
             "expected output to contain 'hello', got: {output:?}"
+        );
+    }
+
+    #[test]
+    fn spawn_pty_propagates_force_hyperlink_to_child() {
+        // Runtime check that FORCE_HYPERLINK=1 actually reaches the spawned
+        // process (not just the CommandBuilder) — this is what makes Claude Code
+        // emit OSC 8 footer links our terminal can render clickably (TASK-170).
+        let mut session = spawn_pty(
+            "/bin/sh",
+            &["-c".to_string(), "printf %s \"$FORCE_HYPERLINK\"".to_string()],
+            None,
+            80,
+            24,
+            &[],
+        )
+        .expect("spawn_pty failed");
+
+        let reader = session.reader.take().expect("reader already taken");
+        let output = read_to_end(reader);
+        let output = String::from_utf8_lossy(&output);
+
+        assert!(
+            output.contains('1'),
+            "expected child to see FORCE_HYPERLINK=1, got: {output:?}"
         );
     }
 
@@ -658,6 +772,24 @@ mod tests {
             output.contains("agent-xyz"),
             "expected child to see LAVIGIE_AGENT_ID, got: {output:?}"
         );
+    }
+
+    // ── lavigie_task_ref_env (TASK-174) ────────────────────────────────────────
+
+    #[test]
+    fn lavigie_task_ref_env_present_when_keyed_absent_when_not() {
+        // Present verbatim for every provider ID shape (ticket keys + GitHub issues).
+        for key in ["TASK-174", "#123", "owner/repo#123"] {
+            assert_eq!(
+                lavigie_task_ref_env(Some(key)),
+                Some(("LAVIGIE_TASK_REF", key.to_string())),
+                "expected LAVIGIE_TASK_REF for {key:?}"
+            );
+        }
+        // Absent when there is no ticket key, or it is blank after trimming.
+        assert_eq!(lavigie_task_ref_env(None), None);
+        assert_eq!(lavigie_task_ref_env(Some("")), None);
+        assert_eq!(lavigie_task_ref_env(Some("   ")), None);
     }
 
     // ── build_hook_settings ───────────────────────────────────────────────────

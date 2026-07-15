@@ -12,7 +12,7 @@ URL it was handed on spawn.
 
 ## How to use it
 
-La Vigie spawns every agent with three environment variables:
+La Vigie spawns every agent with the following environment variables:
 
 - **`LAVIGIE_HOOK_PORT`** — the port HookBridge is listening on (loopback only).
 - **`LAVIGIE_TASK_ID`** — the durable id of the task the agent is running in. This is
@@ -21,6 +21,10 @@ La Vigie spawns every agent with three environment variables:
   still resolves correctly even if La Vigie's in-memory state has since been rebuilt.
 - **`LAVIGIE_AGENT_ID`** — the id of this particular run, used for the per-run hook,
   status-line, and transcript endpoints.
+- **`LAVIGIE_TASK_REF`** *(present only when the task has a ticket key)* — the task's
+  provider ticket ref, passed through verbatim (e.g. `TASK-174`, `#123`,
+  `owner/repo#123`). A `task-provider` adapter skill uses it to read and update the task
+  in whatever task tracker backs it (e.g. GitHub Issues), selected by the ref's format.
 
 An agent (or a skill running inside one) uses these to call two routes:
 

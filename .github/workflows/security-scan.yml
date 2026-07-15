@@ -1,0 +1,136 @@
+# Scheduled security scan (TASK-71). Weekly (and on-demand) it runs cargo audit
+# (Rust advisories), npm audit (JS advisories) and gitleaks (secret detection),
+# then files/updates/closes ONE deduplicated GitHub issue (label: security-scan)
+# so a finding never scans into the void. NOT a PR gate: it is time-triggered,
+# posts no review-gate-* commit status, and does not touch MERGE_POLICY.md.
+#
+# Design notes:
+#  - cargo audit reads src-tauri/Cargo.lock only — no crate compile, no Tauri
+#    apt deps (unlike tests.yml / mutation-advisory.yml).
+#  - npm audit runs --package-lock-only — no `npm ci`.
+#  - gitleaks is the MIT-licensed binary (pinned), NOT gitleaks-action (license-
+#    gated for orgs); --redact keeps secrets out of logs and the issue.
+#  - Decision logic lives in the unit-tested scripts/security-scan-report.mjs;
+#    this YAML + scripts/security-scan.mjs + the gh calls are thin glue.
+name: security-scan
+
+on:
+  schedule:
+    - cron: "0 7 * * 1" # Mondays 07:00 UTC
+  workflow_dispatch: {}
+
+# Least privilege: read the code, open/edit/close the scan issue.
+permissions:
+  contents: read
+  issues: write
+
+# Serialize runs so a manual dispatch overlapping the weekly cron can't race to
+# create duplicate security-scan issues.
+concurrency:
+  group: security-scan
+  cancel-in-progress: false
+
+env:
+  GITLEAKS_VERSION: "8.18.4"
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # gitleaks scans full history
+
+      # --- Rust advisories -------------------------------------------------
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install cargo-audit
+        continue-on-error: true
+        run: cargo install cargo-audit --locked
+      - name: cargo audit
+        continue-on-error: true
+        run: |
+          # Reads src-tauri/Cargo.lock. Non-zero exit ⇒ advisories ⇒ "found".
+          # --color never: cargo-audit colorizes even without a TTY, which would
+          # leak ANSI escape codes into the filed issue body (TASK-187).
+          if (cd src-tauri && cargo audit --color never) > cargo-audit.txt 2>&1; then
+            echo clean > cargo-audit.status
+          else
+            echo found > cargo-audit.status
+          fi
+
+      # --- npm advisories --------------------------------------------------
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+      - name: npm audit
+        continue-on-error: true
+        run: |
+          # --package-lock-only audits the root package-lock.json with no install.
+          if npm audit --package-lock-only > npm-audit.txt 2>&1; then
+            echo clean > npm-audit.status
+          else
+            echo found > npm-audit.status
+          fi
+
+      # --- Secret detection ------------------------------------------------
+      - name: Install gitleaks
+        continue-on-error: true
+        run: |
+          curl -fsSL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks version
+      - name: gitleaks
+        continue-on-error: true
+        run: |
+          # --redact keeps real secrets out of logs and the issue. Non-zero exit
+          # ⇒ leaks found ⇒ "found".
+          if ./gitleaks detect --source . --redact --no-banner -v > gitleaks.txt 2>&1; then
+            echo clean > gitleaks.status
+          else
+            echo found > gitleaks.status
+          fi
+
+      # --- Compose the issue body -----------------------------------------
+      - name: Compose report
+        id: report
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node scripts/security-scan.mjs
+
+      # --- File / update / close the single security-scan issue ------------
+      - name: File or resolve the security-scan issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HAS_FINDINGS: ${{ steps.report.outputs.has_findings }}
+          TITLE: "🔒 Scheduled security scan findings"
+        run: |
+          # Idempotent label (create-or-update); create needs it to exist first.
+          gh label create security-scan --color B60205 \
+            --description "Automated security scan findings" --force || true
+
+          existing=$(gh issue list --label security-scan --state open \
+            --json number --jq '.[0].number // empty')
+
+          if [ "$HAS_FINDINGS" = "true" ]; then
+            if [ -n "$existing" ]; then
+              gh issue edit "$existing" --body-file security-issue-body.md
+            else
+              gh issue create --title "$TITLE" --label security-scan \
+                --body-file security-issue-body.md
+            fi
+          elif [ -n "$existing" ]; then
+            gh issue comment "$existing" \
+              --body "✅ Latest scheduled security scan is clean — closing."
+            gh issue close "$existing"
+          fi
+
+      # --- Reflect findings in the run status (secondary signal) -----------
+      - name: Reflect findings in run status
+        if: steps.report.outputs.has_findings == 'true'
+        run: |
+          echo "Security scan found issues — see the filed 'security-scan' issue." >&2
+          exit 1

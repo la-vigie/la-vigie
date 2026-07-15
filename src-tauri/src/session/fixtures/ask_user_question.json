@@ -1,0 +1,22 @@
+{
+  "questions": [
+    {
+      "question": "How should I format the output?",
+      "header": "Format",
+      "options": [
+        { "label": "Summary", "description": "Brief overview" },
+        { "label": "Detailed", "description": "Full explanation" }
+      ],
+      "multiSelect": false
+    },
+    {
+      "question": "Which sections should I include?",
+      "header": "Sections",
+      "options": [
+        { "label": "Introduction", "description": "Opening context" },
+        { "label": "Conclusion", "description": "Final summary" }
+      ],
+      "multiSelect": true
+    }
+  ]
+}

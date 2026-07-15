@@ -1,7 +1,7 @@
 import { render } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TerminalHost } from "./TerminalHost";
-import { useVigieStore, AGENT_TAB } from "../../store";
+import { useVigieStore, AGENT_TAB, orchestratorSurfaceId } from "../../store";
 
 vi.mock("./TerminalView", () => ({
   TerminalView: ({
@@ -26,6 +26,7 @@ describe("TerminalHost", () => {
       repos: [],
       tasks: [],
       selectedTaskId: null,
+      selectedOrchestratorRepoId: null,
       sessionsByTask: {},
       activeTabByTask: {},
     });
@@ -107,5 +108,46 @@ describe("TerminalHost", () => {
 
     // Shell TerminalView is now visible
     expect(getByTestId(`terminal-task-1-${shellLocalId}`).dataset.hidden).toBe("false");
+  });
+
+  it("keeps both the task and orchestrator terminals mounted across a task<->orchestrator selection switch", () => {
+    const orchSurfaceId = orchestratorSurfaceId("r1");
+    useVigieStore.setState({
+      selectedTaskId: "t1",
+      selectedOrchestratorRepoId: null,
+      sessionsByTask: {
+        t1: [{ localId: AGENT_TAB, kind: "agent", status: "running", title: "Claude" }],
+        [orchSurfaceId]: [{ localId: AGENT_TAB, kind: "orchestrator", status: "running", title: "Orchestrator" }],
+      },
+      activeTabByTask: { t1: AGENT_TAB, [orchSurfaceId]: AGENT_TAB },
+    });
+
+    const { getByTestId, rerender } = render(<TerminalHost />);
+    const taskTermBefore = getByTestId(`terminal-t1-${AGENT_TAB}`);
+    const orchTermBefore = getByTestId(`terminal-${orchSurfaceId}-${AGENT_TAB}`);
+    expect(taskTermBefore.dataset.hidden).toBe("false");
+    expect(orchTermBefore.dataset.hidden).toBe("true");
+
+    // Switch selection to the orchestrator.
+    useVigieStore.getState().setSelectedOrchestrator("r1");
+    rerender(<TerminalHost />);
+
+    const taskTermMid = getByTestId(`terminal-t1-${AGENT_TAB}`);
+    const orchTermMid = getByTestId(`terminal-${orchSurfaceId}-${AGENT_TAB}`);
+    expect(taskTermMid).toBe(taskTermBefore); // same DOM node — never remounted
+    expect(orchTermMid).toBe(orchTermBefore);
+    expect(taskTermMid.dataset.hidden).toBe("true");
+    expect(orchTermMid.dataset.hidden).toBe("false");
+
+    // Switch selection back to the task.
+    useVigieStore.getState().setSelectedTask("t1");
+    rerender(<TerminalHost />);
+
+    const taskTermAfter = getByTestId(`terminal-t1-${AGENT_TAB}`);
+    const orchTermAfter = getByTestId(`terminal-${orchSurfaceId}-${AGENT_TAB}`);
+    expect(taskTermAfter).toBe(taskTermBefore); // still the same DOM node
+    expect(orchTermAfter).toBe(orchTermBefore);
+    expect(taskTermAfter.dataset.hidden).toBe("false");
+    expect(orchTermAfter.dataset.hidden).toBe("true");
   });
 });

@@ -4,11 +4,13 @@ import { TaskDetail } from "./components/TaskDetail/TaskDetail";
 import { TitleBar } from "./components/TitleBar/TitleBar";
 import { useAgentStatus } from "./hooks/useAgentStatus";
 import { useAgentConsole } from "./hooks/useAgentConsole";
+import { useFocusRefresh } from "./hooks/useFocusRefresh";
 import { useSetupStatus } from "./hooks/useSetupStatus";
 import { useTaskCreated } from "./hooks/useTaskCreated";
 import { useTaskLaunch } from "./hooks/useTaskLaunch";
 import { useTaskRename } from "./hooks/useTaskRename";
 import { useTaskRemoved } from "./hooks/useTaskRemoved";
+import { useTraySelect } from "./hooks/useTraySelect";
 import { useVigieStore } from "./store";
 import "./App.css";
 
@@ -24,6 +26,8 @@ function App() {
   useTaskRename();
   useTaskRemoved();
   useTaskCreated();
+  useTraySelect();
+  useFocusRefresh();
 
   const sidebarCollapsed = useVigieStore((state) => state.sidebarCollapsed);
   const setSidebarWidth = useVigieStore((state) => state.setSidebarWidth);

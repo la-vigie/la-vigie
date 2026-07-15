@@ -45,15 +45,27 @@ export function DeleteTaskModal({ task, onCancel, onConfirm }: DeleteTaskModalPr
           <h2 className="new-task-modal__title">Delete task "{task.title}"?</h2>
         </header>
         <div className="new-task-modal__body">
-          <p>This removes the task's worktree and can't be undone.</p>
-          <label className="delete-task-modal__checkbox">
-            <input
-              type="checkbox"
-              checked={deleteBranch}
-              onChange={(e) => setDeleteBranch(e.target.checked)}
-            />{" "}
-            Also delete the branch <code>{task.branch}</code>
-          </label>
+          {task.inPlace ? (
+            // In-place task: no worktree to remove and the branch is always kept,
+            // so there's no "delete branch" option (it would be a no-op — teardown
+            // never touches the shared checkout). TASK-163.
+            <p>
+              This removes the task from La Vigie. Your checkout folder and its branch{" "}
+              <code>{task.branch}</code> are kept — nothing on disk is deleted.
+            </p>
+          ) : (
+            <>
+              <p>This removes the task's worktree and can't be undone.</p>
+              <label className="delete-task-modal__checkbox">
+                <input
+                  type="checkbox"
+                  checked={deleteBranch}
+                  onChange={(e) => setDeleteBranch(e.target.checked)}
+                />{" "}
+                Also delete the branch <code>{task.branch}</code>
+              </label>
+            </>
+          )}
           {error && (
             <p className="delete-task-modal__error" role="alert">
               {error}

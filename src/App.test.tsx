@@ -44,6 +44,14 @@ vi.mock("./hooks/useTaskCreated", () => ({
   useTaskCreated: vi.fn(),
 }));
 
+vi.mock("./hooks/useTraySelect", () => ({
+  useTraySelect: vi.fn(),
+}));
+
+vi.mock("./hooks/useFocusRefresh", () => ({
+  useFocusRefresh: vi.fn(),
+}));
+
 vi.mock("./hooks/useTerminalFileDrop", () => ({
   useTerminalFileDrop: vi.fn().mockReturnValue(false),
 }));

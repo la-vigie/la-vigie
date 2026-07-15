@@ -2,9 +2,9 @@ import { render, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Capture the registered task_launched callback so the test can fire it.
-let launchedCb: ((e: { taskId: string; initialPrompt?: string | null }) => void) | undefined;
+let launchedCb: ((e: { taskId: string; initialPrompt?: string | null; skipRepoPrompt?: boolean }) => void) | undefined;
 vi.mock("../api", () => ({
-  onTaskLaunched: (cb: (e: { taskId: string; initialPrompt?: string | null }) => void) => {
+  onTaskLaunched: (cb: (e: { taskId: string; initialPrompt?: string | null; skipRepoPrompt?: boolean }) => void) => {
     launchedCb = cb;
     return Promise.resolve(() => {});
   },
@@ -80,5 +80,16 @@ describe("useTaskLaunch", () => {
       undefined,
       "/worktree-init\n\ndo the thing",
     );
+  });
+
+  it("skips the repo prompt when skipRepoPrompt is set (TASK-181)", async () => {
+    render(<Harness />);
+    await waitFor(() => expect(launchedCb).toBeDefined());
+
+    await launchedCb!({ taskId: "task-b", initialPrompt: "do the thing", skipRepoPrompt: true });
+
+    await waitFor(() => expect(startAgentSession).toHaveBeenCalled());
+    // Repo prompt "/worktree-init" is dropped; only the schedule prompt survives.
+    expect(startAgentSession).toHaveBeenCalledWith("task-b", false, undefined, "do the thing");
   });
 });

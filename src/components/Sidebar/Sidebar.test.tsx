@@ -23,6 +23,7 @@ const repoA: Repo = {
   name: "repo-a-name",
   path: "/tmp/repo-a",
   defaultBranch: "main",
+  inPlaceDefault: false,
 };
 
 const repoB: Repo = {
@@ -30,6 +31,7 @@ const repoB: Repo = {
   name: "repo-b-name",
   path: "/tmp/repo-b",
   defaultBranch: "main",
+  inPlaceDefault: false,
 };
 
 const taskA: Task = {
@@ -42,6 +44,7 @@ const taskA: Task = {
   status: "idle",
   createdAt: 1,
   updatedAt: 1,
+  inPlace: false,
 };
 
 const taskB: Task = {
@@ -54,6 +57,7 @@ const taskB: Task = {
   status: "working",
   createdAt: 1,
   updatedAt: 1,
+  inPlace: false,
 };
 
 describe("Sidebar", () => {
@@ -197,10 +201,10 @@ describe("Sidebar", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create task" }));
 
     await waitFor(() => expect(capturedArgs).toBeDefined());
-    expect(capturedArgs.repoId).toBe("repo-a");
-    expect(capturedArgs.title).toBe("");
-    expect(capturedArgs.ticketKey).toBe("TST-1");
-    expect(capturedArgs.baseBranch).toBeNull();
+    expect(capturedArgs.args.repoId).toBe("repo-a");
+    expect(capturedArgs.args.title).toBe("");
+    expect(capturedArgs.args.ticketKey).toBe("TST-1");
+    expect(capturedArgs.args.baseBranch).toBeNull();
   });
 
   it("shows creating status and selects the task on success", async () => {
@@ -600,5 +604,29 @@ describe("Sidebar", () => {
       expect(setSelectedTask).toHaveBeenCalledWith("hidden-1");
       expect(reopenTask).not.toHaveBeenCalled();
     });
+  });
+
+  it("shows a blocker-count badge on a queued task (TASK-177)", async () => {
+    // A pending task queued behind two blockers.
+    const task = {
+      id: "waiter", repoId: "r1", title: "W", worktreePath: "", branch: "",
+      baseBranch: "main", status: "pending" as const, createdAt: 0, updatedAt: 0,
+      inPlace: false,
+      blockedBy: [
+        { taskId: "b1", title: "One", status: "idle" as const },
+        { taskId: "b2", title: "Two", status: "idle" as const },
+      ],
+    };
+    useVigieStore.setState({
+      repos: [{ id: "r1", name: "R", path: "/r", defaultBranch: "main", inPlaceDefault: false }],
+      tasks: [task],
+      selectedTaskId: null,
+    });
+    render(<Sidebar />);
+    const badge = document.querySelector(".sidebar__task-blockers");
+    expect(badge).toBeTruthy();
+    expect(badge).toHaveTextContent("2");
+    expect(badge?.getAttribute("title")).toContain("One");
+    expect(badge?.getAttribute("title")).toContain("Two");
   });
 });

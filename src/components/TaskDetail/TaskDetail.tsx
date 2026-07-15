@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { finishTask, getPrStatus, openUrl, setTaskAgent, setTaskAutoApprove, setTaskModel, stopSession } from "../../api";
 import type { PrStatus } from "../../api";
 import { taskName } from "../../lib/taskName";
-import { useVigieStore, AGENT_TAB } from "../../store";
+import { useVigieStore, AGENT_TAB, orchestratorSurfaceId } from "../../store";
 import type { TaskStatus, TerminalSession } from "../../store";
 import { useAgents } from "../../hooks/useAgents";
 import { AgentModelPicker } from "../Agent/AgentModelPicker";
@@ -10,6 +10,7 @@ import { ReviewPanel } from "../Review/ReviewPanel";
 import { SetupPanel } from "./SetupPanel";
 import { StatusBanner } from "../StatusBanner/StatusBanner";
 import { TerminalHost } from "../Terminal/TerminalHost";
+import { TerminalPaneMetricsContext, useProvidePaneMetrics } from "../Terminal/TerminalPaneMetrics";
 import { RunStatePill } from "../Terminal/RunStatePill";
 import { useTerminalFileDrop } from "../../hooks/useTerminalFileDrop";
 import { PromptPicker } from "../Prompts/PromptPicker";
@@ -57,6 +58,9 @@ export function TaskDetail() {
   const setActiveTab = useVigieStore((state) => state.setActiveTab);
   const clearTaskSessions = useVigieStore((state) => state.clearTaskSessions);
   const openSettings = useVigieStore((s) => s.openSettings);
+  const selectedOrchestratorRepoId = useVigieStore((state) => state.selectedOrchestratorRepoId);
+  const startOrchestratorSession = useVigieStore((state) => state.startOrchestratorSession);
+  const removeOrchestratorSession = useVigieStore((state) => state.removeOrchestratorSession);
 
   const [showDiff, setShowDiff] = useState(true);
   // When true the Spec/Docs dock fills the whole review/side area and the
@@ -87,6 +91,10 @@ export function TaskDetail() {
   const bodyRef = useRef<HTMLDivElement>(null);
   const terminalPaneRef = useRef<HTMLDivElement>(null);
   const isDropActive = useTerminalFileDrop(terminalPaneRef);
+  // The invariant `.terminal-pane__body` (terminalPaneRef, never display:none)
+  // is the single source of truth for every terminal's pixel size (TASK-227).
+  // One ResizeObserver here feeds all surfaces via context.
+  const paneMetrics = useProvidePaneMetrics(terminalPaneRef);
 
   useEffect(() => {
     localStorage.setItem("vigie.diffPosition", diffPosition);
@@ -127,6 +135,23 @@ export function TaskDetail() {
   // early-return: <TerminalHost/> below must keep rendering unconditionally
   // (KEEP-ALIVE — see class-level doc comment near its render site).
   const isPending = task?.status === "pending";
+
+  // Orchestrator selection is mutually exclusive with a task selection (the
+  // store clears one when the other is set) — derive the selected repo and
+  // its live session (if any) so the header/placeholder below can render
+  // around the always-mounted <TerminalHost/>.
+  const orchestratorRepo = selectedOrchestratorRepoId
+    ? repos.find((r) => r.id === selectedOrchestratorRepoId)
+    : undefined;
+  const orchestratorSession = selectedOrchestratorRepoId
+    ? (sessionsByTask[orchestratorSurfaceId(selectedOrchestratorRepoId)] ?? []).find(
+        (s) => s.kind === "orchestrator",
+      )
+    : undefined;
+  const handleStopOrchestrator = async () => {
+    if (orchestratorSession?.backendId) await stopSession(orchestratorSession.backendId).catch(() => {});
+    if (selectedOrchestratorRepoId) removeOrchestratorSession(selectedOrchestratorRepoId);
+  };
 
   // Derive the agent/model picker selection for the current task.
   const repoForTask = task ? repos.find((r) => r.id === task.repoId) : undefined;
@@ -258,13 +283,17 @@ export function TaskDetail() {
                     <button type="button" className="btn" onClick={() => handleFinish("keep")}>
                       Keep branch
                     </button>
-                    <button
-                      type="button"
-                      className="btn btn--danger"
-                      onClick={() => handleFinish("discard")}
-                    >
-                      Discard branch
-                    </button>
+                    {/* In-place tasks work in the repo's own checkout — teardown never
+                        removes the branch, so "Discard branch" would be a no-op. TASK-163. */}
+                    {!task.inPlace && (
+                      <button
+                        type="button"
+                        className="btn btn--danger"
+                        onClick={() => handleFinish("discard")}
+                      >
+                        Discard branch
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="btn btn--ghost"
@@ -312,6 +341,24 @@ export function TaskDetail() {
               {finishError}
             </p>
           )}
+        </header>
+      ) : orchestratorRepo ? (
+        <header className="task-detail__header task-detail__header--orchestrator">
+          <div className="task-detail__title-row">
+            <div className="task-detail__title-main">
+              <span className="task-detail__ticket" title="Orchestrator chat">◇</span>
+              <h2 className="task-detail__title">orchestrator · {orchestratorRepo.name}</h2>
+            </div>
+            {orchestratorSession && (
+              <button type="button" className="btn btn--danger" onClick={handleStopOrchestrator}>
+                Stop
+              </button>
+            )}
+          </div>
+          <p className="task-detail__orchestrator-hint">
+            Worktree-less chat to orchestrate <strong>{orchestratorRepo.name}</strong> — create/queue
+            tasks and read status without touching an active task agent's context.
+          </p>
         </header>
       ) : (
         <div className="task-detail__empty">
@@ -400,9 +447,27 @@ export function TaskDetail() {
               isPending ? (
                 <div className="task-detail__queued" role="status">
                   <p className="task-detail__queued-title">Queued</p>
-                  <p className="task-detail__queued-hint">
-                    This task will start automatically when its dependency merges.
-                  </p>
+                  {task.blockedBy && task.blockedBy.length > 0 ? (
+                    <>
+                      <p className="task-detail__queued-hint">
+                        Waiting for {task.blockedBy.length === 1 ? "1 task" : `${task.blockedBy.length} tasks`} to land — it starts automatically once they all merge:
+                      </p>
+                      <ul className="task-detail__queued-blockers">
+                        {task.blockedBy.map((b) => (
+                          <li key={b.taskId} className="task-detail__queued-blocker">
+                            <span className="task-detail__queued-blocker-name">{b.title ?? b.taskId}</span>
+                            {b.status && (
+                              <span className="task-detail__queued-blocker-status">{b.status.replace("_", " ")}</span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </>
+                  ) : (
+                    <p className="task-detail__queued-hint">
+                      This task will start automatically when its blocking tasks merge.
+                    </p>
+                  )}
                 </div>
               ) : (
                 <div className="terminal-pane__placeholder">
@@ -466,13 +531,30 @@ export function TaskDetail() {
             {task && activeTab === AGENT_TAB && isAgentActive && agentInfo && (
               <RunStatePill status={agentInfo.status} activity={agentInfo.activity} lifecycle={agentInfo.lifecycle} onStop={handleStop} />
             )}
+            {orchestratorRepo && !orchestratorSession && (
+              <div className="terminal-pane__placeholder">
+                <p>Orchestrator not running.</p>
+                <div className="terminal-pane__placeholder-actions">
+                  <button
+                    type="button"
+                    className="btn btn--primary"
+                    onClick={() => startOrchestratorSession(orchestratorRepo.id)}
+                  >
+                    Open orchestrator
+                  </button>
+                </div>
+              </div>
+            )}
             {/* KEEP-ALIVE: <TerminalHost/> must never unmount/remount while an
                 agent runs — the live PTY lives inside it, so remounting kills it.
                 Keep this at a stable DOM position; swap content around it (tabs,
                 pill, placeholder above; diff/spec panes as siblings), never wrap
                 or conditionally render it. Any layout change here needs a
-                DOM-identity (keep-alive) test. */}
-            <TerminalHost />
+                DOM-identity (keep-alive) test. The context Provider is a stable,
+                unconditional wrapper (no DOM node) — it never remounts the host. */}
+            <TerminalPaneMetricsContext.Provider value={paneMetrics}>
+              <TerminalHost />
+            </TerminalPaneMetricsContext.Provider>
           </div>
           {task && <StatusBanner task={task} />}
         </section>

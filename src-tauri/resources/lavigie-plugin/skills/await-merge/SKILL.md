@@ -1,9 +1,11 @@
 ---
-description: Arm auto-merge on a PR, then poll in the background until it merges or a gate fails — waking me only on a terminal event
-allowed-tools: Bash
+name: await-merge
+description: >-
+  Arm auto-merge on a PR, then poll in the background until it merges or a gate
+  fails — waking me only on a terminal event
+allowed-tools: 'Bash, Skill'
 argument-hint: '[PR number or URL]'
 ---
-
 # Await merge: arm auto-merge, then watch until done
 
 Arm native GitHub auto-merge on a PR and start a **background** poller that only
@@ -45,8 +47,10 @@ status the poller waits on) and `/check-pr` (a one-shot readiness check).
 
 3. **When the poller exits, I'm re-invoked.** Read its final `poll-result: {…}`
    line (and exit code) and act on the `outcome`:
-   - **`merged`** (exit 0) — report it merged. Suggest `/lavigie:finished` to
-     tear the worktree down.
+   - **`merged`** (exit 0) — report it merged. Then invoke the `task-provider` skill's
+     **set-status(done)** op to close the task in this repo's tracker (best-effort: if
+     `task-provider` returns **none**, i.e. the repo commits no adapter, silently skip — the
+     merge already succeeded). Finally, suggest `/lavigie:finished` to tear the worktree down.
    - **`failed`** (exit 1) — a required gate failed. Surface the failed check
      name(s) from the result line, pull the failing logs (`gh pr checks <PR>`,
      `gh run view --log-failed`), and offer to investigate/fix. Do NOT silently

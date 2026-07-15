@@ -18,6 +18,7 @@ const repo: Repo = {
   path: "/tmp/repo-a",
   defaultBranch: "main",
   remoteUrl: "git@github.com:me/home-mgmt.git",
+  inPlaceDefault: false,
 };
 
 const agentFixtures = [
@@ -35,6 +36,13 @@ describe("RepoSettingsModal", () => {
       if (cmd === "list_agents") return Promise.resolve(agentFixtures);
       if (cmd === "list_agent_models") return Promise.resolve([]);
       if (cmd === "set_repo_default_model") return Promise.resolve();
+      if (cmd === "list_schedules") return Promise.resolve([]);
+      if (cmd === "preview_next_run") return Promise.resolve(1_800_000_000);
+      // TASK-189: Save/Remove trigger the real store.refresh(), whose tail loads prompts and
+      // custom sounds. Resolve them to correctly-typed empties so refresh() spawns no
+      // wrong-typed/dangling async that could leak across test files.
+      if (cmd === "list_prompts") return Promise.resolve([]);
+      if (cmd === "list_custom_sounds") return Promise.resolve([]);
       return Promise.resolve({ repos: [], tasks: [] });
     });
     openMock.mockReset();
@@ -51,6 +59,7 @@ describe("RepoSettingsModal", () => {
     status: "idle",
     createdAt: 0,
     updatedAt: 0,
+    inPlace: false,
   });
 
   describe("danger zone (TASK-69)", () => {
@@ -125,6 +134,7 @@ describe("RepoSettingsModal", () => {
         fetchRemoteBase: null,
         defaultAgent: "claude",
         autoApprove: null,
+        inPlaceDefault: false,
       }),
     );
     await waitFor(() => {
@@ -200,6 +210,7 @@ describe("RepoSettingsModal", () => {
         fetchRemoteBase: null,
         defaultAgent: "claude",
         autoApprove: null,
+        inPlaceDefault: false,
       }),
     );
   });
@@ -260,6 +271,7 @@ describe("RepoSettingsModal", () => {
         fetchRemoteBase: null,
         defaultAgent: "claude",
         autoApprove: null,
+        inPlaceDefault: false,
       }),
     );
   });
@@ -267,13 +279,17 @@ describe("RepoSettingsModal", () => {
   describe("default agent + model (TASK-21 / TASK-93)", () => {
     it("falls back to 'claude' when repo has no defaultAgent", async () => {
       render(<RepoSettingsModal repo={repo} onClose={() => {}} />);
-      expect(await screen.findByTestId("amp-trigger")).toHaveTextContent("Claude Code");
+      // The trigger mounts before its agent label loads; wait for the label to
+      // populate rather than asserting on first render (flaky under CI load).
+      const trigger = await screen.findByTestId("amp-trigger");
+      await waitFor(() => expect(trigger).toHaveTextContent("Claude Code"));
     });
 
     it("seeds the picker from repo.defaultAgent", async () => {
       const withAgent: Repo = { ...repo, defaultAgent: "antigravity" };
       render(<RepoSettingsModal repo={withAgent} onClose={() => {}} />);
-      expect(await screen.findByTestId("amp-trigger")).toHaveTextContent("Antigravity");
+      const trigger = await screen.findByTestId("amp-trigger");
+      await waitFor(() => expect(trigger).toHaveTextContent("Antigravity"));
     });
 
     it("saves the chosen agent via update_repo + setRepoDefaultModel on save", async () => {
@@ -299,6 +315,21 @@ describe("RepoSettingsModal", () => {
       );
       await waitFor(() => expect(onClose).toHaveBeenCalled());
     });
+  });
+
+  it("defaults to the General tab and can switch to Schedules", async () => {
+    render(<RepoSettingsModal repo={repo} onClose={() => {}} />);
+
+    // General content is visible by default.
+    expect(screen.getByLabelText("Setup command")).toBeInTheDocument();
+
+    // Switch to the Schedules tab.
+    fireEvent.click(screen.getByRole("tab", { name: "Schedules" }));
+
+    // The real SchedulesTab manager is mounted (findBy also flushes its async mount).
+    expect(await screen.findByRole("button", { name: "Add schedule" })).toBeInTheDocument();
+    // General-only content (and its Save footer) is no longer shown.
+    expect(screen.queryByLabelText("Setup command")).not.toBeInTheDocument();
   });
 
   it("Clear resets the worktree root and saves null", async () => {
@@ -329,6 +360,7 @@ describe("RepoSettingsModal", () => {
         fetchRemoteBase: null,
         defaultAgent: "claude",
         autoApprove: null,
+        inPlaceDefault: false,
       }),
     );
     await waitFor(() => expect(onClose).toHaveBeenCalled());

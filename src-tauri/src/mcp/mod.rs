@@ -1,12 +1,17 @@
-//! In-process MCP server (TASK-89): exposes `start_task`, `finish_task`, and
-//! `list_repos` to spawned Claude agents over a loopback HTTP JSON-RPC endpoint,
-//! so an agent can self-dispatch (and self-/cross-tear-down) a La Vigie task.
+//! In-process MCP server (TASK-89): exposes `start_task`, `finish_task`,
+//! `list_repos`, the control-plane read tools, and the schedule-management
+//! tools (`create_schedule` / `list_schedules` / `update_schedule` /
+//! `set_schedule_enabled` / `delete_schedule`, TASK-178) to spawned Claude
+//! agents over a loopback HTTP JSON-RPC endpoint, so an agent can
+//! self-dispatch, self-tear-down, and manage recurring schedules.
 //!
 //! Two layers, mirroring `hooks/`:
 //!   * pure (`route`, `*_response`, schemas): JSON-RPC parsing/dispatch +
 //!     result formatting — unit-tested here, no I/O.
 //!   * async glue (the axum handler + `start_mcp_server`): auth, the launch
 //!     side effects, and event emission — verified via the app, not unit-tested.
+
+pub(crate) mod authz;
 
 use std::path::Path;
 
@@ -19,13 +24,11 @@ use axum::routing::post;
 use axum::{Json, Router};
 use tauri::Manager as _;
 
+use crate::mcp::authz::{AuthorizedContext, AuthzError, Capability, ResolutionStrategy};
 use crate::state::AppState;
 
 /// MCP protocol version this server speaks. Echoed in `initialize`.
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
-
-/// Error returned when a non-concierge token calls a concierge-only read tool.
-const CONCIERGE_REQUIRED: &str = "This tool requires a concierge-scope token.";
 
 /// Resolved scope of an MCP call (from the bearer token's tier).
 #[derive(Debug, Clone)]
@@ -35,6 +38,10 @@ pub enum CallContext {
     /// for `start_task`.
     Agent {
         task_id: String,
+        repo_id: String,
+    },
+    /// Per-repo orchestrator: broad act+read confined to `repo_id` (TASK-180).
+    Orchestrator {
         repo_id: String,
     },
     /// Broad-scope concierge token: cross-repo reads (TASK-111).
@@ -55,6 +62,11 @@ fn context_from_token(tok: &crate::state::McpToken) -> CallContext {
             task_id: c.task_id.clone(),
             repo_id: c.repo_id.clone(),
         },
+        crate::state::McpToken::Orchestrator { repo_id } => {
+            CallContext::Orchestrator {
+                repo_id: repo_id.clone(),
+            }
+        }
         crate::state::McpToken::Concierge => CallContext::Concierge,
     }
 }
@@ -70,10 +82,14 @@ pub struct StartTaskArgs {
     /// Optional initial prompt for the new agent. Combined with the repo's
     /// configured prompt (repo prefix + this), mirroring the New-Task form.
     pub prompt: Option<String>,
-    /// Optional La Vigie task id to queue this task behind (start-on-merge,
-    /// TASK-90). When set, the created task is `Pending` until that task is
-    /// merged through La Vigie.
-    pub after_merge_of: Option<String>,
+    /// Optional model override for the launched agent (TASK-223). Flows to the
+    /// created task's `model`; the spawn then passes `--model <id>` for engines
+    /// with a `model_arg` (TASK-209). Omitted ⇒ the engine's own default.
+    pub model: Option<String>,
+    /// La Vigie task ids to queue this task behind (start-on-merge, TASK-90/177).
+    /// Accepts a single id or an array; the created task stays `Pending` until
+    /// all of them are merged through La Vigie.
+    pub after_merge_of: Vec<String>,
 }
 
 /// Parsed `finish_task` tool arguments. `task_id` defaults to the caller's own
@@ -83,6 +99,58 @@ pub struct FinishTaskArgs {
     pub task_id: Option<String>,
     pub mode: Option<String>,
     pub force: bool,
+}
+
+/// Parsed `create_schedule` arguments (validated downstream by
+/// `schedule::validate_schedule_fields`; `repo` scoped by the `authorize_call`
+/// choke-point (TASK-180)).
+#[derive(Debug, Default, PartialEq)]
+pub struct CreateScheduleArgs {
+    pub repo: Option<String>,
+    pub name: Option<String>,
+    pub prompt: Option<String>,
+    pub cron: Option<String>,
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub base_branch: Option<String>,
+}
+
+/// Parsed `update_schedule` arguments. `schedule_id` and `enabled` are required
+/// (a full-field replace); the rest are validated downstream.
+#[derive(Debug, Default, PartialEq)]
+pub struct UpdateScheduleArgs {
+    pub schedule_id: String,
+    pub name: Option<String>,
+    pub prompt: Option<String>,
+    pub cron: Option<String>,
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub base_branch: Option<String>,
+    pub enabled: bool,
+}
+
+/// Parsed `schedule_task` tool arguments. Identity of the deferred launch is a
+/// title + prompt in the caller's repo (override via `repo`); the fire time is
+/// a relative delay (`in_seconds`, derived from `inSeconds`/`inHours`) and/or an
+/// absolute unix time (`at_unix`). TASK-179.
+#[derive(Debug, Default, PartialEq)]
+pub struct ScheduleTaskArgs {
+    pub title: Option<String>,
+    pub prompt: Option<String>,
+    pub repo: Option<String>,
+    pub agent: Option<String>,
+    /// Optional model override for the deferred launch (TASK-223); mirrors
+    /// `create_schedule`'s `model`. Omitted ⇒ the engine's own default.
+    pub model: Option<String>,
+    pub in_seconds: Option<i64>,
+    pub at_unix: Option<i64>,
+}
+
+/// The one-shot schedule created by `schedule_task`, summarized for the result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScheduledOnce {
+    pub id: String,
+    pub fire_at: i64,
 }
 
 /// One repo as returned by `list_repos`.
@@ -123,18 +191,24 @@ fn task_summary(t: &crate::store::Task) -> TaskSummary {
     }
 }
 
+/// One blocker a queued task waits on: its task id and (if resolvable) title.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlockingRef {
+    pub task_id: String,
+    pub title: Option<String>,
+}
+
 /// The task created by `start_task`, summarized for the tool result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreatedTask {
     pub id: String,
     pub branch: String,
     pub worktree_path: String,
-    /// TASK-90: true when the task was QUEUED (Pending) behind another task's
-    /// landing rather than started now. Then branch/worktree_path are empty and
-    /// the blocking_* fields describe the dependency it waits on.
+    /// TASK-90/177: true when the task was QUEUED (Pending) behind other tasks'
+    /// landings rather than started now. Then branch/worktree_path are empty and
+    /// `blocking` lists every task it waits on.
     pub queued: bool,
-    pub blocking_task_id: Option<String>,
-    pub blocking_title: Option<String>,
+    pub blocking: Vec<BlockingRef>,
 }
 
 /// The outcome of routing a JSON-RPC request: an immediate response, nothing
@@ -146,11 +220,22 @@ pub enum Routed {
     /// A complete response ready to return (initialize / tools/list / errors).
     Respond(Value),
     StartTask { id: Value, args: StartTaskArgs },
+    /// `queue_dependency` (TASK-164): start_task with a *required* non-empty
+    /// dependency list. Dispatched via the same `do_start_task` path, so the
+    /// created task is always `Pending`.
+    QueueDependency { id: Value, args: StartTaskArgs },
     FinishTask { id: Value, args: FinishTaskArgs },
+    ScheduleTask { id: Value, args: ScheduleTaskArgs },
     ListRepos { id: Value },
     ListTasks { id: Value },
     TaskStatus { id: Value, task_id: String },
     GetTaskActivity { id: Value, task_id: String, since: usize },
+    CreateSchedule { id: Value, args: CreateScheduleArgs },
+    ListSchedules { id: Value, repo: Option<String> },
+    UpdateSchedule { id: Value, args: UpdateScheduleArgs },
+    SetScheduleEnabled { id: Value, schedule_id: String, enabled: bool },
+    DeleteSchedule { id: Value, schedule_id: String },
+    SendTaskMessage { id: Value, task_id: String, message: String },
 }
 
 fn success(id: Value, result: Value) -> Value {
@@ -181,32 +266,72 @@ fn tools_list_result() -> Value {
             {
                 "name": "start_task",
                 "description": "Create and start a La Vigie task (git worktree + branch + agent). \
-Defaults to the calling agent's repo; pass `repo` to target a different one. \
+Defaults to the calling agent's repo; a `repo` arg must match the calling token's repo (cross-repo is denied). \
 Provide a `title` and/or a `ticketKey` (the task's branch derives from the ticket key).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "title": { "type": "string", "description": "Human title for the task." },
                         "ticketKey": { "type": "string", "description": "Provider ticket id (e.g. TASK-99); links the task and seeds its branch name." },
-                        "repo": { "type": "string", "description": "Target repo id. Defaults to the calling agent's repo. Use list_repos to discover ids." },
+                        "repo": { "type": "string", "description": "Target repo id. Defaults to the calling agent's repo. Must match the calling token's repo (cross-repo is denied). Use list_repos to discover ids." },
                         "agent": { "type": "string", "description": "Optional agent name to launch (defaults to the repo/global default)." },
                         "prompt": { "type": "string", "description": "Optional initial prompt for the new agent. Combined with the repo's configured prompt." },
-                        "afterMergeOf": { "type": "string", "description": "Queue this task to auto-start when the given La Vigie task id is merged through La Vigie (start-on-merge)." }
+                        "model": { "type": "string", "description": "Optional model override for the launched agent (e.g. opus, sonnet). Omitted ⇒ the engine's default." },
+                        "afterMergeOf": { "type": ["string", "array"], "items": { "type": "string" }, "description": "Queue this task to auto-start only after ALL of the given La Vigie task ids are merged through La Vigie (start-on-merge). Accepts a single id or an array of ids." }
                     }
+                }
+            },
+            {
+                "name": "queue_dependency",
+                "description": "Create a NEW La Vigie task QUEUED behind one or more existing tasks — a clearer, dependency-first alternative to start_task's afterMergeOf. \
+The new task stays Pending (no worktree/agent yet) and auto-starts only once ALL of the tasks in `dependsOn` are merged through La Vigie. \
+`dependsOn` is required (one La Vigie task id or an array). Otherwise identical to start_task: defaults to the calling agent's repo (a `repo` arg must match; cross-repo denied), and takes an optional `title`/`ticketKey`/`prompt`/`agent`.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "dependsOn": { "type": ["string", "array"], "items": { "type": "string" }, "description": "Required. La Vigie task id(s) this task waits on; it auto-starts only after ALL of them are MERGED through La Vigie. Accepts a single id or an array of ids." },
+                        "title": { "type": "string", "description": "Human title for the task." },
+                        "ticketKey": { "type": "string", "description": "Provider ticket id (e.g. TASK-99); links the task and seeds its branch name." },
+                        "repo": { "type": "string", "description": "Target repo id. Defaults to the calling agent's repo. Must match the calling token's repo (cross-repo is denied). Use list_repos to discover ids." },
+                        "agent": { "type": "string", "description": "Optional agent name to launch once released (defaults to the repo/global default)." },
+                        "prompt": { "type": "string", "description": "Optional initial prompt for the new agent. Combined with the repo's configured prompt." },
+                        "model": { "type": "string", "description": "Optional model override for the launched agent (e.g. opus, sonnet). Omitted ⇒ the engine's default." }
+                    },
+                    "required": ["dependsOn"]
                 }
             },
             {
                 "name": "finish_task",
                 "description": "Finish (tear down) a La Vigie task: stop its agent, remove the git worktree, and delete the task. \
-Defaults to the calling agent's own task; pass `taskId` to target another (requires a concierge-scope token). \
+Defaults to the calling agent's own task; pass `taskId` to target another, which requires an orchestrator-scope token for that task's repo (cross-repo is denied). \
 `mode` is keep (default: leave the branch), discard (delete the branch), or merge (squash-merge the PR, then delete the branch). \
 Refuses a task with uncommitted or unmerged work unless `force` is true.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "taskId": { "type": "string", "description": "Task id to finish. Defaults to the calling agent's own task. Finishing another task requires a concierge-scope token." },
+                        "taskId": { "type": "string", "description": "Task id to finish. Defaults to the calling agent's own task. Finishing another task requires an orchestrator-scope token for that task's repo." },
                         "mode": { "type": "string", "enum": ["keep", "discard", "merge"], "description": "keep (leave branch, default), discard (delete branch), or merge (squash-merge the PR then delete branch)." },
                         "force": { "type": "boolean", "description": "Tear down even with uncommitted or unmerged work. Defaults to false." }
+                    }
+                }
+            },
+            {
+                "name": "schedule_task",
+                "description": "Schedule a La Vigie task to launch ONCE at a future time, then retire (a one-shot deferred launch). \
+Defaults to the calling agent's repo; a `repo` arg must match the calling token's repo (cross-repo is denied). Give a `title` and/or `prompt`. \
+Set `inHours` (e.g. 3 = in three hours) or `inSeconds` for a relative delay, or `atUnix` for an absolute unix time. \
+Useful to defer a launch until Claude quota resets. Does NOT create a worktree now — La Vigie launches it when due.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string", "description": "Human title for the deferred task." },
+                        "prompt": { "type": "string", "description": "Initial prompt for the launched agent. Combined with the repo's configured prompt." },
+                        "repo": { "type": "string", "description": "Target repo id. Defaults to the calling agent's repo. Use list_repos to discover ids." },
+                        "agent": { "type": "string", "description": "Optional agent name to launch (defaults to the repo/global default)." },
+                        "model": { "type": "string", "description": "Optional model override for the launched agent (e.g. opus, sonnet). Omitted ⇒ the engine's default." },
+                        "inHours": { "type": "number", "description": "Relative delay in hours (fractional allowed). Resolved to an absolute fire time at creation." },
+                        "inSeconds": { "type": "integer", "description": "Relative delay in seconds. Takes precedence over inHours if both are given." },
+                        "atUnix": { "type": "integer", "description": "Absolute fire time as a unix timestamp (seconds). Wins over inHours/inSeconds." }
                     }
                 }
             },
@@ -217,12 +342,12 @@ Refuses a task with uncommitted or unmerged work unless `force` is true.",
             },
             {
                 "name": "list_tasks",
-                "description": "List La Vigie tasks across all repos with their current status. Requires a concierge-scope token.",
+                "description": "List La Vigie tasks with their current status. Available to the concierge (across all repos) and to a repo-scoped orchestrator (its own repo only).",
                 "inputSchema": { "type": "object", "properties": {} }
             },
             {
                 "name": "task_status",
-                "description": "Get one task's current status and metadata by id. Requires a concierge-scope token.",
+                "description": "Get one task's current status and metadata by id. Available to the concierge (all repos) and to a repo-scoped orchestrator (its own repo).",
                 "inputSchema": {
                     "type": "object",
                     "properties": { "taskId": { "type": "string", "description": "The task id." } },
@@ -231,7 +356,7 @@ Refuses a task with uncommitted or unmerged work unless `force` is true.",
             },
             {
                 "name": "get_task_activity",
-                "description": "Read a task's recent agent conversation/activity (chat-shaped messages). Poll incrementally by passing the returned `cursor` as `since`. Requires a concierge-scope token.",
+                "description": "Read a task's recent agent conversation/activity (chat-shaped messages). Poll incrementally by passing the returned `cursor` as `since`. Available to the concierge (all repos) and to a repo-scoped orchestrator (its own repo).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -239,6 +364,91 @@ Refuses a task with uncommitted or unmerged work unless `force` is true.",
                         "since": { "type": "integer", "description": "Byte offset cursor from a prior call; omit or 0 to read from the start." }
                     },
                     "required": ["taskId"]
+                }
+            },
+            {
+                "name": "send_task_message",
+                "description": "Send a message to another task's running agent — 'stir' it to keep it moving (unblock, redirect, or nudge a waiting agent). The message is delivered to the agent's input and submitted, as if typed. Repo-scoped: you may only message a task in your own repo. Requires a live agent — if the task has no running agent this errors (start or resume it first). Read the agent's reply afterward via get_task_activity.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "taskId": { "type": "string", "description": "The target task id (must be in your repo)." },
+                        "message": { "type": "string", "description": "The message to deliver to the task's agent. Submitted as if typed." }
+                    },
+                    "required": ["taskId", "message"]
+                }
+            },
+            {
+                "name": "create_schedule",
+                "description": "Create a recurring schedule that launches a task on a cron. \
+Defaults to the calling agent's repo; a `repoId` arg must match the calling token's repo (cross-repo is denied). \
+`prompt` is the initial prompt the launched agent receives (typically a repo skill like `/security-scan`). \
+`cron` is standard 5/6-field cron in the app's local time. Returns the created schedule (incl. `nextRunAt`).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repoId": { "type": "string", "description": "Target repo id. Defaults to the calling agent's repo. Must match the calling token's repo (cross-repo is denied)." },
+                        "name": { "type": "string", "description": "Human name for the schedule." },
+                        "prompt": { "type": "string", "description": "Initial prompt for the launched agent (e.g. /security-scan)." },
+                        "cron": { "type": "string", "description": "Standard 5/6-field cron expression, local time (e.g. `0 2 * * 1`)." },
+                        "agent": { "type": "string", "description": "Optional agent name (defaults to the repo/global default)." },
+                        "model": { "type": "string", "description": "Optional model override." },
+                        "baseBranch": { "type": "string", "description": "Optional base branch for the launched task's worktree." }
+                    },
+                    "required": ["name", "prompt", "cron"]
+                }
+            },
+            {
+                "name": "list_schedules",
+                "description": "List the recurring schedules for a repo. Defaults to the calling agent's repo; a `repoId` arg must match the calling token's repo (cross-repo is denied).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repoId": { "type": "string", "description": "Repo id. Defaults to the calling agent's repo. Must match the calling token's repo (cross-repo is denied)." }
+                    }
+                }
+            },
+            {
+                "name": "update_schedule",
+                "description": "Update all fields of an existing schedule (full replace). Requires `scheduleId` and `enabled`. \
+Confined to the calling token's repo (cross-repo denied); the schedule's repo must match. Returns the updated schedule.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "scheduleId": { "type": "string", "description": "The schedule id to update." },
+                        "name": { "type": "string", "description": "Human name for the schedule." },
+                        "prompt": { "type": "string", "description": "Initial prompt for the launched agent." },
+                        "cron": { "type": "string", "description": "Standard 5/6-field cron expression, local time." },
+                        "agent": { "type": "string", "description": "Optional agent name." },
+                        "model": { "type": "string", "description": "Optional model override." },
+                        "baseBranch": { "type": "string", "description": "Optional base branch." },
+                        "enabled": { "type": "boolean", "description": "Whether the schedule is active (disabled ⇒ never fires)." }
+                    },
+                    "required": ["scheduleId", "name", "prompt", "cron", "enabled"]
+                }
+            },
+            {
+                "name": "set_schedule_enabled",
+                "description": "Enable or disable a schedule without editing its other fields. Requires `scheduleId` and `enabled`. \
+Confined to the calling token's repo (cross-repo denied); the schedule's repo must match. Returns the updated schedule.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "scheduleId": { "type": "string", "description": "The schedule id." },
+                        "enabled": { "type": "boolean", "description": "Whether the schedule is active." }
+                    },
+                    "required": ["scheduleId", "enabled"]
+                }
+            },
+            {
+                "name": "delete_schedule",
+                "description": "Delete a schedule by id. Confined to the calling token's repo (cross-repo denied); the schedule's repo must match.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "scheduleId": { "type": "string", "description": "The schedule id to delete." }
+                    },
+                    "required": ["scheduleId"]
                 }
             }
         ]
@@ -249,11 +459,33 @@ fn opt_str(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(|x| x.as_str()).map(|s| s.to_string())
 }
 
+/// Parse a string-or-array-of-strings argument into a `Vec<String>`. A bare
+/// string yields a one-element vec (back-compat); an array yields its string
+/// elements; anything else (absent, wrong type) yields empty.
+fn str_or_vec(v: &Value, key: &str) -> Vec<String> {
+    match v.get(key) {
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Extract a required non-empty `taskId` string argument.
 fn require_task_id(arguments: &Value) -> Result<String, String> {
     match opt_str(arguments, "taskId") {
         Some(s) if !s.trim().is_empty() => Ok(s),
         _ => Err("missing required argument: taskId".to_string()),
+    }
+}
+
+/// Extract a required non-empty `message` string argument.
+fn require_message(arguments: &Value) -> Result<String, String> {
+    match opt_str(arguments, "message") {
+        Some(s) if !s.trim().is_empty() => Ok(s),
+        _ => Err("missing required argument: message".to_string()),
     }
 }
 
@@ -264,8 +496,33 @@ fn parse_start_task_args(arguments: &Value) -> StartTaskArgs {
         repo: opt_str(arguments, "repo"),
         agent: opt_str(arguments, "agent"),
         prompt: opt_str(arguments, "prompt"),
-        after_merge_of: opt_str(arguments, "afterMergeOf"),
+        model: opt_str(arguments, "model"),
+        after_merge_of: str_or_vec(arguments, "afterMergeOf"),
     }
+}
+
+/// Parse `queue_dependency` arguments (TASK-164). Identical to `start_task`'s
+/// fields except the dependency list is read from the clearer `dependsOn` key and
+/// is REQUIRED: an empty/missing list is a usage error, so the caller can't
+/// silently launch-now by forgetting it. Returns `StartTaskArgs` (with the deps
+/// in `after_merge_of`) so it reuses the exact `do_start_task` path.
+fn parse_queue_dependency_args(arguments: &Value) -> Result<StartTaskArgs, String> {
+    let after_merge_of = str_or_vec(arguments, "dependsOn");
+    if after_merge_of.is_empty() {
+        return Err(
+            "missing required argument: dependsOn (one or more La Vigie task ids to queue behind)"
+                .to_string(),
+        );
+    }
+    Ok(StartTaskArgs {
+        title: opt_str(arguments, "title"),
+        ticket_key: opt_str(arguments, "ticketKey"),
+        repo: opt_str(arguments, "repo"),
+        agent: opt_str(arguments, "agent"),
+        prompt: opt_str(arguments, "prompt"),
+        model: opt_str(arguments, "model"),
+        after_merge_of,
+    })
 }
 
 fn parse_finish_task_args(arguments: &Value) -> FinishTaskArgs {
@@ -276,10 +533,76 @@ fn parse_finish_task_args(arguments: &Value) -> FinishTaskArgs {
     }
 }
 
+/// Extract a required non-empty `scheduleId` string argument.
+fn require_schedule_id(arguments: &Value) -> Result<String, String> {
+    match opt_str(arguments, "scheduleId") {
+        Some(s) if !s.trim().is_empty() => Ok(s),
+        _ => Err("missing required argument: scheduleId".to_string()),
+    }
+}
+
+/// Extract a required boolean argument.
+fn require_bool(arguments: &Value, key: &str) -> Result<bool, String> {
+    arguments
+        .get(key)
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| format!("missing required argument: {key}"))
+}
+
+fn parse_create_schedule_args(arguments: &Value) -> CreateScheduleArgs {
+    CreateScheduleArgs {
+        repo: opt_str(arguments, "repoId"),
+        name: opt_str(arguments, "name"),
+        prompt: opt_str(arguments, "prompt"),
+        cron: opt_str(arguments, "cron"),
+        agent: opt_str(arguments, "agent"),
+        model: opt_str(arguments, "model"),
+        base_branch: opt_str(arguments, "baseBranch"),
+    }
+}
+
+fn parse_update_schedule_args(arguments: &Value) -> Result<UpdateScheduleArgs, String> {
+    let schedule_id = require_schedule_id(arguments)?;
+    let enabled = require_bool(arguments, "enabled")?;
+    Ok(UpdateScheduleArgs {
+        schedule_id,
+        name: opt_str(arguments, "name"),
+        prompt: opt_str(arguments, "prompt"),
+        cron: opt_str(arguments, "cron"),
+        agent: opt_str(arguments, "agent"),
+        model: opt_str(arguments, "model"),
+        base_branch: opt_str(arguments, "baseBranch"),
+        enabled,
+    })
+}
+
+fn parse_schedule_task_args(arguments: &Value) -> ScheduleTaskArgs {
+    // inSeconds wins over inHours; both fold into a single in_seconds offset.
+    let in_seconds = arguments
+        .get("inSeconds")
+        .and_then(|v| v.as_i64())
+        .or_else(|| {
+            arguments
+                .get("inHours")
+                .and_then(|v| v.as_f64())
+                .map(|h| (h * 3600.0).round() as i64)
+        });
+    ScheduleTaskArgs {
+        title: opt_str(arguments, "title"),
+        prompt: opt_str(arguments, "prompt"),
+        repo: opt_str(arguments, "repo"),
+        agent: opt_str(arguments, "agent"),
+        model: opt_str(arguments, "model"),
+        in_seconds,
+        at_unix: arguments.get("atUnix").and_then(|v| v.as_i64()),
+    }
+}
+
 /// Error returned when a normal Agent-tier token tries to finish a task other
-/// than its own — a cross-task teardown needs the concierge tier (TASK-111).
+/// than its own — a cross-task teardown needs an orchestrator-scope token for
+/// that task's repo (TASK-180; the legacy concierge is read-only).
 const FINISH_SCOPE_REQUIRED: &str =
-    "Finishing another agent's task requires a concierge-scope token.";
+    "Finishing another agent's task requires an orchestrator-scope token for that task's repo.";
 
 /// Pure scope decision for `finish_task`: resolve the effective target task id
 /// from the caller's context and the optional `taskId` arg, enforcing the tier
@@ -293,6 +616,14 @@ fn resolve_finish_target(ctx: &CallContext, task_id_arg: Option<&str>) -> Result
             None => Ok(own.clone()),
             Some(t) if t == own => Ok(own.clone()),
             Some(_) => Err(FINISH_SCOPE_REQUIRED.to_string()),
+        },
+        // Orchestrator has no own task, so it must name one explicitly; repo
+        // scoping is enforced by the choke-point (TASK-180 A3/B2).
+        CallContext::Orchestrator { .. } => match arg {
+            Some(t) => Ok(t.to_string()),
+            None => {
+                Err("finish_task from an orchestrator token requires an explicit taskId.".to_string())
+            }
         },
         CallContext::Concierge => match arg {
             Some(t) => Ok(t.to_string()),
@@ -339,7 +670,12 @@ pub fn route(req: &Value) -> Routed {
             let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
             match name {
                 "start_task" => Routed::StartTask { id, args: parse_start_task_args(&arguments) },
+                "queue_dependency" => match parse_queue_dependency_args(&arguments) {
+                    Ok(args) => Routed::QueueDependency { id, args },
+                    Err(e) => Routed::Respond(rpc_error(id, -32602, &e)),
+                },
                 "finish_task" => Routed::FinishTask { id, args: parse_finish_task_args(&arguments) },
+                "schedule_task" => Routed::ScheduleTask { id, args: parse_schedule_task_args(&arguments) },
                 "list_repos" => Routed::ListRepos { id },
                 "list_tasks" => Routed::ListTasks { id },
                 "task_status" => match require_task_id(&arguments) {
@@ -351,6 +687,30 @@ pub fn route(req: &Value) -> Routed {
                         let since = arguments.get("since").and_then(|s| s.as_u64()).unwrap_or(0) as usize;
                         Routed::GetTaskActivity { id, task_id, since }
                     }
+                    Err(e) => Routed::Respond(rpc_error(id, -32602, &e)),
+                },
+                "create_schedule" => Routed::CreateSchedule { id, args: parse_create_schedule_args(&arguments) },
+                "list_schedules" => Routed::ListSchedules { id, repo: opt_str(&arguments, "repoId") },
+                "update_schedule" => match parse_update_schedule_args(&arguments) {
+                    Ok(args) => Routed::UpdateSchedule { id, args },
+                    Err(e) => Routed::Respond(rpc_error(id, -32602, &e)),
+                },
+                "set_schedule_enabled" => match require_schedule_id(&arguments) {
+                    Ok(schedule_id) => match require_bool(&arguments, "enabled") {
+                        Ok(enabled) => Routed::SetScheduleEnabled { id, schedule_id, enabled },
+                        Err(e) => Routed::Respond(rpc_error(id, -32602, &e)),
+                    },
+                    Err(e) => Routed::Respond(rpc_error(id, -32602, &e)),
+                },
+                "delete_schedule" => match require_schedule_id(&arguments) {
+                    Ok(schedule_id) => Routed::DeleteSchedule { id, schedule_id },
+                    Err(e) => Routed::Respond(rpc_error(id, -32602, &e)),
+                },
+                "send_task_message" => match require_task_id(&arguments) {
+                    Ok(task_id) => match require_message(&arguments) {
+                        Ok(message) => Routed::SendTaskMessage { id, task_id, message },
+                        Err(e) => Routed::Respond(rpc_error(id, -32602, &e)),
+                    },
                     Err(e) => Routed::Respond(rpc_error(id, -32602, &e)),
                 },
                 other => Routed::Respond(rpc_error(id, -32602, &format!("unknown tool: {other}"))),
@@ -365,18 +725,24 @@ pub fn route(req: &Value) -> Routed {
 pub fn start_task_response(id: Value, result: Result<CreatedTask, String>) -> Value {
     match result {
         Ok(task) if task.queued => {
-            let dep = task.blocking_task_id.as_deref().unwrap_or("(unknown)");
-            let title = task
-                .blocking_title
-                .as_deref()
-                .map(|t| format!(" ({t})"))
-                .unwrap_or_default();
+            let names = if task.blocking.is_empty() {
+                "(unknown)".to_string()
+            } else {
+                task.blocking
+                    .iter()
+                    .map(|b| match &b.title {
+                        Some(t) => format!("{} ({t})", b.task_id),
+                        None => b.task_id.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
             success(
                 id,
                 tool_text(
                     format!(
-                        "Queued task {} (Pending) — will auto-start when task {dep}{title} lands. \
-No worktree/branch yet; it unblocks automatically when that task's PR merges (detected at \
+                        "Queued task {} (Pending) — will auto-start once all of these land: {names}. \
+No worktree/branch yet; it unblocks automatically when each blocker's PR merges (detected at \
 finish/teardown), or immediately via /finished with promote=true for a no-PR landing.",
                         task.id
                     ),
@@ -390,6 +756,24 @@ finish/teardown), or immediately via /finished with promote=true for a no-PR lan
                 format!(
                     "Started task {} on branch {} (worktree {}).",
                     task.id, task.branch, task.worktree_path
+                ),
+                false,
+            ),
+        ),
+        Err(e) => success(id, tool_text(e, true)),
+    }
+}
+
+/// Format the `schedule_task` result: confirmation with the fire time (as a
+/// unix ts the caller can render) and schedule id, or an `isError` text.
+pub fn schedule_task_response(id: Value, result: Result<ScheduledOnce, String>) -> Value {
+    match result {
+        Ok(s) => success(
+            id,
+            tool_text(
+                format!(
+                    "Scheduled a one-shot launch (schedule {}) to fire at unix {} — retires after it runs.",
+                    s.id, s.fire_at
                 ),
                 false,
             ),
@@ -413,6 +797,37 @@ pub fn finish_task_response(id: Value, result: Result<crate::teardown::TeardownO
             id,
             tool_text(format!("refusing to finish: {reason} — pass force:true to override"), true),
         ),
+        Err(e) => success(id, tool_text(e, true)),
+    }
+}
+
+/// Format a single-`Schedule` tool result (create/update/set-enabled): the
+/// schedule as pretty JSON text (camelCase via serde) or `isError` text.
+pub fn schedule_response(id: Value, result: Result<crate::store::Schedule, String>) -> Value {
+    match result {
+        Ok(s) => {
+            let body = serde_json::to_string_pretty(&s).unwrap_or_else(|_| "{}".to_string());
+            success(id, tool_text(body, false))
+        }
+        Err(e) => success(id, tool_text(e, true)),
+    }
+}
+
+/// Format the `list_schedules` tool result (schedules as pretty JSON text).
+pub fn list_schedules_response(id: Value, result: Result<Vec<crate::store::Schedule>, String>) -> Value {
+    match result {
+        Ok(list) => {
+            let body = serde_json::to_string_pretty(&list).unwrap_or_else(|_| "[]".to_string());
+            success(id, tool_text(body, false))
+        }
+        Err(e) => success(id, tool_text(e, true)),
+    }
+}
+
+/// Format the `delete_schedule` tool result (confirmation text or `isError`).
+pub fn delete_schedule_response(id: Value, result: Result<String, String>) -> Value {
+    match result {
+        Ok(sid) => success(id, tool_text(format!("Schedule {sid} deleted."), false)),
         Err(e) => success(id, tool_text(e, true)),
     }
 }
@@ -463,6 +878,14 @@ pub fn get_task_activity_response(id: Value, result: Result<crate::session::Sess
     }
 }
 
+/// Format the `send_task_message` tool result (success text; failure ⇒ isError).
+pub fn send_task_message_response(id: Value, result: Result<String, String>) -> Value {
+    match result {
+        Ok(msg) => success(id, tool_text(msg, false)),
+        Err(e) => success(id, tool_text(e, true)),
+    }
+}
+
 /// Tauri event payload announcing a task created via MCP self-dispatch. The
 /// frontend's `useTaskLaunch` hook starts the agent on the existing path.
 #[derive(serde::Serialize, Clone)]
@@ -472,14 +895,28 @@ struct TaskLaunchedPayload {
     /// Caller-supplied prompt to deliver to the new agent, if any. Combined with
     /// the repo's prompt by the frontend; not persisted on the task row.
     initial_prompt: Option<String>,
+    /// TASK-181: when `true`, the frontend skips prepending the repo's initial
+    /// prompt (TASK-160's `combineInitialPrompts(null, …)` path). Only the
+    /// scheduler sets this; manual/self-dispatch/promote paths pass `false`.
+    skip_repo_prompt: bool,
 }
 
 /// Emit `task_launched` so the frontend's `useTaskLaunch` hook starts the agent
-/// on the existing path. Shared by `do_start_task` (MCP self-dispatch) and the
-/// TASK-90 merge-time promote path so both fire the identical event/payload.
-pub(crate) fn emit_task_launched(app: &tauri::AppHandle, task_id: String, initial_prompt: Option<String>) {
+/// on the existing path. Shared by `do_start_task` (MCP self-dispatch), the
+/// TASK-90 merge-time promote path, and the TASK-173 scheduler so all fire the
+/// identical event/payload. `skip_repo_prompt` (TASK-181) is `true` only for
+/// scheduled runs configured to skip the repo prompt.
+pub(crate) fn emit_task_launched(
+    app: &tauri::AppHandle,
+    task_id: String,
+    initial_prompt: Option<String>,
+    skip_repo_prompt: bool,
+) {
     use tauri::Emitter as _;
-    let _ = app.emit("task_launched", TaskLaunchedPayload { task_id, initial_prompt });
+    let _ = app.emit(
+        "task_launched",
+        TaskLaunchedPayload { task_id, initial_prompt, skip_repo_prompt },
+    );
 }
 
 /// Tauri event payload announcing a task the frontend didn't initiate itself —
@@ -491,13 +928,78 @@ struct TaskCreatedPayload {
     task_id: String,
 }
 
-/// Resolve the target repo for a launch: an explicit non-empty (trimmed)
-/// override wins; otherwise fall back to the caller's originating repo.
-fn resolve_repo_id(repo_override: Option<String>, fallback: &str) -> String {
-    repo_override
-        .map(|r| r.trim().to_string())
-        .filter(|r| !r.is_empty())
-        .unwrap_or_else(|| fallback.to_string())
+/// The single deny-by-default authorization choke-point (TASK-180). Resolve the
+/// call's *target repo* from storage per `strategy` — never trusting a
+/// caller-supplied `args_repo` for id-addressed resources — then run the pure
+/// `authz::decide` policy against the caller's tier. Handlers receive an
+/// `AuthorizedContext` (the resolved repo), never the raw `CallContext`, so they
+/// cannot act outside the resolved repo.
+///
+/// The store is locked only to read the target row and is dropped before the
+/// (synchronous) policy check returns — honoring the "never hold the store lock
+/// across an await" invariant.
+async fn authorize_call(
+    app: &tauri::AppHandle,
+    ctx: &CallContext,
+    cap: Capability,
+    strategy: ResolutionStrategy,
+    args_repo: Option<&str>,
+    id: Option<&str>,
+) -> Result<AuthorizedContext, AuthzError> {
+    let state = app.state::<AppState>();
+    // Resolve the target repo from storage per strategy (never trust args_repo
+    // for id-addressed resources). Lock briefly; drop the guard before returning.
+    let (target_repo, caller_task_id) = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|e| AuthzError::Denied(format!("{e:#}")))?;
+        let repo = match strategy {
+            ResolutionStrategy::FromTaskId => {
+                let id = id.ok_or_else(|| AuthzError::NotFound("task id".into()))?;
+                store
+                    .get_task(id)
+                    .ok()
+                    .flatten()
+                    .ok_or_else(|| AuthzError::NotFound(format!("task {id}")))?
+                    .repo_id
+            }
+            ResolutionStrategy::FromScheduleId => {
+                let id = id.ok_or_else(|| AuthzError::NotFound("schedule id".into()))?;
+                store
+                    .get_schedule(id)
+                    .ok()
+                    .flatten()
+                    .ok_or_else(|| AuthzError::NotFound(format!("schedule {id}")))?
+                    .repo_id
+            }
+            ResolutionStrategy::RepoArg | ResolutionStrategy::CallerRepo => {
+                // For create/list/self ops the target is the caller's own repo
+                // unless an explicit (non-empty, trimmed) repo arg is given
+                // (validated against the token scope by `decide`).
+                match (args_repo.map(|r| r.trim()).filter(|r| !r.is_empty()), ctx) {
+                    (Some(r), _) => r.to_string(),
+                    (None, CallContext::Agent { repo_id, .. })
+                    | (None, CallContext::Orchestrator { repo_id }) => repo_id.clone(),
+                    (None, CallContext::Concierge) => {
+                        return Err(AuthzError::Denied(
+                            "acting requires an explicit repoId".into(),
+                        ))
+                    }
+                }
+            }
+        };
+        let caller = match ctx {
+            CallContext::Agent { task_id, .. } => Some(task_id.clone()),
+            _ => None,
+        };
+        (repo, caller)
+    }; // store guard dropped here — before any await downstream
+    authz::decide(&authz::principal_of(ctx), cap, &target_repo)?;
+    Ok(AuthorizedContext {
+        repo_id: target_repo,
+        caller_task_id,
+    })
 }
 
 /// Extract and validate the bearer token, returning the originating context.
@@ -518,15 +1020,21 @@ async fn do_start_task(
     ctx: &CallContext,
     args: StartTaskArgs,
 ) -> Result<CreatedTask, String> {
-    let StartTaskArgs { title, ticket_key, repo, agent, prompt, after_merge_of } = args;
-    let CallContext::Agent { repo_id: fallback_repo, .. } = ctx else {
-        return Err(
-            "start_task is not available to the concierge token (acting is gated; see TASK-113)."
-                .to_string(),
-        );
-    };
-    let repo_id = resolve_repo_id(repo, fallback_repo);
-    let blocking_id = after_merge_of.clone();
+    let StartTaskArgs { title, ticket_key, repo, agent, prompt, model, after_merge_of } = args;
+    // Deny-by-default choke-point (TASK-180): resolve + authorize the target repo
+    // (own repo unless an explicit repo arg is given; cross-repo is denied; the
+    // concierge cannot act). Replaces the old inline tier gate + `resolve_repo_id`.
+    let authz = authorize_call(
+        app,
+        ctx,
+        Capability::StartTask,
+        ResolutionStrategy::RepoArg,
+        repo.as_deref(),
+        None,
+    )
+    .await
+    .map_err(|e| e.into_message())?;
+    let repo_id = authz.repo_id;
 
     let launch_args = crate::launch::LaunchArgs {
         repo_id,
@@ -534,10 +1042,16 @@ async fn do_start_task(
         base_branch: None,
         ticket_key,
         agent,
-        model: None,
+        // TASK-223: model override from the tool arg (normalized — trimmed,
+        // empty ⇒ None — by launch::resolve_launch); omitted ⇒ engine default.
+        model,
         auto_approve: None,
         after_merge_of,
         prompt: prompt.clone(),
+        // TASK-163: placeholder default — the MCP start_task tool doesn't expose
+        // in-place launches.
+        in_place: false,
+        branch_name: None,
     };
 
     let task = {
@@ -546,52 +1060,120 @@ async fn do_start_task(
     };
 
     if task.status == crate::store::TaskStatus::Pending {
-        // Queued behind another task's merge — no worktree/agent yet, so no
-        // task_launched event. The landed-gated trigger promotes it when its
-        // dependency lands (PR merged), from any finish surface (GUI
-        // finish_task or the /finished teardown). TASK-90. Emit task_created so
-        // the frontend refreshes and the queued task is visible in the sidebar
-        // right away instead of only appearing on a later, unrelated refresh.
+        // Queued behind other tasks' merges — no worktree/agent yet, so no
+        // task_launched event. The landed-gated trigger promotes it once every
+        // blocker lands, from any finish surface. TASK-90/177. Emit task_created
+        // so the queued task shows in the sidebar right away.
         use tauri::Emitter as _;
         let _ = app.emit("task_created", TaskCreatedPayload { task_id: task.id.clone() });
 
-        // TASK-90: look up the blocking task's title so the MCP response can
-        // name it (brief store lock, no await inside the guard).
-        let blocking_title = blocking_id.as_deref().and_then(|dep| {
+        // Resolve the ACTUAL queued edges (live blockers only — dangling ones
+        // were filtered out in launch_task) and name them for the response.
+        let blocking = {
             let state = app.state::<AppState>();
-            let store = state.store.lock().ok()?;
-            store.get_task(dep).ok().flatten().map(|t| t.title)
-        });
+            let store = state.store.lock().map_err(|e| e.to_string())?;
+            store
+                .blockers_of(&task.id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|dep_id| {
+                    let title = store.get_task(&dep_id).ok().flatten().map(|t| t.title);
+                    BlockingRef { task_id: dep_id, title }
+                })
+                .collect()
+        };
 
         return Ok(CreatedTask {
             id: task.id,
             branch: task.branch,
             worktree_path: task.worktree_path,
             queued: true,
-            blocking_task_id: blocking_id,
-            blocking_title,
+            blocking,
         });
     }
 
     // The prompt is delivered when the frontend starts the agent (not persisted
     // on the task row), so it rides on the event rather than LaunchArgs.
-    crate::mcp::emit_task_launched(app, task.id.clone(), prompt);
+    // TASK-181: MCP self-dispatch keeps the repo-prompt combine (skip = false).
+    crate::mcp::emit_task_launched(app, task.id.clone(), prompt, false);
 
     Ok(CreatedTask {
         id: task.id,
         branch: task.branch,
         worktree_path: task.worktree_path,
         queued: false,
-        blocking_task_id: None,
-        blocking_title: None,
+        blocking: vec![],
     })
+}
+
+/// Execute `schedule_task`: resolve the repo (override → caller's context) and
+/// insert a one-shot schedule row that fires once at the resolved time. Agent
+/// tier only — like `start_task`, the concierge token cannot act. No launch or
+/// worktree now; the poller fires it when due. TASK-179.
+async fn do_schedule_task(
+    app: &tauri::AppHandle,
+    ctx: &CallContext,
+    args: ScheduleTaskArgs,
+) -> Result<ScheduledOnce, String> {
+    let ScheduleTaskArgs { title, prompt, repo, agent, model, in_seconds, at_unix } = args;
+    // Deny-by-default choke-point (TASK-180): same repo resolution/authorization
+    // as start_task — own repo by default, cross-repo denied, concierge cannot act.
+    let authz = authorize_call(
+        app,
+        ctx,
+        Capability::ScheduleTask,
+        ResolutionStrategy::RepoArg,
+        repo.as_deref(),
+        None,
+    )
+    .await
+    .map_err(|e| e.into_message())?;
+    let repo_id = authz.repo_id;
+    let name = title
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| "Deferred launch".to_string());
+    let prompt = prompt.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+    let now = crate::schedule::now_secs_pub();
+    let fire_at = crate::schedule::resolve_fire_at(now, in_seconds, at_unix)?;
+
+    let schedule = crate::store::Schedule {
+        id: uuid::Uuid::new_v4().to_string(),
+        repo_id,
+        name,
+        prompt: prompt.unwrap_or_default(),
+        cron: String::new(),
+        agent: agent.map(|a| a.trim().to_string()).filter(|a| !a.is_empty()),
+        // TASK-223: model override (trimmed; empty ⇒ None), mirroring `agent`
+        // above and `create_schedule`. Omitted ⇒ engine default at fire time.
+        model: model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty()),
+        base_branch: None,
+        enabled: true,
+        one_shot: true,
+        // TASK-181: MCP-created schedules default to skipping the repo prompt.
+        skip_repo_prompt: true,
+        next_run_at: Some(fire_at),
+        last_run_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+
+    let state = app.state::<AppState>();
+    {
+        let store = state.store.lock().map_err(|e| format!("{e}"))?;
+        store.insert_schedule(&schedule).map_err(|e| format!("{e:#}"))?;
+    }
+    Ok(ScheduledOnce { id: schedule.id, fire_at })
 }
 
 /// Execute `finish_task`: enforce the scope tier, then compose the TASK-139
 /// teardown core with the keep/discard/merge branch/PR semantics.
 ///
-///   * scope — an Agent token may only finish its own task; another task needs
-///     the concierge tier (`resolve_finish_target`).
+///   * scope — an Agent token may only finish its own task
+///     (`resolve_finish_target`); an Orchestrator may finish any task **in its
+///     own repo** and the read-only Concierge is denied outright — both enforced
+///     by the `authorize_call(FinishTask, FromTaskId)` choke-point, which
+///     resolves the target's repo from storage (never caller input). TASK-180 B2.
 ///   * merge — squash-merge the PR *before* teardown (gh runs in the worktree,
 ///     which teardown removes); the safety gate then passes via `pr_merged`.
 ///   * teardown — stops the PTY, removes the worktree, and deletes the row,
@@ -614,7 +1196,7 @@ async fn do_finish_task(
     // Capture the task's worktree/branch/repo before teardown deletes the row —
     // needed by merge (PR) and by discard/merge (branch delete). An unknown task
     // short-circuits identically to the teardown core's own UnknownTask.
-    let (worktree_path, branch, repo_path) = {
+    let (worktree_path, branch, repo_path, in_place) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let task = match store.get_task(&target).map_err(|e| format!("{e:#}"))? {
             Some(t) => t,
@@ -624,8 +1206,26 @@ async fn do_finish_task(
             .get_repo(&task.repo_id)
             .map_err(|e| format!("{e:#}"))?
             .map(|r| r.path);
-        (task.worktree_path, task.branch, repo_path)
+        (task.worktree_path, task.branch, repo_path, task.in_place)
     };
+
+    // Deny-by-default choke-point (TASK-180 B2): resolve the target task's repo
+    // from storage and run the tier policy before any destructive step. An
+    // Agent/Orchestrator may only finish a task in its own repo; the read-only
+    // Concierge is denied. (An unknown task already short-circuited above as
+    // `UnknownTask`, preserving idempotent-finish semantics.) The store lock is
+    // taken briefly and dropped inside `authorize_call` — never held across the
+    // teardown awaits below.
+    authorize_call(
+        app,
+        ctx,
+        Capability::FinishTask,
+        ResolutionStrategy::FromTaskId,
+        None,
+        Some(&target),
+    )
+    .await
+    .map_err(|e| e.into_message())?;
 
     // merge mode: squash-merge the PR before teardown removes the worktree.
     // Gate the dirty-tree check BEFORE the irreversible merge (unless forced): the
@@ -658,7 +1258,11 @@ async fn do_finish_task(
     // now-redundant gate and dodge a pr_status "is it MERGED yet" race. Other modes
     // use the caller's force verbatim.
     let effective_force = force || mode == "merge";
-    let delete_branch_after = mode == "discard" || mode == "merge";
+    // Never delete the branch for an in-place task (TASK-163): it's the
+    // checkout's current branch, not a task-owned throwaway. Worktree removal
+    // itself routes through `teardown::prepare_teardown`/`teardown_task`, which
+    // already carry `in_place` via `TeardownPlan`.
+    let delete_branch_after = !in_place && (mode == "discard" || mode == "merge");
 
     // Self-finish (an Agent tearing down its OWN task) stops the caller's PTY — the
     // agent IS this MCP request's HTTP client, so that drops the connection and can
@@ -701,6 +1305,69 @@ async fn do_finish_task(
     }
 }
 
+/// Execute `send_task_message`: authorize (own-repo task only, concierge denied),
+/// find the task's live agent, and deliver `message` as a bracketed paste + Enter
+/// — mirroring the remote reply path (TASK-108). Unauthorized / no-live-agent /
+/// write failures return as an isError tool result.
+async fn do_send_task_message(
+    app: &tauri::AppHandle,
+    ctx: &CallContext,
+    task_id: String,
+    message: String,
+) -> Result<String, String> {
+    // Deny-by-default choke-point (TASK-180): resolve the target task's repo from
+    // storage and run the tier policy. An Agent/Orchestrator may only message a
+    // task in its own repo; the read-only concierge is denied. The store guard is
+    // taken briefly and dropped inside authorize_call — never held across an await.
+    authorize_call(
+        app,
+        ctx,
+        Capability::StirTask,
+        ResolutionStrategy::FromTaskId,
+        None,
+        Some(&task_id),
+    )
+    .await
+    .map_err(|e| e.into_message())?;
+
+    let state = app.state::<AppState>();
+
+    // Resolve the task's live agent. Snapshot each PTY map SEPARATELY (clone / drop
+    // the guard) — never hold two PTY locks at once — then resolve against the owned
+    // snapshots (mirrors remote::server::reply_handler).
+    let agent_id = {
+        let agent_tasks = state
+            .agent_tasks
+            .lock()
+            .map_err(|e| format!("{e:#}"))?
+            .clone();
+        let live: std::collections::HashSet<String> = state
+            .sessions
+            .lock()
+            .map_err(|e| format!("{e:#}"))?
+            .keys()
+            .cloned()
+            .collect();
+        crate::session::resolve_live_agent(&agent_tasks, &live, &task_id)
+    };
+    let Some(agent_id) = agent_id else {
+        return Err(format!(
+            "no running agent for task {task_id} — start or resume it first"
+        ));
+    };
+
+    // Deliver as a bracketed paste, then submit with Enter. The Enter MUST be a
+    // SEPARATE PTY read from the paste (a short gap forces a distinct read), or
+    // Claude's TUI consumes the `\r` as the paste terminator and the message sits
+    // unsubmitted — see remote::server::reply_handler for the full rationale.
+    let paste = crate::session::bracketed_paste(&message);
+    crate::agent::write_to_session(state.inner(), &agent_id, &paste)?;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    crate::agent::write_to_session(state.inner(), &agent_id, "\r")?;
+
+    Ok(format!("delivered to task {task_id}"))
+}
+
 /// Read all repos as `RepoSummary` (brief store lock, no await).
 fn list_repos(app: &tauri::AppHandle) -> Result<Vec<RepoSummary>, String> {
     let state = app.state::<AppState>();
@@ -720,6 +1387,15 @@ fn list_tasks(app: &tauri::AppHandle) -> Result<Vec<TaskSummary>, String> {
     Ok(tasks.iter().map(task_summary).collect())
 }
 
+/// Read one repo's tasks as `TaskSummary` — the repo-filtered read served to the
+/// Agent/Orchestrator tiers (the concierge read stays cross-repo via `list_tasks`).
+fn list_tasks_in_repo(app: &tauri::AppHandle, repo_id: &str) -> Result<Vec<TaskSummary>, String> {
+    Ok(list_tasks(app)?
+        .into_iter()
+        .filter(|t| t.repo_id == repo_id)
+        .collect())
+}
+
 /// Read a single task as `TaskSummary` (brief store lock, no await).
 fn task_status(app: &tauri::AppHandle, task_id: &str) -> Result<TaskSummary, String> {
     let state = app.state::<AppState>();
@@ -734,6 +1410,218 @@ fn task_status(app: &tauri::AppHandle, task_id: &str) -> Result<TaskSummary, Str
 fn get_task_activity(app: &tauri::AppHandle, task_id: &str, since: usize) -> Result<crate::session::SessionRead, String> {
     let state = app.state::<AppState>();
     crate::session::read_session(state.inner(), task_id, since)
+}
+
+/// Execute `create_schedule`: resolve+scope the repo, validate fields, compute
+/// the first fire, and insert. Returns the created schedule.
+/// Lock the store, surfacing a poisoned-lock error with full context (the
+/// REVIEW.md error-mapping invariant). Centralizes the lock boilerplate the
+/// schedule glue shares so it lives in exactly one place.
+fn lock_store(state: &AppState) -> Result<std::sync::MutexGuard<'_, crate::store::TaskStore>, String> {
+    state.store.lock().map_err(|e| format!("{e:#}"))
+}
+
+async fn do_create_schedule(
+    app: &tauri::AppHandle,
+    ctx: &CallContext,
+    args: CreateScheduleArgs,
+) -> Result<crate::store::Schedule, String> {
+    // Deny-by-default choke-point (TASK-180): resolve+authorize the target repo.
+    // An Agent/Orchestrator manages only its own repo's schedules; a cross-repo
+    // arg is denied and the read-only Concierge is denied outright.
+    let repo_id = authorize_call(
+        app,
+        ctx,
+        Capability::ManageSchedule,
+        ResolutionStrategy::RepoArg,
+        args.repo.as_deref(),
+        None,
+    )
+    .await
+    .map_err(|e| e.into_message())?
+    .repo_id;
+    let fields = crate::schedule::validate_schedule_fields(
+        args.name.as_deref().unwrap_or(""),
+        args.prompt.as_deref().unwrap_or(""),
+        args.cron.as_deref().unwrap_or(""),
+        args.agent,
+        args.model,
+        args.base_branch,
+    )?;
+    let now = crate::schedule::now_secs_pub();
+    let next_run_at = crate::schedule::next_run_after(&fields.cron, chrono::Local::now())?;
+    let schedule = crate::store::Schedule {
+        id: uuid::Uuid::new_v4().to_string(),
+        repo_id,
+        name: fields.name,
+        prompt: fields.prompt,
+        cron: fields.cron,
+        agent: fields.agent,
+        model: fields.model,
+        base_branch: fields.base_branch,
+        enabled: true,
+        one_shot: false,
+        // TASK-181: MCP-created schedules default to skipping the repo prompt.
+        skip_repo_prompt: true,
+        next_run_at,
+        last_run_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let state = app.state::<AppState>();
+    let store = lock_store(&state)?;
+    store.insert_schedule(&schedule).map_err(|e| format!("{e:#}"))?;
+    Ok(schedule)
+}
+
+/// Execute `list_schedules`: resolve+scope the repo, return its schedules.
+async fn do_list_schedules(
+    app: &tauri::AppHandle,
+    ctx: &CallContext,
+    repo_arg: Option<String>,
+) -> Result<Vec<crate::store::Schedule>, String> {
+    // Deny-by-default choke-point (TASK-180): only the caller's own repo; the
+    // read-only Concierge is denied (revoking the TASK-178 any-repo grant).
+    let repo_id = authorize_call(
+        app,
+        ctx,
+        Capability::ManageSchedule,
+        ResolutionStrategy::RepoArg,
+        repo_arg.as_deref(),
+        None,
+    )
+    .await
+    .map_err(|e| e.into_message())?
+    .repo_id;
+    let state = app.state::<AppState>();
+    let store = lock_store(&state)?;
+    store.list_schedules(&repo_id).map_err(|e| format!("{e:#}"))
+}
+
+/// Execute `update_schedule`: authorize against the stored schedule's repo,
+/// validate the new fields, recompute the next fire, and full-replace.
+async fn do_update_schedule(
+    app: &tauri::AppHandle,
+    ctx: &CallContext,
+    args: UpdateScheduleArgs,
+) -> Result<crate::store::Schedule, String> {
+    // Deny-by-default choke-point (TASK-180): resolve the target repo from the
+    // stored schedule row (never caller input); an Agent/Orchestrator may touch
+    // only its own repo, the read-only Concierge is denied.
+    authorize_call(
+        app,
+        ctx,
+        Capability::ManageSchedule,
+        ResolutionStrategy::FromScheduleId,
+        None,
+        Some(&args.schedule_id),
+    )
+    .await
+    .map_err(|e| e.into_message())?;
+    let fields = crate::schedule::validate_schedule_fields(
+        args.name.as_deref().unwrap_or(""),
+        args.prompt.as_deref().unwrap_or(""),
+        args.cron.as_deref().unwrap_or(""),
+        args.agent,
+        args.model,
+        args.base_branch,
+    )?;
+    let next_run_at = if args.enabled {
+        crate::schedule::next_run_after(&fields.cron, chrono::Local::now())?
+    } else {
+        None
+    };
+    let now = crate::schedule::now_secs_pub();
+    let state = app.state::<AppState>();
+    let store = lock_store(&state)?;
+    // TASK-181: MCP update preserves the stored skip-repo-prompt flag (no MCP arg).
+    let current = store
+        .get_schedule(&args.schedule_id)
+        .map_err(|e| format!("{e:#}"))?
+        .ok_or_else(|| "schedule not found".to_string())?;
+    store
+        .update_schedule_fields(
+            &args.schedule_id, &fields.name, &fields.prompt, &fields.cron,
+            fields.agent.as_deref(), fields.model.as_deref(), fields.base_branch.as_deref(),
+            args.enabled, current.skip_repo_prompt, next_run_at, now,
+        )
+        .map_err(|e| format!("{e:#}"))?;
+    store
+        .get_schedule(&args.schedule_id)
+        .map_err(|e| format!("{e:#}"))?
+        .ok_or_else(|| "schedule not found after update".to_string())
+}
+
+/// Execute `set_schedule_enabled`: authorize, then toggle enabled (recomputing
+/// the next fire when enabling), leaving the other fields untouched.
+async fn do_set_schedule_enabled(
+    app: &tauri::AppHandle,
+    ctx: &CallContext,
+    schedule_id: &str,
+    enabled: bool,
+) -> Result<crate::store::Schedule, String> {
+    // Deny-by-default choke-point (TASK-180): repo resolved from the schedule row.
+    authorize_call(
+        app,
+        ctx,
+        Capability::ManageSchedule,
+        ResolutionStrategy::FromScheduleId,
+        None,
+        Some(schedule_id),
+    )
+    .await
+    .map_err(|e| e.into_message())?;
+    let state = app.state::<AppState>();
+    let store = lock_store(&state)?;
+    let current = store
+        .get_schedule(schedule_id)
+        .map_err(|e| format!("{e:#}"))?
+        .ok_or_else(|| "schedule not found".to_string())?;
+    let next_run_at = if enabled {
+        crate::schedule::next_run_after(&current.cron, chrono::Local::now())?
+    } else {
+        None
+    };
+    let now = crate::schedule::now_secs_pub();
+    store
+        .update_schedule_fields(
+            schedule_id, &current.name, &current.prompt, &current.cron,
+            current.agent.as_deref(), current.model.as_deref(), current.base_branch.as_deref(),
+            enabled, current.skip_repo_prompt, next_run_at, now,
+        )
+        .map_err(|e| format!("{e:#}"))?;
+    store
+        .get_schedule(schedule_id)
+        .map_err(|e| format!("{e:#}"))?
+        .ok_or_else(|| "schedule not found after update".to_string())
+}
+
+/// Execute `delete_schedule`: authorize against the stored schedule's repo,
+/// then delete. Returns the id for the confirmation message.
+async fn do_delete_schedule(
+    app: &tauri::AppHandle,
+    ctx: &CallContext,
+    schedule_id: &str,
+) -> Result<String, String> {
+    // Deny-by-default choke-point (TASK-180): repo resolved from the schedule row.
+    authorize_call(
+        app,
+        ctx,
+        Capability::ManageSchedule,
+        ResolutionStrategy::FromScheduleId,
+        None,
+        Some(schedule_id),
+    )
+    .await
+    .map_err(|e| e.into_message())?;
+    let state = app.state::<AppState>();
+    let store = lock_store(&state)?;
+    store
+        .get_schedule(schedule_id)
+        .map_err(|e| format!("{e:#}"))?
+        .ok_or_else(|| "schedule not found".to_string())?;
+    store.delete_schedule(schedule_id).map_err(|e| format!("{e:#}"))?;
+    Ok(schedule_id.to_string())
 }
 
 /// `POST /mcp` — a single JSON-RPC request. Auth via bearer token; dispatch via
@@ -762,39 +1650,109 @@ async fn mcp_handler(
             let result = do_start_task(&app, &ctx, args).await;
             Json(start_task_response(id, result)).into_response()
         }
+        Routed::QueueDependency { id, args } => {
+            // queue_dependency (TASK-164) is start_task with a guaranteed-non-empty
+            // dependency list — same handler, same authz (Capability::StartTask),
+            // same response formatter (the created task is always Pending/queued).
+            let result = do_start_task(&app, &ctx, args).await;
+            Json(start_task_response(id, result)).into_response()
+        }
         Routed::FinishTask { id, args } => {
             // Scope is enforced inside do_finish_task: an Agent token may finish its
             // own task (no concierge needed), so we can't gate on is_concierge here.
             let result = do_finish_task(&app, &ctx, args).await;
             Json(finish_task_response(id, result)).into_response()
         }
+        Routed::ScheduleTask { id, args } => {
+            let result = do_schedule_task(&app, &ctx, args).await;
+            Json(schedule_task_response(id, result)).into_response()
+        }
         Routed::ListRepos { id } => {
             let result = list_repos(&app);
             Json(list_repos_response(id, result)).into_response()
         }
         Routed::ListTasks { id } => {
-            if !ctx.is_concierge() {
-                return Json(list_tasks_response(id, Err(CONCIERGE_REQUIRED.to_string())))
-                    .into_response();
-            }
-            let result = list_tasks(&app);
+            // Control-plane read via the choke-point (TASK-180). The legacy global
+            // concierge keeps its cross-repo read (return all tasks); an
+            // Agent/Orchestrator token is repo-filtered to its own repo.
+            let result = match &ctx {
+                CallContext::Concierge => list_tasks(&app),
+                _ => match authorize_call(
+                    &app,
+                    &ctx,
+                    Capability::ReadControlPlane,
+                    ResolutionStrategy::CallerRepo,
+                    None,
+                    None,
+                )
+                .await
+                {
+                    Ok(authz) => list_tasks_in_repo(&app, &authz.repo_id),
+                    Err(e) => Err(e.into_message()),
+                },
+            };
             Json(list_tasks_response(id, result)).into_response()
         }
         Routed::TaskStatus { id, task_id } => {
-            if !ctx.is_concierge() {
-                return Json(task_status_response(id, Err(CONCIERGE_REQUIRED.to_string())))
-                    .into_response();
-            }
-            let result = task_status(&app, &task_id);
+            // Resolve the task's repo from storage, then authorize: the concierge
+            // may read any repo; an Agent/Orchestrator only its own (TASK-180).
+            let result = match authorize_call(
+                &app,
+                &ctx,
+                Capability::ReadControlPlane,
+                ResolutionStrategy::FromTaskId,
+                None,
+                Some(&task_id),
+            )
+            .await
+            {
+                Ok(_) => task_status(&app, &task_id),
+                Err(e) => Err(e.into_message()),
+            };
             Json(task_status_response(id, result)).into_response()
         }
         Routed::GetTaskActivity { id, task_id, since } => {
-            if !ctx.is_concierge() {
-                return Json(get_task_activity_response(id, Err(CONCIERGE_REQUIRED.to_string())))
-                    .into_response();
-            }
-            let result = get_task_activity(&app, &task_id, since);
+            let result = match authorize_call(
+                &app,
+                &ctx,
+                Capability::ReadControlPlane,
+                ResolutionStrategy::FromTaskId,
+                None,
+                Some(&task_id),
+            )
+            .await
+            {
+                Ok(_) => get_task_activity(&app, &task_id, since),
+                Err(e) => Err(e.into_message()),
+            };
             Json(get_task_activity_response(id, result)).into_response()
+        }
+        Routed::CreateSchedule { id, args } => {
+            let result = do_create_schedule(&app, &ctx, args).await;
+            Json(schedule_response(id, result)).into_response()
+        }
+        Routed::ListSchedules { id, repo } => {
+            let result = do_list_schedules(&app, &ctx, repo).await;
+            Json(list_schedules_response(id, result)).into_response()
+        }
+        Routed::UpdateSchedule { id, args } => {
+            let result = do_update_schedule(&app, &ctx, args).await;
+            Json(schedule_response(id, result)).into_response()
+        }
+        Routed::SetScheduleEnabled { id, schedule_id, enabled } => {
+            let result = do_set_schedule_enabled(&app, &ctx, &schedule_id, enabled).await;
+            Json(schedule_response(id, result)).into_response()
+        }
+        Routed::DeleteSchedule { id, schedule_id } => {
+            let result = do_delete_schedule(&app, &ctx, &schedule_id).await;
+            Json(delete_schedule_response(id, result)).into_response()
+        }
+        Routed::SendTaskMessage { id, task_id, message } => {
+            // Scope is enforced inside do_send_task_message via the TASK-180
+            // choke-point: an Agent/Orchestrator may message a task in its own
+            // repo; the concierge is denied. So we can't gate on tier here.
+            let result = do_send_task_message(&app, &ctx, task_id, message).await;
+            Json(send_task_message_response(id, result)).into_response()
         }
     }
 }
@@ -869,14 +1827,182 @@ mod tests {
             .find(|t| t["name"] == "start_task").unwrap();
         let props = &start["inputSchema"]["properties"];
         assert!(props.get("afterMergeOf").is_some(), "afterMergeOf must be advertised");
-        assert_eq!(props["afterMergeOf"]["type"], "string");
+        assert_eq!(props["afterMergeOf"]["type"], json!(["string", "array"]));
     }
 
     #[test]
     fn parse_start_task_args_reads_after_merge_of() {
         let args = serde_json::json!({ "title": "Follow-up", "afterMergeOf": "task-abc" });
         let parsed = parse_start_task_args(&args);
-        assert_eq!(parsed.after_merge_of.as_deref(), Some("task-abc"));
+        assert_eq!(parsed.after_merge_of, vec!["task-abc".to_string()]);
+    }
+
+    #[test]
+    fn start_task_parses_after_merge_of_string() {
+        let req = json!({
+            "jsonrpc":"2.0","id":7,"method":"tools/call",
+            "params":{"name":"start_task","arguments":{"title":"x","afterMergeOf":"TASK-7"}}
+        });
+        let Routed::StartTask { args, .. } = route(&req) else { panic!("expected StartTask") };
+        assert_eq!(args.after_merge_of, vec!["TASK-7".to_string()]);
+    }
+
+    #[test]
+    fn start_task_parses_after_merge_of_array() {
+        let req = json!({
+            "jsonrpc":"2.0","id":7,"method":"tools/call",
+            "params":{"name":"start_task","arguments":{"title":"x","afterMergeOf":["TASK-7","TASK-8"]}}
+        });
+        let Routed::StartTask { args, .. } = route(&req) else { panic!("expected StartTask") };
+        assert_eq!(args.after_merge_of, vec!["TASK-7".to_string(), "TASK-8".to_string()]);
+    }
+
+    #[test]
+    fn start_task_after_merge_of_absent_is_empty() {
+        let req = json!({
+            "jsonrpc":"2.0","id":7,"method":"tools/call",
+            "params":{"name":"start_task","arguments":{"title":"x"}}
+        });
+        let Routed::StartTask { args, .. } = route(&req) else { panic!("expected StartTask") };
+        assert!(args.after_merge_of.is_empty());
+    }
+
+    // --- queue_dependency (TASK-164) ---
+
+    #[test]
+    fn tools_list_advertises_queue_dependency_with_required_depends_on() {
+        let result = tools_list_result();
+        let tool = result["tools"]
+            .as_array().unwrap()
+            .iter()
+            .find(|t| t["name"] == "queue_dependency")
+            .expect("queue_dependency must be advertised");
+        let props = &tool["inputSchema"]["properties"];
+        assert_eq!(props["dependsOn"]["type"], json!(["string", "array"]));
+        // dependsOn is required; the other fields mirror start_task and are optional.
+        assert_eq!(tool["inputSchema"]["required"], json!(["dependsOn"]));
+        assert!(props["title"].is_object());
+        assert!(props["ticketKey"].is_object());
+        assert!(props["prompt"].is_object());
+    }
+
+    #[test]
+    fn queue_dependency_parses_depends_on_string() {
+        let req = json!({
+            "jsonrpc":"2.0","id":20,"method":"tools/call",
+            "params":{"name":"queue_dependency","arguments":{"title":"x","dependsOn":"TASK-7"}}
+        });
+        let Routed::QueueDependency { id, args } = route(&req) else {
+            panic!("expected QueueDependency")
+        };
+        assert_eq!(id, json!(20));
+        assert_eq!(args.after_merge_of, vec!["TASK-7".to_string()]);
+        assert_eq!(args.title.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn queue_dependency_parses_depends_on_array_and_fields() {
+        let req = json!({
+            "jsonrpc":"2.0","id":21,"method":"tools/call",
+            "params":{"name":"queue_dependency","arguments":{
+                "dependsOn":["TASK-7","TASK-8"],"ticketKey":"TASK-99","repo":"r1",
+                "agent":"claude","prompt":"go"
+            }}
+        });
+        let Routed::QueueDependency { args, .. } = route(&req) else {
+            panic!("expected QueueDependency")
+        };
+        assert_eq!(args.after_merge_of, vec!["TASK-7".to_string(), "TASK-8".to_string()]);
+        assert_eq!(args.ticket_key.as_deref(), Some("TASK-99"));
+        assert_eq!(args.repo.as_deref(), Some("r1"));
+        assert_eq!(args.agent.as_deref(), Some("claude"));
+        assert_eq!(args.prompt.as_deref(), Some("go"));
+    }
+
+    #[test]
+    fn queue_dependency_missing_depends_on_is_invalid_params() {
+        let req = json!({
+            "jsonrpc":"2.0","id":22,"method":"tools/call",
+            "params":{"name":"queue_dependency","arguments":{"title":"x"}}
+        });
+        let Routed::Respond(resp) = route(&req) else { panic!("expected Respond") };
+        assert_eq!(resp["error"]["code"], -32602);
+        assert!(resp["error"]["message"].as_str().unwrap().contains("dependsOn"));
+    }
+
+    #[test]
+    fn queue_dependency_empty_array_depends_on_is_invalid_params() {
+        // An empty list would otherwise resolve to Immediate — a silent launch-now.
+        let req = json!({
+            "jsonrpc":"2.0","id":23,"method":"tools/call",
+            "params":{"name":"queue_dependency","arguments":{"title":"x","dependsOn":[]}}
+        });
+        let Routed::Respond(resp) = route(&req) else { panic!("expected Respond") };
+        assert_eq!(resp["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn queue_dependency_ignores_after_merge_of_key() {
+        // The dependency list is read from `dependsOn`, not start_task's
+        // `afterMergeOf`; using the old key alone is a usage error.
+        let req = json!({
+            "jsonrpc":"2.0","id":24,"method":"tools/call",
+            "params":{"name":"queue_dependency","arguments":{"title":"x","afterMergeOf":"TASK-7"}}
+        });
+        let Routed::Respond(resp) = route(&req) else { panic!("expected Respond") };
+        assert_eq!(resp["error"]["code"], -32602);
+    }
+
+    // --- TASK-223: optional `model` on the task-creation tools ---
+
+    #[test]
+    fn parse_start_task_args_reads_model() {
+        let parsed = parse_start_task_args(&json!({ "title": "x", "model": "opus" }));
+        assert_eq!(parsed.model.as_deref(), Some("opus"));
+        // Omitted ⇒ None (engine default).
+        assert_eq!(parse_start_task_args(&json!({ "title": "x" })).model, None);
+    }
+
+    #[test]
+    fn start_task_routes_model_into_launch_args() {
+        // Route-level wiring: a passed `model` reaches StartTaskArgs, which
+        // do_start_task threads verbatim into LaunchArgs.model (TASK-223).
+        let req = json!({
+            "jsonrpc":"2.0","id":30,"method":"tools/call",
+            "params":{"name":"start_task","arguments":{"title":"x","model":"sonnet"}}
+        });
+        let Routed::StartTask { args, .. } = route(&req) else { panic!("expected StartTask") };
+        assert_eq!(args.model.as_deref(), Some("sonnet"));
+    }
+
+    #[test]
+    fn queue_dependency_routes_model() {
+        let req = json!({
+            "jsonrpc":"2.0","id":31,"method":"tools/call",
+            "params":{"name":"queue_dependency","arguments":{
+                "title":"x","dependsOn":"TASK-7","model":"haiku"
+            }}
+        });
+        let Routed::QueueDependency { args, .. } = route(&req) else {
+            panic!("expected QueueDependency")
+        };
+        assert_eq!(args.model.as_deref(), Some("haiku"));
+    }
+
+    #[test]
+    fn task_creation_tools_advertise_model() {
+        let result = tools_list_result();
+        let tools = result["tools"].as_array().unwrap();
+        for name in ["start_task", "queue_dependency", "schedule_task"] {
+            let tool = tools
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap_or_else(|| panic!("{name} must be advertised"));
+            assert!(
+                tool["inputSchema"]["properties"]["model"].is_object(),
+                "{name} must advertise the optional `model` property"
+            );
+        }
     }
 
     #[test]
@@ -943,8 +2069,7 @@ mod tests {
                 branch: "task-99".into(),
                 worktree_path: "/wt/task-99".into(),
                 queued: false,
-                blocking_task_id: None,
-                blocking_title: None,
+                blocking: vec![],
             }),
         );
         assert_eq!(resp["id"], 7);
@@ -967,8 +2092,10 @@ mod tests {
                 branch: "".into(),
                 worktree_path: "".into(),
                 queued: true,
-                blocking_task_id: Some("dep-1".into()),
-                blocking_title: Some("blocking3".into()),
+                blocking: vec![
+                    BlockingRef { task_id: "dep-1".into(), title: Some("blocking3".into()) },
+                    BlockingRef { task_id: "dep-2".into(), title: None },
+                ],
             }),
         );
         assert_eq!(resp["id"], 21);
@@ -976,8 +2103,9 @@ mod tests {
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("Queued"), "expected Queued in: {text}");
         assert!(text.contains("Pending"), "expected Pending in: {text}");
-        assert!(text.contains("dep-1"), "expected blocking task id in: {text}");
-        assert!(text.contains("blocking3"), "expected blocking task title in: {text}");
+        assert!(text.contains("dep-1"), "expected first blocking id in: {text}");
+        assert!(text.contains("blocking3"), "expected first blocking title in: {text}");
+        assert!(text.contains("dep-2"), "expected second blocking id in: {text}");
         assert!(!text.contains("Started task"), "must not read as Started: {text}");
     }
 
@@ -1002,22 +2130,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_repo_id_uses_override_when_present() {
-        assert_eq!(resolve_repo_id(Some("other".to_string()), "caller"), "other");
-    }
-
-    #[test]
-    fn resolve_repo_id_trims_override() {
-        assert_eq!(resolve_repo_id(Some("  other  ".to_string()), "caller"), "other");
-    }
-
-    #[test]
-    fn resolve_repo_id_falls_back_on_none_or_blank() {
-        assert_eq!(resolve_repo_id(None, "caller"), "caller");
-        assert_eq!(resolve_repo_id(Some("   ".to_string()), "caller"), "caller");
-    }
-
-    #[test]
     fn task_summary_maps_status_to_str_and_camelcase_fields() {
         use crate::store::{Task, TaskStatus};
         let t = Task {
@@ -1039,6 +2151,7 @@ mod tests {
             hidden: false,
             pending_prompt: None,
             auto_approve: None,
+            in_place: false,
         };
         let s = task_summary(&t);
         assert_eq!(s.id, "t1");
@@ -1179,6 +2292,15 @@ mod tests {
         assert!(context_from_token(&concierge).is_concierge());
     }
 
+    #[test]
+    fn orchestrator_token_maps_to_repo_scoped_context() {
+        let tok = crate::state::McpToken::Orchestrator { repo_id: "r1".into() };
+        match context_from_token(&tok) {
+            CallContext::Orchestrator { repo_id } => assert_eq!(repo_id, "r1"),
+            other => panic!("expected Orchestrator, got {other:?}"),
+        }
+    }
+
     // ── TASK-140: finish_task ──────────────────────────────────────────────
 
     #[test]
@@ -1253,6 +2375,20 @@ mod tests {
     }
 
     #[test]
+    fn resolve_finish_target_orchestrator_requires_explicit_task() {
+        // An orchestrator has no own task, so — like a concierge — it must name a
+        // target explicitly. Repo scoping (own-repo only) is then enforced by the
+        // `authorize_call(FinishTask, FromTaskId)` choke-point in `do_finish_task`
+        // (TASK-180 B2), which resolves the task's repo from storage.
+        let orch = CallContext::Orchestrator { repo_id: "r1".into() };
+        assert_eq!(resolve_finish_target(&orch, Some("  t9  ")).unwrap(), "t9");
+        let err = resolve_finish_target(&orch, None).unwrap_err();
+        assert!(err.contains("requires an explicit taskId"));
+        // A blank/whitespace taskId is treated as absent.
+        assert!(resolve_finish_target(&orch, Some("   ")).is_err());
+    }
+
+    #[test]
     fn validate_finish_mode_defaults_and_accepts_known_modes() {
         assert_eq!(validate_finish_mode(None).unwrap(), "keep");
         assert_eq!(validate_finish_mode(Some("keep")).unwrap(), "keep");
@@ -1306,6 +2442,287 @@ mod tests {
     fn finish_task_response_scope_error_is_error_text() {
         let resp = finish_task_response(json!(26), Err(FINISH_SCOPE_REQUIRED.to_string()));
         assert_eq!(resp["result"]["isError"], true);
-        assert!(resp["result"]["content"][0]["text"].as_str().unwrap().contains("concierge"));
+        assert!(resp["result"]["content"][0]["text"].as_str().unwrap().contains("orchestrator-scope token"));
+    }
+
+    // ── TASK-178: schedule tools — pure parse + authz ──────────────────────
+
+    #[test]
+    fn parse_create_schedule_args_reads_all_fields() {
+        let a = serde_json::json!({
+            "repoId": "r1", "name": "nightly", "prompt": "/security-scan",
+            "cron": "0 2 * * *", "agent": "claude", "model": "opus", "baseBranch": "main"
+        });
+        let p = parse_create_schedule_args(&a);
+        assert_eq!(p.repo.as_deref(), Some("r1"));
+        assert_eq!(p.name.as_deref(), Some("nightly"));
+        assert_eq!(p.prompt.as_deref(), Some("/security-scan"));
+        assert_eq!(p.cron.as_deref(), Some("0 2 * * *"));
+        assert_eq!(p.agent.as_deref(), Some("claude"));
+        assert_eq!(p.model.as_deref(), Some("opus"));
+        assert_eq!(p.base_branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn parse_update_schedule_args_requires_schedule_id_and_enabled() {
+        let ok = parse_update_schedule_args(&serde_json::json!({
+            "scheduleId": "s1", "name": "n", "prompt": "p", "cron": "0 2 * * *", "enabled": false
+        }))
+        .expect("valid");
+        assert_eq!(ok.schedule_id, "s1");
+        assert!(!ok.enabled);
+        assert_eq!(ok.name.as_deref(), Some("n"));
+
+        assert!(parse_update_schedule_args(&serde_json::json!({"enabled": true}))
+            .unwrap_err()
+            .contains("scheduleId"));
+        assert!(parse_update_schedule_args(&serde_json::json!({"scheduleId": "s1"}))
+            .unwrap_err()
+            .contains("enabled"));
+    }
+
+    fn sample_schedule() -> crate::store::Schedule {
+        crate::store::Schedule {
+            id: "s1".into(),
+            repo_id: "r1".into(),
+            name: "nightly".into(),
+            prompt: "/security-scan".into(),
+            cron: "0 2 * * *".into(),
+            agent: None,
+            model: None,
+            base_branch: None,
+            enabled: true,
+            one_shot: false,
+            skip_repo_prompt: true,
+            next_run_at: Some(1_800_000_000),
+            last_run_at: None,
+            created_at: 1,
+            updated_at: 2,
+        }
+    }
+
+    #[test]
+    fn tools_list_advertises_all_schedule_tools() {
+        let req = json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}});
+        let Routed::Respond(resp) = route(&req) else { panic!("expected Respond") };
+        let names: Vec<&str> = resp["result"]["tools"].as_array().unwrap()
+            .iter().map(|t| t["name"].as_str().unwrap()).collect();
+        for n in ["create_schedule", "list_schedules", "update_schedule", "set_schedule_enabled", "delete_schedule"] {
+            assert!(names.contains(&n), "missing tool: {n}");
+        }
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        let create = tools.iter().find(|t| t["name"] == "create_schedule").unwrap();
+        let props = &create["inputSchema"]["properties"];
+        assert!(props["repoId"].is_object());
+        assert!(props["cron"].is_object());
+        let del = tools.iter().find(|t| t["name"] == "delete_schedule").unwrap();
+        assert_eq!(del["inputSchema"]["required"][0], "scheduleId");
+    }
+
+    #[test]
+    fn tools_call_create_schedule_routes_with_parsed_args() {
+        let req = json!({"jsonrpc":"2.0","id":30,"method":"tools/call","params":{
+            "name":"create_schedule","arguments":{"repoId":"r1","name":"n","prompt":"p","cron":"0 2 * * *"}}});
+        let Routed::CreateSchedule { id, args } = route(&req) else { panic!("expected CreateSchedule") };
+        assert_eq!(id, json!(30));
+        assert_eq!(args.repo.as_deref(), Some("r1"));
+        assert_eq!(args.cron.as_deref(), Some("0 2 * * *"));
+    }
+
+    #[test]
+    fn tools_call_list_schedules_routes_with_optional_repo() {
+        let req = json!({"jsonrpc":"2.0","id":31,"method":"tools/call","params":{
+            "name":"list_schedules","arguments":{"repoId":"r1"}}});
+        let Routed::ListSchedules { id, repo } = route(&req) else { panic!("expected ListSchedules") };
+        assert_eq!(id, json!(31));
+        assert_eq!(repo.as_deref(), Some("r1"));
+    }
+
+    #[test]
+    fn tools_call_update_schedule_missing_required_is_invalid_params() {
+        let req = json!({"jsonrpc":"2.0","id":32,"method":"tools/call","params":{
+            "name":"update_schedule","arguments":{"scheduleId":"s1"}}}); // no enabled
+        let Routed::Respond(resp) = route(&req) else { panic!("expected Respond") };
+        assert_eq!(resp["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn tools_call_set_schedule_enabled_routes() {
+        let req = json!({"jsonrpc":"2.0","id":33,"method":"tools/call","params":{
+            "name":"set_schedule_enabled","arguments":{"scheduleId":"s1","enabled":false}}});
+        let Routed::SetScheduleEnabled { id, schedule_id, enabled } = route(&req) else { panic!("expected SetScheduleEnabled") };
+        assert_eq!(id, json!(33));
+        assert_eq!(schedule_id, "s1");
+        assert!(!enabled);
+    }
+
+    #[test]
+    fn tools_call_set_schedule_enabled_missing_enabled_is_invalid_params() {
+        let req = json!({"jsonrpc":"2.0","id":34,"method":"tools/call","params":{
+            "name":"set_schedule_enabled","arguments":{"scheduleId":"s1"}}});
+        let Routed::Respond(resp) = route(&req) else { panic!("expected Respond") };
+        assert_eq!(resp["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn tools_call_delete_schedule_routes_and_requires_id() {
+        let ok = json!({"jsonrpc":"2.0","id":35,"method":"tools/call","params":{
+            "name":"delete_schedule","arguments":{"scheduleId":"s1"}}});
+        let Routed::DeleteSchedule { id, schedule_id } = route(&ok) else { panic!("expected DeleteSchedule") };
+        assert_eq!(id, json!(35));
+        assert_eq!(schedule_id, "s1");
+
+        let bad = json!({"jsonrpc":"2.0","id":36,"method":"tools/call","params":{
+            "name":"delete_schedule","arguments":{}}});
+        let Routed::Respond(resp) = route(&bad) else { panic!("expected Respond") };
+        assert_eq!(resp["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn schedule_response_ok_serializes_camelcase_next_run_at() {
+        let resp = schedule_response(json!(40), Ok(sample_schedule()));
+        assert_eq!(resp["result"]["isError"], false);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("nextRunAt"));
+        assert!(text.contains("\"repoId\": \"r1\""));
+    }
+
+    #[test]
+    fn schedule_response_err_is_error_text() {
+        let resp = schedule_response(json!(41), Err("schedule not found".into()));
+        assert_eq!(resp["result"]["isError"], true);
+        assert!(resp["result"]["content"][0]["text"].as_str().unwrap().contains("not found"));
+    }
+
+    #[test]
+    fn list_schedules_response_ok_and_err() {
+        let ok = list_schedules_response(json!(42), Ok(vec![sample_schedule()]));
+        assert_eq!(ok["result"]["isError"], false);
+        assert!(ok["result"]["content"][0]["text"].as_str().unwrap().contains("nextRunAt"));
+        let err = list_schedules_response(json!(43), Err("boom".into()));
+        assert_eq!(err["result"]["isError"], true);
+    }
+
+    #[test]
+    fn delete_schedule_response_ok_and_err() {
+        let ok = delete_schedule_response(json!(44), Ok("s1".into()));
+        assert_eq!(ok["result"]["isError"], false);
+        assert!(ok["result"]["content"][0]["text"].as_str().unwrap().contains("s1"));
+        let err = delete_schedule_response(json!(45), Err("not authorized: ManageSchedule".to_string()));
+        assert_eq!(err["result"]["isError"], true);
+        assert!(err["result"]["content"][0]["text"].as_str().unwrap().contains("not authorized"));
+    }
+
+    // ── TASK-179: schedule_task ────────────────────────────────────────────
+
+    #[test]
+    fn tools_list_advertises_schedule_task() {
+        let result = tools_list_result();
+        let tool = result["tools"]
+            .as_array().unwrap()
+            .iter()
+            .find(|t| t["name"] == "schedule_task").unwrap();
+        let props = &tool["inputSchema"]["properties"];
+        assert!(props["inHours"].is_object());
+        assert!(props["atUnix"].is_object());
+        assert!(props["prompt"].is_object());
+    }
+
+    #[test]
+    fn route_dispatches_schedule_task() {
+        let req = json!({
+            "jsonrpc":"2.0","id":7,"method":"tools/call",
+            "params":{"name":"schedule_task","arguments":{"title":"Later","inHours":3}}
+        });
+        let Routed::ScheduleTask { args, .. } = route(&req) else { panic!("expected ScheduleTask") };
+        assert_eq!(args.title.as_deref(), Some("Later"));
+        assert_eq!(args.in_seconds, Some(10_800)); // 3h → 10800s
+    }
+
+    #[test]
+    fn parse_schedule_task_in_seconds_wins_over_in_hours() {
+        let args = parse_schedule_task_args(&json!({"inSeconds": 42, "inHours": 3}));
+        assert_eq!(args.in_seconds, Some(42));
+    }
+
+    #[test]
+    fn parse_schedule_task_reads_at_unix() {
+        let args = parse_schedule_task_args(&json!({"atUnix": 2_000_000_000}));
+        assert_eq!(args.at_unix, Some(2_000_000_000));
+        assert_eq!(args.in_seconds, None);
+    }
+
+    #[test]
+    fn parse_schedule_task_reads_model() {
+        // TASK-223: model flows to the deferred launch's schedule row.
+        let args = parse_schedule_task_args(&json!({"title": "Later", "model": "opus"}));
+        assert_eq!(args.model.as_deref(), Some("opus"));
+        assert_eq!(parse_schedule_task_args(&json!({"title": "Later"})).model, None);
+    }
+
+    // ── TASK-190: send_task_message ────────────────────────────────────────
+
+    #[test]
+    fn tools_list_advertises_send_task_message() {
+        let result = tools_list_result();
+        let tool = result["tools"]
+            .as_array().unwrap()
+            .iter()
+            .find(|t| t["name"] == "send_task_message").unwrap();
+        let props = &tool["inputSchema"]["properties"];
+        assert!(props["taskId"].is_object());
+        assert!(props["message"].is_object());
+        let required: Vec<&str> = tool["inputSchema"]["required"]
+            .as_array().unwrap()
+            .iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required.contains(&"taskId"));
+        assert!(required.contains(&"message"));
+    }
+
+    #[test]
+    fn route_dispatches_send_task_message() {
+        let req = json!({
+            "jsonrpc":"2.0","id":8,"method":"tools/call",
+            "params":{"name":"send_task_message","arguments":{"taskId":"t1","message":"keep going"}}
+        });
+        let Routed::SendTaskMessage { task_id, message, .. } = route(&req)
+            else { panic!("expected SendTaskMessage") };
+        assert_eq!(task_id, "t1");
+        assert_eq!(message, "keep going");
+    }
+
+    #[test]
+    fn route_send_task_message_missing_task_id_is_invalid_params() {
+        let req = json!({
+            "jsonrpc":"2.0","id":9,"method":"tools/call",
+            "params":{"name":"send_task_message","arguments":{"message":"hi"}}
+        });
+        let Routed::Respond(resp) = route(&req) else { panic!("expected Respond") };
+        assert_eq!(resp["error"]["code"], -32602);
+        assert!(resp["error"]["message"].as_str().unwrap().contains("taskId"));
+    }
+
+    #[test]
+    fn route_send_task_message_missing_message_is_invalid_params() {
+        let req = json!({
+            "jsonrpc":"2.0","id":10,"method":"tools/call",
+            "params":{"name":"send_task_message","arguments":{"taskId":"t1"}}
+        });
+        let Routed::Respond(resp) = route(&req) else { panic!("expected Respond") };
+        assert_eq!(resp["error"]["code"], -32602);
+        assert!(resp["error"]["message"].as_str().unwrap().contains("message"));
+    }
+
+    #[test]
+    fn send_task_message_response_formats_success_and_error() {
+        let ok = send_task_message_response(json!(11), Ok("delivered to task t1".into()));
+        assert_eq!(ok["result"]["isError"], false);
+        assert!(ok["result"]["content"][0]["text"].as_str().unwrap().contains("delivered"));
+        let err = send_task_message_response(
+            json!(12),
+            Err("no running agent for task t1 — start or resume it first".into()),
+        );
+        assert_eq!(err["result"]["isError"], true);
+        assert!(err["result"]["content"][0]["text"].as_str().unwrap().contains("no running agent"));
     }
 }

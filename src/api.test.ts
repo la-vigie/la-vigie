@@ -77,13 +77,17 @@ describe("createTask", () => {
     const result = await createTask("repo-1", "My task", "main");
 
     expect(invokeMock).toHaveBeenCalledWith("create_task", {
-      repoId: "repo-1",
-      title: "My task",
-      baseBranch: "main",
-      ticketKey: null,
-      agent: null,
-      model: null,
-      autoApprove: null,
+      args: {
+        repoId: "repo-1",
+        title: "My task",
+        baseBranch: "main",
+        ticketKey: null,
+        agent: null,
+        model: null,
+        autoApprove: null,
+        inPlace: false,
+        branchName: null,
+      },
     });
     expect(result).toEqual({ id: "t1" });
   });
@@ -421,9 +425,15 @@ describe("agent management api wrappers", () => {
   it("createTask forwards agent (null when omitted)", async () => {
     invokeMock.mockResolvedValue({ id: "t1" });
     await createTask("repo-1", "My task", undefined, undefined, "aider");
-    expect(invokeMock).toHaveBeenCalledWith("create_task", expect.objectContaining({ agent: "aider" }));
+    expect(invokeMock).toHaveBeenCalledWith(
+      "create_task",
+      expect.objectContaining({ args: expect.objectContaining({ agent: "aider" }) }),
+    );
     await createTask("repo-1", "My task");
-    expect(invokeMock).toHaveBeenCalledWith("create_task", expect.objectContaining({ agent: null }));
+    expect(invokeMock).toHaveBeenCalledWith(
+      "create_task",
+      expect.objectContaining({ args: expect.objectContaining({ agent: null }) }),
+    );
   });
 });
 

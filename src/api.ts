@@ -64,10 +64,31 @@ export type RemoteSession = {
   id: string;
   kind: string;
   idleSecs: number;
+  // Repo the session is scoped to (TASK-180 orchestrator). Absent for the legacy
+  // global concierge session.
+  repoId?: string;
 };
 
 export function listRemoteSessions(): Promise<RemoteSession[]> {
   return invoke("list_remote_sessions");
+}
+
+/** Spawn (or reveal) the per-repo orchestrator session for `repoId` (TASK-180). */
+export function openOrchestrator(repoId: string): Promise<void> {
+  return invoke("open_orchestrator", { repoId });
+}
+
+/**
+ * Open (or resume) the per-repo orchestrator session bound to a frontend
+ * terminal channel, so the desktop can render + drive it (TASK-126). Returns the
+ * backend agent id for write/resize/stop. Distinct from `openOrchestrator`,
+ * which spawns the session sink-drained for the mobile/remote path.
+ */
+export function openOrchestratorTerminal(
+  repoId: string,
+  onEvent: Channel<PtyEvent>,
+): Promise<string> {
+  return invoke("open_orchestrator_terminal", { repoId, onEvent });
 }
 
 export function addRepo(path: string): Promise<Repo> {
@@ -86,6 +107,7 @@ export function updateRepo(
   fetchRemoteBase: boolean | null = null,
   defaultAgent: string | null = null,
   autoApprove: boolean | null = null,
+  inPlaceDefault = false,
 ): Promise<Repo> {
   return invoke("update_repo", {
     repoId,
@@ -99,6 +121,7 @@ export function updateRepo(
     fetchRemoteBase,
     defaultAgent,
     autoApprove,
+    inPlaceDefault,
   });
 }
 
@@ -151,15 +174,21 @@ export function createTask(
   agent?: string,
   model?: string | null,
   autoApprove: boolean | null = null,
+  inPlace = false,
+  branchName: string | null = null,
 ): Promise<Task> {
   return invoke("create_task", {
-    repoId,
-    title,
-    baseBranch: baseBranch ?? null,
-    ticketKey: ticketKey ?? null,
-    agent: agent ?? null,
-    model: model ?? null,
-    autoApprove: autoApprove ?? null,
+    args: {
+      repoId,
+      title,
+      baseBranch: baseBranch ?? null,
+      ticketKey: ticketKey ?? null,
+      agent: agent ?? null,
+      model: model ?? null,
+      autoApprove: autoApprove ?? null,
+      inPlace,
+      branchName: branchName ?? null,
+    },
   });
 }
 
@@ -325,12 +354,25 @@ export function onSetupStatus(
 }
 
 export function onTaskLaunched(
-  cb: (e: { taskId: string; initialPrompt?: string | null }) => void,
+  cb: (e: {
+    taskId: string;
+    initialPrompt?: string | null;
+    // TASK-181: scheduler sets this to skip prepending the repo prompt at fire time.
+    skipRepoPrompt?: boolean;
+  }) => void,
 ): Promise<UnlistenFn> {
-  return listen<{ taskId: string; initialPrompt?: string | null }>(
+  return listen<{ taskId: string; initialPrompt?: string | null; skipRepoPrompt?: boolean }>(
     "task_launched",
     (event) => cb(event.payload),
   );
+}
+
+// TASK-204: the user picked a task from the system-tray menu. Rust has already
+// brought the window to the front; the payload names which task to select.
+export function onTraySelectTask(
+  cb: (e: { taskId: string }) => void,
+): Promise<UnlistenFn> {
+  return listen<{ taskId: string }>("tray_select_task", (event) => cb(event.payload));
 }
 
 export type WebviewDropPayload =
@@ -540,4 +582,101 @@ export function listTaskDocs(taskId: string): Promise<DocRef[]> {
 
 export function readTaskDoc(taskId: string, id: string): Promise<string> {
   return invoke("read_task_doc", { taskId, id });
+}
+
+// ── Schedule API wrappers (TASK-173) ──────────────────────────────────────────
+
+export interface Schedule {
+  id: string;
+  repoId: string;
+  name: string;
+  prompt: string;
+  cron: string;
+  agent: string | null;
+  model: string | null;
+  baseBranch: string | null;
+  enabled: boolean;
+  oneShot: boolean;
+  /// TASK-181: skip prepending the repo's initial prompt when this schedule fires.
+  skipRepoPrompt: boolean;
+  nextRunAt: number | null;
+  lastRunAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export function listSchedules(repoId: string): Promise<Schedule[]> {
+  return invoke("list_schedules", { repoId });
+}
+
+export function createSchedule(input: {
+  repoId: string;
+  name: string;
+  prompt: string;
+  cron: string;
+  agent?: string | null;
+  model?: string | null;
+  baseBranch?: string | null;
+  skipRepoPrompt?: boolean;
+}): Promise<Schedule> {
+  return invoke("create_schedule", {
+    repoId: input.repoId,
+    name: input.name,
+    prompt: input.prompt,
+    cron: input.cron,
+    agent: input.agent ?? null,
+    model: input.model ?? null,
+    baseBranch: input.baseBranch ?? null,
+    skipRepoPrompt: input.skipRepoPrompt ?? null,
+  });
+}
+
+export function createOneShotSchedule(input: {
+  repoId: string;
+  name: string;
+  prompt: string;
+  inSeconds?: number | null;
+  atUnix?: number | null;
+  agent?: string | null;
+  model?: string | null;
+  baseBranch?: string | null;
+  skipRepoPrompt?: boolean;
+}): Promise<Schedule> {
+  return invoke("create_one_shot_schedule", {
+    repoId: input.repoId,
+    name: input.name,
+    prompt: input.prompt,
+    inSeconds: input.inSeconds ?? null,
+    atUnix: input.atUnix ?? null,
+    agent: input.agent ?? null,
+    model: input.model ?? null,
+    baseBranch: input.baseBranch ?? null,
+    skipRepoPrompt: input.skipRepoPrompt ?? null,
+  });
+}
+
+export function updateSchedule(input: {
+  id: string;
+  name: string;
+  prompt: string;
+  cron: string;
+  agent: string | null;
+  model: string | null;
+  baseBranch: string | null;
+  enabled: boolean;
+  skipRepoPrompt: boolean;
+}): Promise<Schedule> {
+  return invoke("update_schedule", input);
+}
+
+export function setScheduleEnabled(id: string, enabled: boolean): Promise<Schedule> {
+  return invoke("set_schedule_enabled", { id, enabled });
+}
+
+export function deleteSchedule(id: string): Promise<void> {
+  return invoke("delete_schedule", { id });
+}
+
+export function previewNextRun(cron: string): Promise<number> {
+  return invoke("preview_next_run", { cron });
 }

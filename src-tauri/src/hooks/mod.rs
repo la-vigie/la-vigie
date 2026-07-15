@@ -18,6 +18,7 @@ use axum::routing::post;
 use axum::Router;
 
 use crate::agent::status::{apply_event, to_task_status, StatusEvent};
+use crate::session::question::PendingQuestion;
 use crate::state::AppState;
 use crate::teardown::TeardownOutcome;
 
@@ -127,6 +128,10 @@ pub trait StatusSink: Send + Sync + 'static {
     /// Implementations resolve `agent_id → task_id` and store `task_id → path`;
     /// no-op for an unknown agent id.
     fn set_transcript(&self, agent_id: &str, transcript_path: &str);
+    /// Store (or clear, with `None`) the pending `AskUserQuestion` for
+    /// `agent_id`'s task (TASK-122). Implementations resolve `agent_id → task_id`;
+    /// no-op for an unknown agent id.
+    fn set_pending_question(&self, agent_id: &str, question: Option<PendingQuestion>);
 }
 
 /// Boxed future returned by [`TaskTeardown::teardown`]. Written by hand (rather
@@ -231,6 +236,10 @@ impl StatusSink for TauriSink {
                 status: new_state,
             },
         );
+
+        // 4. TASK-204: refresh the tray so its status glyphs track the transition.
+        //    `apply_event` returned Some only on a real change, so this is bounded.
+        crate::tray::refresh(&self.app);
     }
 
     fn emit_console(&self, agent_id: &str, console: ConsoleStatus) {
@@ -288,6 +297,29 @@ impl StatusSink for TauriSink {
             .lock()
             .map(|mut map| map.insert(task_id, transcript_path.to_string()));
     }
+
+    fn set_pending_question(&self, agent_id: &str, question: Option<PendingQuestion>) {
+        use tauri::Manager as _;
+        // Resolve the agent's own task; unknown id → no-op.
+        let task_id = self.app.state::<AppState>()
+            .agent_tasks
+            .lock()
+            .ok()
+            .and_then(|m| m.get(agent_id).cloned());
+        let Some(task_id) = task_id else { return };
+        // Set (Some) or clear (None). Mutex-safe: lock → mutate → drop guard.
+        let _ = self.app.state::<AppState>()
+            .pending_questions
+            .lock()
+            .map(|mut map| match question {
+                Some(q) => {
+                    map.insert(task_id, q);
+                }
+                None => {
+                    map.remove(&task_id);
+                }
+            });
+    }
 }
 
 impl TaskTeardown for TauriSink {
@@ -331,6 +363,8 @@ struct HookBody {
     hook_event_name: Option<String>,
     notification_type: Option<String>,
     transcript_path: Option<String>,
+    tool_name: Option<String>,
+    tool_input: Option<serde_json::Value>,
 }
 
 /// `POST /hook/:agent_id` — receive a hook payload and (maybe) emit a status.
@@ -342,9 +376,28 @@ async fn hook_handler(
 ) -> axum::http::StatusCode {
     // Best-effort parse — ignore malformed bodies entirely.
     if let Ok(parsed) = serde_json::from_slice::<HookBody>(&body) {
-        if let Some(event) = parsed.hook_event_name.as_deref() {
+        let is_ask = parsed.hook_event_name.as_deref() == Some("PreToolUse")
+            && parsed.tool_name.as_deref() == Some("AskUserQuestion");
+        if is_ask {
+            // TASK-122: a structured question is awaiting input. Mark NeedsAttention
+            // (not the usual PreToolUse → Working) and capture the choices.
+            let questions = parsed
+                .tool_input
+                .as_ref()
+                .map(crate::session::question::parse_questions)
+                .unwrap_or_default();
+            sink.record(&agent_id, StatusEvent::NeedsAttention);
+            sink.set_pending_question(&agent_id, Some(PendingQuestion { questions }));
+        } else if let Some(event) = parsed.hook_event_name.as_deref() {
             if let Some(status_event) = claude_event(event, parsed.notification_type.as_deref()) {
                 sink.record(&agent_id, status_event);
+                // Clear a stale card only when the agent has moved PAST the question
+                // (Working/Idle/Failed/subagent). Never clear on NeedsAttention: an
+                // AskUserQuestion also surfaces an `elicitation_dialog` Notification
+                // (→ NeedsAttention) that would otherwise wipe the card we just set.
+                if status_event != StatusEvent::NeedsAttention {
+                    sink.set_pending_question(&agent_id, None);
+                }
             }
         }
         if let Some(path) = parsed.transcript_path.as_deref() {
@@ -523,6 +576,7 @@ mod tests {
         consoles: Mutex<Vec<(String, ConsoleStatus)>>,
         renames: Mutex<Vec<(String, String)>>,
         transcripts: Mutex<Vec<(String, String)>>,
+        pending: Mutex<Vec<(String, Option<PendingQuestion>)>>,
         /// What `set_task_name` returns — models "task found" (true) vs an unknown
         /// task_id (false → the handler 404s). Defaults to true via `new`.
         rename_result: bool,
@@ -539,6 +593,7 @@ mod tests {
                 consoles: Mutex::new(Vec::new()),
                 renames: Mutex::new(Vec::new()),
                 transcripts: Mutex::new(Vec::new()),
+                pending: Mutex::new(Vec::new()),
                 rename_result,
             })
         }
@@ -558,6 +613,10 @@ mod tests {
         fn collected_transcripts(&self) -> Vec<(String, String)> {
             self.transcripts.lock().unwrap().clone()
         }
+
+        fn collected_pending(&self) -> Vec<(String, Option<PendingQuestion>)> {
+            self.pending.lock().unwrap().clone()
+        }
     }
 
     impl StatusSink for CollectingSink {
@@ -576,6 +635,10 @@ mod tests {
 
         fn set_transcript(&self, agent_id: &str, transcript_path: &str) {
             self.transcripts.lock().unwrap().push((agent_id.to_string(), transcript_path.to_string()));
+        }
+
+        fn set_pending_question(&self, agent_id: &str, question: Option<PendingQuestion>) {
+            self.pending.lock().unwrap().push((agent_id.to_string(), question));
         }
     }
 
@@ -764,6 +827,53 @@ mod tests {
 
         assert_eq!(status, axum::http::StatusCode::OK);
         assert!(sink.collected().is_empty());
+    }
+
+    // ── TASK-122: AskUserQuestion detection ────────────────────────────────────
+
+    #[tokio::test]
+    async fn ask_user_question_sets_pending_and_needs_attention() {
+        let sink = CollectingSink::new();
+        let router = make_router(Arc::clone(&sink) as Arc<dyn StatusSink>);
+        let body = r#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Q?","header":"H","options":[{"label":"A","description":""},{"label":"B","description":""}],"multiSelect":false}]}}"#;
+        let status = post_hook(&router, "/hook/agent-q", body).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(sink.collected(), vec![("agent-q".to_string(), StatusEvent::NeedsAttention)]);
+        let pending = sink.collected_pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, "agent-q");
+        assert_eq!(pending[0].1.as_ref().unwrap().questions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn non_ask_pretooluse_is_working_and_clears_pending() {
+        let sink = CollectingSink::new();
+        let router = make_router(Arc::clone(&sink) as Arc<dyn StatusSink>);
+        let body = r#"{"hook_event_name":"PreToolUse","tool_name":"Read"}"#;
+        post_hook(&router, "/hook/agent-q", body).await;
+        assert_eq!(sink.collected(), vec![("agent-q".to_string(), StatusEvent::Working)]);
+        assert_eq!(sink.collected_pending(), vec![("agent-q".to_string(), None)]);
+    }
+
+    #[tokio::test]
+    async fn stop_clears_pending() {
+        let sink = CollectingSink::new();
+        let router = make_router(Arc::clone(&sink) as Arc<dyn StatusSink>);
+        post_hook(&router, "/hook/agent-q", r#"{"hook_event_name":"Stop"}"#).await;
+        assert_eq!(sink.collected_pending(), vec![("agent-q".to_string(), None)]);
+    }
+
+    #[tokio::test]
+    async fn needs_attention_notification_does_not_clear_pending() {
+        // An AskUserQuestion also surfaces an `elicitation_dialog` Notification
+        // (→ NeedsAttention). It records the status but must NOT clear the card the
+        // PreToolUse just set, or the question would vanish before it's answered.
+        let sink = CollectingSink::new();
+        let router = make_router(Arc::clone(&sink) as Arc<dyn StatusSink>);
+        let body = r#"{"hook_event_name":"Notification","notification_type":"elicitation_dialog"}"#;
+        post_hook(&router, "/hook/agent-q", body).await;
+        assert_eq!(sink.collected(), vec![("agent-q".to_string(), StatusEvent::NeedsAttention)]);
+        assert!(sink.collected_pending().is_empty(), "NeedsAttention must not clear the pending question");
     }
 
     // ── sanitize_task_name ────────────────────────────────────────────────────

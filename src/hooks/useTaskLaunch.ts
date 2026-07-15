@@ -13,18 +13,20 @@ export function useTaskLaunch(): void {
     const unlisteners: Array<() => void> = [];
 
     const setup = async () => {
-      const off = await onTaskLaunched(async ({ taskId, initialPrompt }) => {
+      const off = await onTaskLaunched(async ({ taskId, initialPrompt, skipRepoPrompt }) => {
         const { refresh, setSelectedTask, startAgentSession } = useVigieStore.getState();
         await refresh();
         const { tasks, repos } = useVigieStore.getState();
         const task = tasks.find((t) => t.id === taskId);
         const repo = task ? repos.find((r) => r.id === task.repoId) : undefined;
         setSelectedTask(taskId);
+        // TASK-181: a schedule (or other emitter) can ask to skip the repo prompt,
+        // reusing TASK-160's combineInitialPrompts(null, …) skip path.
         startAgentSession(
           taskId,
           false,
           undefined,
-          combineInitialPrompts(repo?.initialPrompt, initialPrompt),
+          combineInitialPrompts(skipRepoPrompt ? null : repo?.initialPrompt, initialPrompt),
         );
       });
       if (cancelled) {

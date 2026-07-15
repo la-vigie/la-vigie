@@ -13,6 +13,17 @@ interface Props {
 const advertisesModels = (s: AgentSpec | undefined) =>
   !!(s?.modelsListArgs && s.modelsListArgs.length > 0);
 
+// An agent takes a model if it can enumerate one (list picker) or merely accepts
+// a `--model` flag (free-text entry). TASK-209: Claude Code is the latter.
+const takesModel = (s: AgentSpec | undefined) => advertisesModels(s) || !!s?.modelArg;
+
+// Advisory quick-pick suggestions for free-text engines, keyed by agent name.
+// Non-binding hints only — free-text stays authoritative — so a stale/missing
+// entry is harmless. Claude's tier aliases are stable across model releases.
+const MODEL_SUGGESTIONS: Record<string, readonly string[]> = {
+  claude: ["opus", "sonnet", "haiku"],
+};
+
 export function AgentModelPicker({ agent, model, onChange }: Props) {
   const { agents } = useAgents();
   const [open, setOpen] = useState(false);
@@ -26,6 +37,12 @@ export function AgentModelPicker({ agent, model, onChange }: Props) {
   const current = agents.find((a) => a.name === agent);
   const hoveredSpec = agents.find((a) => a.name === hovered);
   const { models } = useAgentModels(advertisesModels(hoveredSpec) ? hovered : undefined);
+  // Free-text draft for engines that take `--model` but can't enumerate models.
+  // Seeded from the current model when the hovered agent is the current one.
+  const [draft, setDraft] = useState("");
+  useEffect(() => {
+    setDraft(hovered === agent ? (model ?? "") : "");
+  }, [hovered, agent, model, open]);
 
   const triggerLabel = current?.displayName ?? agent;
 
@@ -83,8 +100,8 @@ export function AgentModelPicker({ agent, model, onChange }: Props) {
   }
 
   function pickAgent(spec: AgentSpec) {
-    if (advertisesModels(spec)) {
-      setHovered(spec.name); // reveal its model pane; await a model click
+    if (takesModel(spec)) {
+      setHovered(spec.name); // reveal its model pane (list or free-text); await a pick
     } else {
       onChange(spec.name, null);
       setOpen(false);
@@ -93,6 +110,13 @@ export function AgentModelPicker({ agent, model, onChange }: Props) {
 
   function pickModel(id: string) {
     onChange(hovered, id);
+    setOpen(false);
+  }
+
+  // Commit a free-text model id for the hovered agent. Blank ⇒ unset (default).
+  function commitModel(id: string) {
+    const trimmed = id.trim();
+    onChange(hovered, trimmed === "" ? null : trimmed);
     setOpen(false);
   }
 
@@ -129,7 +153,7 @@ export function AgentModelPicker({ agent, model, onChange }: Props) {
                 onClick={() => pickAgent(a)}
               >
                 {a.displayName}
-                {advertisesModels(a) && <span className="amp__chevron" aria-hidden>›</span>}
+                {takesModel(a) && <span className="amp__chevron" aria-hidden>›</span>}
                 {a.name === agent && <span className="amp__check" aria-hidden>✓</span>}
               </li>
             ))}
@@ -157,6 +181,49 @@ export function AgentModelPicker({ agent, model, onChange }: Props) {
                 </li>
               )}
             </ul>
+          )}
+          {!advertisesModels(hoveredSpec) && takesModel(hoveredSpec) && (
+            <div className="amp__models amp__freetext">
+              <div className="amp__models-head">MODEL</div>
+              <input
+                className="amp__model-input"
+                data-testid="amp-model-input"
+                value={draft}
+                placeholder="model id (e.g. opus)"
+                autoFocus
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    commitModel(draft);
+                  }
+                }}
+              />
+              {(MODEL_SUGGESTIONS[hovered] ?? []).length > 0 && (
+                <div className="amp__chips">
+                  {(MODEL_SUGGESTIONS[hovered] ?? []).map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      className={"amp__chip" + (s === model ? " is-selected" : "")}
+                      onClick={() => commitModel(s)}
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <button type="button" className="amp__model-set" onClick={() => commitModel(draft)}>
+                Set model
+              </button>
+              <div
+                className={"amp__model-row amp__default-row" + (hovered === agent && model === null ? " is-selected" : "")}
+                onClick={() => commitModel("")}
+              >
+                Default model
+                {hovered === agent && model === null && <span className="amp__check" aria-hidden>✓</span>}
+              </div>
+            </div>
           )}
         </div>,
         document.body,

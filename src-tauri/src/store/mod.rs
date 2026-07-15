@@ -27,6 +27,8 @@ pub struct Repo {
     pub sound_settings: Option<String>,
     pub fetch_remote_base: Option<bool>,
     pub auto_approve: Option<bool>,
+    /// TASK-163: default for the New-Task "work in place" checkbox in this repo.
+    pub in_place_default: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -62,6 +64,42 @@ pub struct Task {
     /// (TASK-90). None for normal tasks.
     pub pending_prompt: Option<String>,
     pub auto_approve: Option<bool>,
+    /// TASK-163: this task runs in the repo's existing checkout (`worktree_path`
+    /// == repo path) instead of an isolated worktree. Gates teardown so the
+    /// shared checkout is never `git worktree remove`d.
+    pub in_place: bool,
+}
+
+/// A repo-scoped recurring schedule: on `cron`, launch a task in `repo_id`
+/// whose initial prompt is `prompt` (typically a repo skill like `/security-scan`).
+/// TASK-173.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Schedule {
+    pub id: String,
+    pub repo_id: String,
+    pub name: String,
+    pub prompt: String,
+    pub cron: String,
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub base_branch: Option<String>,
+    /// A one-time (non-recurring) schedule: fires once at `next_run_at`, then
+    /// the poller retires it (enabled=false, next_run_at=NULL). One-shot rows
+    /// carry an empty `cron` (never cron-parsed). TASK-179.
+    pub one_shot: bool,
+    /// Skip prepending the repo's `initial_prompt` when this schedule fires
+    /// (TASK-181). Defaults to `true` — a scheduled run's prompt is usually
+    /// self-contained (e.g. `/security-scan`), so the repo's interactive-onboarding
+    /// prompt is noise. Routed into TASK-160's `combineInitialPrompts(null, …)` skip
+    /// path via the `task_launched` event.
+    pub skip_repo_prompt: bool,
+    pub enabled: bool,
+    /// Next fire time (unix seconds). `None` ⇒ never fires (e.g. disabled).
+    pub next_run_at: Option<i64>,
+    pub last_run_at: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -203,6 +241,24 @@ impl TaskStore {
                 depends_on_task_id TEXT NOT NULL,
                 PRIMARY KEY (task_id, depends_on_task_id)
             );
+
+            CREATE TABLE IF NOT EXISTS schedules (
+                id           TEXT PRIMARY KEY,
+                repo_id      TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+                name         TEXT NOT NULL,
+                prompt       TEXT NOT NULL,
+                cron         TEXT NOT NULL,
+                agent        TEXT,
+                model        TEXT,
+                base_branch  TEXT,
+                enabled      INTEGER NOT NULL DEFAULT 1,
+                one_shot     INTEGER NOT NULL DEFAULT 0,
+                skip_repo_prompt INTEGER NOT NULL DEFAULT 1,
+                next_run_at  INTEGER,
+                last_run_at  INTEGER,
+                created_at   INTEGER NOT NULL,
+                updated_at   INTEGER NOT NULL
+            );
             ",
         )
         .context("creating schema")?;
@@ -250,6 +306,36 @@ impl TaskStore {
         if !existing.contains("auto_approve") {
             conn.execute("ALTER TABLE tasks ADD COLUMN auto_approve INTEGER", [])
                 .context("adding tasks.auto_approve column")?;
+        }
+        if !existing.contains("in_place") {
+            conn.execute("ALTER TABLE tasks ADD COLUMN in_place INTEGER NOT NULL DEFAULT 0", [])
+                .context("adding tasks.in_place column")?;
+        }
+
+        // TASK-179: add the one_shot column to schedules tables created before it.
+        let sched_cols: std::collections::HashSet<String> = conn
+            .prepare("PRAGMA table_info(schedules)")
+            .context("reading schedules table_info")?
+            .query_map([], |row| row.get::<_, String>(1))
+            .context("querying schedules columns")?
+            .collect::<rusqlite::Result<_>>()
+            .context("collecting schedules columns")?;
+        if !sched_cols.contains("one_shot") {
+            conn.execute(
+                "ALTER TABLE schedules ADD COLUMN one_shot INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .context("adding one_shot column")?;
+        }
+        // TASK-181: skip-repo-prompt flag on schedules created before it. Default 1
+        // (skip) — matches the new-schedule default; a one-time behavior change for
+        // pre-existing schedules that relied on the repo prompt being prepended.
+        if !sched_cols.contains("skip_repo_prompt") {
+            conn.execute(
+                "ALTER TABLE schedules ADD COLUMN skip_repo_prompt INTEGER NOT NULL DEFAULT 1",
+                [],
+            )
+            .context("adding skip_repo_prompt column")?;
         }
 
         // Migrate repos DBs created before the worktree_root column existed.
@@ -299,6 +385,13 @@ impl TaskStore {
             conn.execute("ALTER TABLE repos ADD COLUMN auto_approve INTEGER", [])
                 .context("adding repos.auto_approve column")?;
         }
+        if !repo_cols.contains("in_place_default") {
+            conn.execute(
+                "ALTER TABLE repos ADD COLUMN in_place_default INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .context("adding repos.in_place_default column")?;
+        }
 
         // Migrate agents table: add model columns if missing.
         let agent_cols: std::collections::HashSet<String> = conn
@@ -325,8 +418,8 @@ impl TaskStore {
     pub fn insert_repo(&self, repo: &Repo) -> Result<()> {
         self.conn
             .execute(
-                "INSERT INTO repos (id, name, path, default_branch, remote_url, worktree_root, setup_command, default_agent, auto_start_agent, initial_prompt, default_model, sound_settings, fetch_remote_base, auto_approve)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                "INSERT INTO repos (id, name, path, default_branch, remote_url, worktree_root, setup_command, default_agent, auto_start_agent, initial_prompt, default_model, sound_settings, fetch_remote_base, auto_approve, in_place_default)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     repo.id,
                     repo.name,
@@ -342,6 +435,7 @@ impl TaskStore {
                     repo.sound_settings,
                     repo.fetch_remote_base,
                     repo.auto_approve,
+                    repo.in_place_default,
                 ],
             )
             .context("inserting repo")?;
@@ -352,7 +446,7 @@ impl TaskStore {
         let repo = self
             .conn
             .query_row(
-                "SELECT id, name, path, default_branch, remote_url, worktree_root, setup_command, default_agent, auto_start_agent, initial_prompt, default_model, sound_settings, fetch_remote_base, auto_approve
+                "SELECT id, name, path, default_branch, remote_url, worktree_root, setup_command, default_agent, auto_start_agent, initial_prompt, default_model, sound_settings, fetch_remote_base, auto_approve, in_place_default
                  FROM repos WHERE id = ?1",
                 params![id],
                 Self::row_to_repo,
@@ -365,7 +459,7 @@ impl TaskStore {
     pub fn list_repos(&self) -> Result<Vec<Repo>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, name, path, default_branch, remote_url, worktree_root, setup_command, default_agent, auto_start_agent, initial_prompt, default_model, sound_settings, fetch_remote_base, auto_approve FROM repos")
+            .prepare("SELECT id, name, path, default_branch, remote_url, worktree_root, setup_command, default_agent, auto_start_agent, initial_prompt, default_model, sound_settings, fetch_remote_base, auto_approve, in_place_default FROM repos")
             .context("preparing list_repos")?;
         let rows = stmt
             .query_map([], Self::row_to_repo)
@@ -428,6 +522,27 @@ impl TaskStore {
             )
             .context("setting app setting")?;
         Ok(())
+    }
+
+    pub fn delete_app_setting(&self, key: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM app_settings WHERE key = ?1", params![key])
+            .context("deleting app setting")?;
+        Ok(())
+    }
+
+    /// List every key in `app_settings` (TASK-180: startup orchestrator-marker
+    /// prune diffs these against the live repo ids).
+    pub fn list_app_setting_keys(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key FROM app_settings")
+            .context("preparing list_app_setting_keys")?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .context("querying app setting keys")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting app setting keys")
     }
 
     // ---- Prompts ----
@@ -535,6 +650,20 @@ impl TaskStore {
         Ok(())
     }
 
+    pub fn set_repo_in_place_default(&self, repo_id: &str, value: bool) -> Result<()> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE repos SET in_place_default = ?2 WHERE id = ?1",
+                params![repo_id, value],
+            )
+            .context("updating repo in_place_default")?;
+        if n == 0 {
+            anyhow::bail!("repo not found: {repo_id}");
+        }
+        Ok(())
+    }
+
     fn row_to_repo(row: &rusqlite::Row) -> rusqlite::Result<Repo> {
         Ok(Repo {
             id: row.get(0)?,
@@ -551,6 +680,7 @@ impl TaskStore {
             sound_settings: row.get(11)?,
             fetch_remote_base: row.get(12)?,
             auto_approve: row.get(13)?,
+            in_place_default: row.get(14)?,
         })
     }
 
@@ -644,6 +774,7 @@ impl TaskStore {
                     .map(|s| serde_json::from_str(&s).context("decoding models_list_args"))
                     .transpose()?,
                 builtin: false,
+                skill_injection: crate::agent::spec::SkillInjection::None,
             })
         };
         Ok(parse())
@@ -654,8 +785,8 @@ impl TaskStore {
     pub fn insert_task(&self, task: &Task) -> Result<()> {
         self.conn
             .execute(
-                "INSERT INTO tasks (id, repo_id, title, worktree_path, branch, base_branch, status, created_at, updated_at, pr_number, pr_url, ticket_key, agent, model, setup_status, hidden, pending_prompt, auto_approve)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                "INSERT INTO tasks (id, repo_id, title, worktree_path, branch, base_branch, status, created_at, updated_at, pr_number, pr_url, ticket_key, agent, model, setup_status, hidden, pending_prompt, auto_approve, in_place)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
                 params![
                     task.id,
                     task.repo_id,
@@ -675,6 +806,7 @@ impl TaskStore {
                     task.hidden,
                     task.pending_prompt,
                     task.auto_approve,
+                    task.in_place,
                 ],
             )
             .context("inserting task")?;
@@ -685,7 +817,7 @@ impl TaskStore {
         let task = self
             .conn
             .query_row(
-                "SELECT id, repo_id, title, worktree_path, branch, base_branch, status, created_at, updated_at, pr_number, pr_url, ticket_key, agent, model, setup_status, hidden, pending_prompt, auto_approve
+                "SELECT id, repo_id, title, worktree_path, branch, base_branch, status, created_at, updated_at, pr_number, pr_url, ticket_key, agent, model, setup_status, hidden, pending_prompt, auto_approve, in_place
                  FROM tasks WHERE id = ?1",
                 params![id],
                 Self::row_to_task,
@@ -699,7 +831,7 @@ impl TaskStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, repo_id, title, worktree_path, branch, base_branch, status, created_at, updated_at, pr_number, pr_url, ticket_key, agent, model, setup_status, hidden, pending_prompt, auto_approve
+                "SELECT id, repo_id, title, worktree_path, branch, base_branch, status, created_at, updated_at, pr_number, pr_url, ticket_key, agent, model, setup_status, hidden, pending_prompt, auto_approve, in_place
                  FROM tasks",
             )
             .context("preparing list_tasks")?;
@@ -717,7 +849,7 @@ impl TaskStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, repo_id, title, worktree_path, branch, base_branch, status, created_at, updated_at, pr_number, pr_url, ticket_key, agent, model, setup_status, hidden, pending_prompt, auto_approve
+                "SELECT id, repo_id, title, worktree_path, branch, base_branch, status, created_at, updated_at, pr_number, pr_url, ticket_key, agent, model, setup_status, hidden, pending_prompt, auto_approve, in_place
                  FROM tasks WHERE repo_id = ?1",
             )
             .context("preparing list_tasks_for_repo")?;
@@ -906,6 +1038,24 @@ impl TaskStore {
         Ok(out)
     }
 
+    /// The `depends_on_task_id`s `task_id` is still queued behind (its unmet
+    /// blockers). Mirror of `dependents_of`; used to describe a pending task's
+    /// outstanding blockers to the UI (TASK-177).
+    pub fn blockers_of(&self, task_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ?1")
+            .context("preparing blockers_of")?;
+        let rows = stmt
+            .query_map(params![task_id], |row| row.get::<_, String>(0))
+            .context("querying blockers")?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.context("reading blocker row")?);
+        }
+        Ok(out)
+    }
+
     /// Remove every edge pointing at `dep_id` (its merge satisfies them).
     pub fn remove_dependencies_on(&self, dep_id: &str) -> Result<()> {
         self.conn
@@ -915,6 +1065,42 @@ impl TaskStore {
             )
             .context("removing dependencies on merged task")?;
         Ok(())
+    }
+
+    /// Atomically read every dependent queued on `dep_id` AND remove those edges,
+    /// in a single transaction, returning the dependents captured at removal time.
+    ///
+    /// TASK-182: this is the authoritative promotion set for `promote_dependents_of`.
+    /// Folding the read and the remove into one lock/txn scope means an edge
+    /// inserted by a concurrent `launch_task` (the queue-vs-finish window) is
+    /// either fully seen-and-returned (so it gets promoted) or not yet inserted —
+    /// never removed without being returned. Callers who peeked earlier (a cheap
+    /// early-exit before an `await`) must promote THIS returned set, not the peek.
+    pub fn take_dependents_on(&self, dep_id: &str) -> Result<Vec<String>> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .context("beginning take_dependents_on transaction")?;
+        let dependents = {
+            let mut stmt = tx
+                .prepare("SELECT task_id FROM task_dependencies WHERE depends_on_task_id = ?1")
+                .context("preparing take_dependents_on read")?;
+            let rows = stmt
+                .query_map(params![dep_id], |row| row.get::<_, String>(0))
+                .context("querying dependents to take")?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row.context("reading taken dependent row")?);
+            }
+            out
+        };
+        tx.execute(
+            "DELETE FROM task_dependencies WHERE depends_on_task_id = ?1",
+            params![dep_id],
+        )
+        .context("removing taken dependency edges")?;
+        tx.commit().context("committing take_dependents_on")?;
+        Ok(dependents)
     }
 
     /// Number of unmet dependency edges a task still has (0 ⇒ ready to promote).
@@ -930,14 +1116,178 @@ impl TaskStore {
         Ok(count)
     }
 
+    // ── Schedules (TASK-173) ──────────────────────────────────────────────────
+
+    /// Column list for schedule reads, kept positionally in lockstep with
+    /// `map_schedule_row`'s `row.get(0..=14)`. Shared by every read query so
+    /// the order can't drift between them.
+    const SCHEDULE_COLS: &str = "id, repo_id, name, prompt, cron, agent, model, base_branch, enabled, next_run_at, last_run_at, created_at, updated_at, one_shot, skip_repo_prompt";
+
+    fn map_schedule_row(row: &rusqlite::Row) -> rusqlite::Result<Schedule> {
+        Ok(Schedule {
+            id: row.get(0)?,
+            repo_id: row.get(1)?,
+            name: row.get(2)?,
+            prompt: row.get(3)?,
+            cron: row.get(4)?,
+            agent: row.get(5)?,
+            model: row.get(6)?,
+            base_branch: row.get(7)?,
+            enabled: row.get(8)?,
+            next_run_at: row.get(9)?,
+            last_run_at: row.get(10)?,
+            created_at: row.get(11)?,
+            updated_at: row.get(12)?,
+            one_shot: row.get(13)?,
+            skip_repo_prompt: row.get(14)?,
+        })
+    }
+
+    pub fn insert_schedule(&self, s: &Schedule) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO schedules (id, repo_id, name, prompt, cron, agent, model, base_branch, enabled, next_run_at, last_run_at, created_at, updated_at, one_shot, skip_repo_prompt)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    s.id, s.repo_id, s.name, s.prompt, s.cron, s.agent, s.model, s.base_branch,
+                    s.enabled, s.next_run_at, s.last_run_at, s.created_at, s.updated_at, s.one_shot,
+                    s.skip_repo_prompt
+                ],
+            )
+            .context("inserting schedule")?;
+        Ok(())
+    }
+
+    pub fn list_schedules(&self, repo_id: &str) -> Result<Vec<Schedule>> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {} FROM schedules WHERE repo_id = ?1 ORDER BY created_at ASC",
+                Self::SCHEDULE_COLS
+            ))
+            .context("preparing list_schedules")?;
+        let rows = stmt
+            .query_map(params![repo_id], Self::map_schedule_row)
+            .context("querying schedules")?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.context("reading schedule row")?);
+        }
+        Ok(out)
+    }
+
+    pub fn get_schedule(&self, id: &str) -> Result<Option<Schedule>> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {} FROM schedules WHERE id = ?1",
+                Self::SCHEDULE_COLS
+            ))
+            .context("preparing get_schedule")?;
+        let mut rows = stmt
+            .query_map(params![id], Self::map_schedule_row)
+            .context("querying schedule")?;
+        match rows.next() {
+            Some(r) => Ok(Some(r.context("reading schedule row")?)),
+            None => Ok(None),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_schedule_fields(
+        &self,
+        id: &str,
+        name: &str,
+        prompt: &str,
+        cron: &str,
+        agent: Option<&str>,
+        model: Option<&str>,
+        base_branch: Option<&str>,
+        enabled: bool,
+        skip_repo_prompt: bool,
+        next_run_at: Option<i64>,
+        updated_at: i64,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE schedules SET name = ?1, prompt = ?2, cron = ?3, agent = ?4, model = ?5,
+                 base_branch = ?6, enabled = ?7, skip_repo_prompt = ?8, next_run_at = ?9, updated_at = ?10 WHERE id = ?11",
+                params![name, prompt, cron, agent, model, base_branch, enabled, skip_repo_prompt, next_run_at, updated_at, id],
+            )
+            .context("updating schedule")?;
+        Ok(())
+    }
+
+    pub fn delete_schedule(&self, id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM schedules WHERE id = ?1", params![id])
+            .context("deleting schedule")?;
+        Ok(())
+    }
+
+    pub fn due_schedules(&self, now: i64) -> Result<Vec<Schedule>> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {} FROM schedules
+                 WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?1
+                 ORDER BY next_run_at ASC",
+                Self::SCHEDULE_COLS
+            ))
+            .context("preparing due_schedules")?;
+        let rows = stmt
+            .query_map(params![now], Self::map_schedule_row)
+            .context("querying due schedules")?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.context("reading schedule row")?);
+        }
+        Ok(out)
+    }
+
+    pub fn advance_schedule(
+        &self,
+        id: &str,
+        next_run_at: Option<i64>,
+        last_run_at: i64,
+        updated_at: i64,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE schedules SET next_run_at = ?1, last_run_at = ?2, updated_at = ?3 WHERE id = ?4",
+                params![next_run_at, last_run_at, updated_at, id],
+            )
+            .context("advancing schedule")?;
+        Ok(())
+    }
+
+    /// Retire a one-shot schedule after it has fired: disable it and clear its
+    /// next fire time so it is never re-selected by `due_schedules`, while
+    /// recording when it ran. TASK-179.
+    pub fn retire_schedule(&self, id: &str, last_run_at: i64, updated_at: i64) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE schedules SET enabled = 0, next_run_at = NULL, last_run_at = ?1, updated_at = ?2 WHERE id = ?3",
+                params![last_run_at, updated_at, id],
+            )
+            .context("retiring schedule")?;
+        Ok(())
+    }
+
     /// Maps a row to a `Result<Task>`, where the outer `rusqlite::Result` covers
     /// row-reading errors and the inner `anyhow::Result` covers status parsing.
     fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Result<Task>> {
         let status_str: String = row.get(6)?;
-        let status = match TaskStatus::from_str(&status_str) {
-            Ok(s) => s,
-            Err(e) => return Ok(Err(e)),
-        };
+        // TASK-167: degrade gracefully on an unknown/future TaskStatus (e.g. a
+        // row written by a newer La Vigie sharing this store) instead of failing
+        // the whole list — map it to Idle (harmless render) and log a warning.
+        let status = TaskStatus::from_str(&status_str).unwrap_or_else(|_| {
+            eprintln!(
+                "TASK-167: unknown TaskStatus {status_str:?} in task row {:?}; defaulting to Idle",
+                row.get::<_, String>(0).unwrap_or_default()
+            );
+            TaskStatus::Idle
+        });
         let setup_status = match row.get::<_, Option<String>>(14)? {
             Some(s) => match SetupStatus::from_str(&s) {
                 Ok(v) => Some(v),
@@ -964,6 +1314,7 @@ impl TaskStore {
             hidden: row.get(15)?,
             pending_prompt: row.get(16)?,
             auto_approve: row.get(17)?,
+            in_place: row.get(18)?,
         }))
     }
 }
@@ -996,6 +1347,7 @@ mod tests {
             sound_settings: None,
             fetch_remote_base: None,
             auto_approve: None,
+            in_place_default: false,
         }
     }
 
@@ -1019,6 +1371,7 @@ mod tests {
             hidden: false,
             pending_prompt: None,
             auto_approve: None,
+            in_place: false,
         }
     }
 
@@ -1186,6 +1539,36 @@ mod tests {
 
         let listed = store.list_tasks().unwrap();
         assert_eq!(listed, vec![task]);
+    }
+
+    #[test]
+    fn list_tasks_tolerates_unknown_status_and_keeps_loading() {
+        // TASK-167: a row carrying an unknown/future TaskStatus (e.g. written by a
+        // newer La Vigie sharing this store) must not brick the whole list.
+        let (_dir, store) = open_test_store();
+        store.insert_repo(&sample_repo("repo-1")).unwrap();
+        store.insert_task(&sample_task("task-good", "repo-1")).unwrap();
+        store.insert_task(&sample_task("task-weird", "repo-1")).unwrap();
+
+        // Corrupt one row's status to a value this binary can't parse.
+        store
+            .conn
+            .execute(
+                "UPDATE tasks SET status = 'from_the_future' WHERE id = 'task-weird'",
+                [],
+            )
+            .unwrap();
+
+        let listed = store.list_tasks().unwrap();
+        // The whole list still loads — the unknown row is present, not dropped.
+        assert_eq!(listed.len(), 2);
+        let weird = listed.iter().find(|t| t.id == "task-weird").unwrap();
+        assert_eq!(weird.status, TaskStatus::Idle);
+        let good = listed.iter().find(|t| t.id == "task-good").unwrap();
+        assert_eq!(good.status, TaskStatus::Idle);
+
+        // get_task on the corrupted row degrades gracefully too.
+        assert_eq!(store.get_task("task-weird").unwrap().unwrap().status, TaskStatus::Idle);
     }
 
     #[test]
@@ -1552,6 +1935,7 @@ mod tests {
             model_arg: None,
             models_list_args: None,
             builtin: false,
+            skill_injection: crate::agent::spec::SkillInjection::None,
         }
     }
 
@@ -1618,7 +2002,7 @@ mod tests {
             default_branch: "main".into(), remote_url: None, worktree_root: None,
             setup_command: None, default_agent: None, auto_start_agent: false,
             initial_prompt: None, default_model: None, sound_settings: None, fetch_remote_base: None,
-            auto_approve: None,
+            auto_approve: None, in_place_default: false,
         };
         store.insert_repo(&repo).unwrap();
         assert_eq!(store.get_repo("r1").unwrap().unwrap().sound_settings, None);
@@ -2037,6 +2421,97 @@ mod tests {
         assert!(store.dependents_of("d2").unwrap().is_empty());
     }
 
+    // TASK-182: `promote_dependents_of` must capture its promotion set atomically
+    // with removing the blocker's edges. A dependent edge inserted in the
+    // queue-vs-finish window (a launch queues `waiter → blocker` while the blocker
+    // still exists) must be BOTH returned for promotion AND cleared in the same
+    // step — otherwise the edge is deleted with no promoter (or left dangling once
+    // the blocker row is gone) and the waiter is stranded Pending forever.
+    // `take_dependents_on` folds the read + remove into one transaction; this is
+    // the seam the fixed promote path consumes.
+    #[test]
+    fn take_dependents_on_reads_and_removes_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(&dir.path().join("v.sqlite3")).unwrap();
+        store.insert_repo(&sample_repo("r1")).unwrap();
+        for id in ["blocker", "waiter"] {
+            let mut t = sample_task(id, "r1");
+            t.status = TaskStatus::Pending;
+            store.insert_task(&t).unwrap();
+        }
+        // The waiter is queued behind the blocker (the in-window insert).
+        store.add_task_dependency("waiter", "blocker").unwrap();
+
+        // The returned set is the authoritative promotion list...
+        let promote = store.take_dependents_on("blocker").unwrap();
+        assert_eq!(promote, vec!["waiter".to_string()]);
+        // ...and the edges are gone in the same step, so the waiter is promotable,
+        // never stranded.
+        assert!(store.dependents_of("blocker").unwrap().is_empty());
+        assert_eq!(store.unmet_dependency_count("waiter").unwrap(), 0);
+    }
+
+    // No dependents → empty set, no error (the cheap early-exit case).
+    #[test]
+    fn take_dependents_on_empty_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(&dir.path().join("v.sqlite3")).unwrap();
+        store.insert_repo(&sample_repo("r1")).unwrap();
+        let mut t = sample_task("blocker", "r1");
+        t.status = TaskStatus::Pending;
+        store.insert_task(&t).unwrap();
+        assert!(store.take_dependents_on("blocker").unwrap().is_empty());
+    }
+
+    #[test]
+    fn blockers_of_returns_all_outstanding_blockers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(&dir.path().join("v.sqlite3")).unwrap();
+        store.insert_repo(&sample_repo("r1")).unwrap();
+        for id in ["b1", "b2", "waiter"] {
+            let mut t = sample_task(id, "r1");
+            t.status = TaskStatus::Pending;
+            store.insert_task(&t).unwrap();
+        }
+        store.add_task_dependency("waiter", "b1").unwrap();
+        store.add_task_dependency("waiter", "b2").unwrap();
+
+        let mut blockers = store.blockers_of("waiter").unwrap();
+        blockers.sort();
+        assert_eq!(blockers, vec!["b1".to_string(), "b2".to_string()]);
+        // A task with no edges has no blockers.
+        assert!(store.blockers_of("b1").unwrap().is_empty());
+    }
+
+    // TASK-177: a task queued behind TWO blockers stays not-ready until BOTH
+    // blockers' edges are cleared. This is the exact predicate promote_dependents_of
+    // gates on (unmet_dependency_count == 0). Landing a strict subset must not
+    // make it ready.
+    #[test]
+    fn promotion_gate_requires_all_blockers_landed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(&dir.path().join("v.sqlite3")).unwrap();
+        store.insert_repo(&sample_repo("r1")).unwrap();
+        for id in ["b1", "b2", "waiter"] {
+            let mut t = sample_task(id, "r1");
+            t.status = TaskStatus::Pending;
+            store.insert_task(&t).unwrap();
+        }
+        store.add_task_dependency("waiter", "b1").unwrap();
+        store.add_task_dependency("waiter", "b2").unwrap();
+
+        // Nothing landed yet → not ready.
+        assert_eq!(store.unmet_dependency_count("waiter").unwrap(), 2);
+
+        // First blocker lands (its edges are removed) → strict subset, still NOT ready.
+        store.remove_dependencies_on("b1").unwrap();
+        assert_eq!(store.unmet_dependency_count("waiter").unwrap(), 1);
+
+        // Last blocker lands → ready to promote exactly once.
+        store.remove_dependencies_on("b2").unwrap();
+        assert_eq!(store.unmet_dependency_count("waiter").unwrap(), 0);
+    }
+
     #[test]
     fn promote_task_activates_pending_row() {
         let dir = tempfile::tempdir().unwrap();
@@ -2055,5 +2530,204 @@ mod tests {
         assert_eq!(got.worktree_path, "/wt/t1");
         assert_eq!(got.branch, "task-91-x");
         assert_eq!(got.pending_prompt, None);
+    }
+
+    // ── Schedules (TASK-173) ──────────────────────────────────────────────
+
+    fn sample_schedule(id: &str, repo_id: &str) -> Schedule {
+        Schedule {
+            id: id.to_string(),
+            repo_id: repo_id.to_string(),
+            name: "Weekly scan".to_string(),
+            prompt: "/security-scan".to_string(),
+            cron: "0 7 * * 1".to_string(),
+            agent: None,
+            model: None,
+            base_branch: None,
+            enabled: true,
+            next_run_at: Some(1_000),
+            last_run_at: None,
+            created_at: 10,
+            updated_at: 10,
+            one_shot: false,
+            skip_repo_prompt: true,
+        }
+    }
+
+    #[test]
+    fn schedule_insert_and_list_roundtrip() {
+        let (_tmp, store) = open_test_store();
+        store.insert_repo(&sample_repo("repo-1")).unwrap();
+        store.insert_schedule(&sample_schedule("s1", "repo-1")).unwrap();
+
+        let got = store.list_schedules("repo-1").unwrap();
+        assert_eq!(got, vec![sample_schedule("s1", "repo-1")]);
+    }
+
+    #[test]
+    fn schedule_cascades_on_repo_delete() {
+        let (_tmp, store) = open_test_store();
+        store.insert_repo(&sample_repo("repo-1")).unwrap();
+        store.insert_schedule(&sample_schedule("s1", "repo-1")).unwrap();
+
+        store.delete_repo("repo-1").unwrap();
+
+        assert!(store.get_schedule("s1").unwrap().is_none());
+    }
+
+    #[test]
+    fn due_schedules_filters_disabled_future_and_null() {
+        let (_tmp, store) = open_test_store();
+        store.insert_repo(&sample_repo("repo-1")).unwrap();
+
+        let mut due = sample_schedule("due", "repo-1");
+        due.next_run_at = Some(500);
+        let mut future = sample_schedule("future", "repo-1");
+        future.next_run_at = Some(2_000);
+        let mut disabled = sample_schedule("disabled", "repo-1");
+        disabled.enabled = false;
+        disabled.next_run_at = Some(100);
+        let mut never = sample_schedule("never", "repo-1");
+        never.next_run_at = None;
+        for s in [&due, &future, &disabled, &never] {
+            store.insert_schedule(s).unwrap();
+        }
+
+        let got = store.due_schedules(1_000).unwrap();
+        let ids: Vec<&str> = got.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["due"]);
+    }
+
+    #[test]
+    fn advance_schedule_updates_next_and_last() {
+        let (_tmp, store) = open_test_store();
+        store.insert_repo(&sample_repo("repo-1")).unwrap();
+        store.insert_schedule(&sample_schedule("s1", "repo-1")).unwrap();
+
+        store.advance_schedule("s1", Some(9_999), 1_000, 1_000).unwrap();
+
+        let got = store.get_schedule("s1").unwrap().unwrap();
+        assert_eq!(got.next_run_at, Some(9_999));
+        assert_eq!(got.last_run_at, Some(1_000));
+    }
+
+    #[test]
+    fn one_shot_schedule_roundtrips() {
+        let (_tmp, store) = open_test_store();
+        store.insert_repo(&sample_repo("repo-1")).unwrap();
+        let mut s = sample_schedule("once", "repo-1");
+        s.one_shot = true;
+        s.cron = String::new();
+        s.next_run_at = Some(5_000);
+        store.insert_schedule(&s).unwrap();
+
+        let got = store.get_schedule("once").unwrap().unwrap();
+        assert!(got.one_shot);
+        assert_eq!(got.cron, "");
+        assert_eq!(got.next_run_at, Some(5_000));
+    }
+
+    #[test]
+    fn skip_repo_prompt_roundtrips_and_updates() {
+        // TASK-181: the per-schedule skip flag persists through insert/get and
+        // through update_schedule_fields (both true→false and false→true).
+        let (_tmp, store) = open_test_store();
+        store.insert_repo(&sample_repo("repo-1")).unwrap();
+
+        // Default fixture is skip = true; a schedule can also be stored as false.
+        let mut including = sample_schedule("include", "repo-1");
+        including.skip_repo_prompt = false;
+        store.insert_schedule(&including).unwrap();
+        store.insert_schedule(&sample_schedule("skip", "repo-1")).unwrap();
+
+        assert!(!store.get_schedule("include").unwrap().unwrap().skip_repo_prompt);
+        assert!(store.get_schedule("skip").unwrap().unwrap().skip_repo_prompt);
+
+        // update_schedule_fields carries the flag through a full-replace edit.
+        store
+            .update_schedule_fields(
+                "include", "Weekly scan", "/security-scan", "0 7 * * 1",
+                None, None, None, true, /* skip_repo_prompt */ true, Some(1_000), 20,
+            )
+            .unwrap();
+        assert!(store.get_schedule("include").unwrap().unwrap().skip_repo_prompt);
+    }
+
+    #[test]
+    fn retire_schedule_disables_and_clears_next() {
+        let (_tmp, store) = open_test_store();
+        store.insert_repo(&sample_repo("repo-1")).unwrap();
+        let mut s = sample_schedule("once", "repo-1");
+        s.one_shot = true;
+        s.next_run_at = Some(500);
+        store.insert_schedule(&s).unwrap();
+
+        store.retire_schedule("once", 1_234, 1_234).unwrap();
+
+        let got = store.get_schedule("once").unwrap().unwrap();
+        assert!(!got.enabled);
+        assert_eq!(got.next_run_at, None);
+        assert_eq!(got.last_run_at, Some(1_234));
+        // A retired one-shot is never re-selected as due.
+        assert!(store.due_schedules(9_999).unwrap().is_empty());
+    }
+
+    #[test]
+    fn in_place_columns_round_trip_and_default_false() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("v.db");
+        let store = TaskStore::open(&db).unwrap();
+
+        let repo = Repo {
+            id: "r1".into(),
+            name: "r".into(),
+            path: "/tmp/r".into(),
+            default_branch: "main".into(),
+            remote_url: None,
+            worktree_root: None,
+            setup_command: None,
+            default_agent: None,
+            auto_start_agent: false,
+            initial_prompt: None,
+            default_model: None,
+            sound_settings: None,
+            fetch_remote_base: None,
+            auto_approve: None,
+            in_place_default: false,
+        };
+        store.insert_repo(&repo).unwrap();
+        assert!(!store.get_repo("r1").unwrap().unwrap().in_place_default);
+
+        store.set_repo_in_place_default("r1", true).unwrap();
+        assert!(store.get_repo("r1").unwrap().unwrap().in_place_default);
+
+        let task = Task {
+            id: "t1".into(),
+            repo_id: "r1".into(),
+            title: "t".into(),
+            worktree_path: "/tmp/r".into(),
+            branch: "main".into(),
+            base_branch: "main".into(),
+            status: TaskStatus::Idle,
+            created_at: 0,
+            updated_at: 0,
+            pr_number: None,
+            pr_url: None,
+            ticket_key: None,
+            agent: None,
+            model: None,
+            setup_status: None,
+            hidden: false,
+            pending_prompt: None,
+            auto_approve: None,
+            in_place: true,
+        };
+        store.insert_task(&task).unwrap();
+        assert!(store.get_task("t1").unwrap().unwrap().in_place);
+
+        // Idempotent migration: re-opening the same DB must not panic and keeps values.
+        drop(store);
+        let store2 = TaskStore::open(&db).unwrap();
+        assert!(store2.get_task("t1").unwrap().unwrap().in_place);
     }
 }

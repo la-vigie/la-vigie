@@ -1,0 +1,69 @@
+# Auto-post `review-gate` for Dependabot PRs (TASK-186). The bare `review-gate`
+# status is posted only by a human `/ship` run; Dependabot never runs `/ship`, so
+# its dependency PRs are permanently BLOCKED by the required `review-gate` check
+# even when all real CI is green. This workflow vouches `review-gate=success` on a
+# Dependabot PR's head SHA — but ONLY once the real machine gates
+# (`review-gate-tests`, `review-gate-mistral`, `review-gate-leak-scan`) are
+# themselves green on that SHA. It never rubber-stamps: if any prerequisite gate is
+# red/pending/missing it posts nothing, and re-fires when the next gate completes.
+# Because `review-gate` becomes genuinely green, the PR is mergeable by anyone
+# (human or bot) — unlike a ruleset actor-bypass, which only helps bot-performed
+# merges. See MERGE_POLICY.md § Dependabot.
+#
+# Why `workflow_run`: it runs in the DEFAULT-branch context with the base repo's
+# token (so `statuses: write` works) and never checks out PR-supplied code — the
+# canonical safe pattern for a privileged reaction to a bot/fork PR, and it also
+# sidesteps the restricted token that Dependabot `pull_request` runs receive. It
+# re-fires per rebase because each new head SHA re-runs the three prerequisite gates.
+#
+# This is one leg of the same-repo-only gate family and, being under `.github/**`,
+# is itself hard-excluded from auto-merge (MERGE_POLICY.md) — a human merges changes
+# to it.
+name: bot-review-gate
+
+on:
+  workflow_run:
+    workflows: [tests, pr-review, leak-scan]
+    types: [completed]
+
+# Least privilege: read the repo (for the scripts) + write the commit status.
+permissions:
+  contents: read
+  statuses: write
+
+# All three source workflows can complete for the same head SHA, firing up to
+# three runs. Collapse them per SHA: a later run re-evaluates from scratch and
+# supersedes an in-flight one, so the final decision always reflects the latest
+# gate states without three redundant posts. Safe because no further run fires
+# for a SHA once its three gates have each completed once (the next run needs a
+# new SHA / a re-run).
+concurrency:
+  group: bot-review-gate-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: true
+
+jobs:
+  vouch:
+    # Cheap pre-filter so human/fork/non-PR runs skip the checkout+Node setup
+    # entirely. The pure core re-checks the same conditions (defense in depth);
+    # this only avoids spinning up a runner to no-op on the common case.
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      startsWith(github.event.workflow_run.head_branch, 'dependabot/')
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      # workflow_run checks out the default branch (our scripts), never PR code.
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+
+      # All gating lives in the script + its tested core; the workflow only wires
+      # the event + token to it. No PR content is interpolated into any shell.
+      - name: Vouch review-gate for a green Dependabot PR
+        run: node scripts/bot-review-gate.mjs

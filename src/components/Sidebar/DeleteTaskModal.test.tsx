@@ -37,6 +37,17 @@ describe("DeleteTaskModal", () => {
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
 
+  it("in-place task: no delete-branch checkbox, confirms with false, shows preserved copy", () => {
+    const onConfirm = vi.fn();
+    const inPlaceTask = { ...task, inPlace: true } as Task;
+    render(<DeleteTaskModal task={inPlaceTask} onCancel={vi.fn()} onConfirm={onConfirm} />);
+    // No branch-delete control — it would be a no-op (teardown never touches the checkout).
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    expect(screen.getByText(/kept — nothing on disk is deleted/i)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(onConfirm).toHaveBeenCalledWith(false);
+  });
+
   it("Delete button is re-enabled after onConfirm resolves (busy reset on success)", async () => {
     const onConfirm = vi.fn().mockResolvedValue(undefined);
     render(<DeleteTaskModal task={task} onCancel={vi.fn()} onConfirm={onConfirm} />);

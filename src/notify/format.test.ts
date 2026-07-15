@@ -13,8 +13,9 @@ const baseTask: Task = {
   createdAt: 1,
   updatedAt: 1,
   ticketKey: "TASK-87",
+  inPlace: false,
 };
-const repo: Repo = { id: "r1", name: "my-repo", path: "/r", defaultBranch: "main" };
+const repo: Repo = { id: "r1", name: "my-repo", path: "/r", defaultBranch: "main", inPlaceDefault: false };
 
 describe("formatNotification", () => {
   it("titled + keyed task: 'KEY · title' and 'label — repo/branch'", () => {

@@ -13,6 +13,7 @@ const sampleRepo: Repo = {
   name: "my-repo",
   path: "/tmp/my-repo",
   defaultBranch: "main",
+  inPlaceDefault: false,
 };
 
 const sampleTask: Task = {
@@ -25,6 +26,7 @@ const sampleTask: Task = {
   status: "idle",
   createdAt: 1_700_000_000,
   updatedAt: 1_700_000_000,
+  inPlace: false,
 };
 
 describe("useVigieStore", () => {
@@ -72,7 +74,61 @@ describe("useVigieStore", () => {
 
     expect(invokeMock).toHaveBeenCalledWith("list_state");
     expect(useVigieStore.getState().repos).toEqual([sampleRepo]);
-    expect(useVigieStore.getState().tasks).toEqual([sampleTask]);
+    expect(useVigieStore.getState().tasks).toEqual([{ ...sampleTask, blockedBy: [] }]);
+  });
+
+  // TASK-189: components fire refresh() fire-and-forget (Sidebar/SettingsModal/DiffPanel/
+  // useTaskCreated). If refresh() rejected, that un-awaited rejection would surface as a
+  // global unhandled rejection that vitest misattributes to whatever test is running
+  // concurrently under file-parallel/shuffled ordering — the source of the PrPanel flake.
+  // refresh() must swallow+log like its refreshPrompts/refreshCustomSounds siblings.
+  it("refresh() does not reject or leak when list_state fails", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    invokeMock.mockRejectedValueOnce(new Error("list_state boom"));
+
+    // Must resolve (not reject) so an un-awaited caller cannot leak an unhandled rejection.
+    await expect(useVigieStore.getState().refresh()).resolves.toBeUndefined();
+    expect(errSpy).toHaveBeenCalledWith("Failed to refresh state", expect.any(Error));
+
+    errSpy.mockRestore();
+  });
+
+  it("refreshSnapshot() sets repos/tasks from list_state without reloading prompts or sounds", async () => {
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValueOnce({
+      repos: [sampleRepo],
+      tasks: [sampleTask],
+      worktreesRoot: "/wt",
+      fetchRemoteBase: false,
+      injectLavigieSkills: true,
+    });
+
+    await useVigieStore.getState().refreshSnapshot();
+
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledWith("list_state");
+    const s = useVigieStore.getState();
+    expect(s.repos).toEqual([sampleRepo]);
+    expect(s.tasks).toEqual([sampleTask]);
+    expect(s.worktreesRoot).toBe("/wt");
+    expect(s.fetchRemoteBase).toBe(false);
+    expect(s.injectLavigieSkills).toBe(true);
+  });
+
+  it("bumpReview increments only the named task's review nonce", () => {
+    useVigieStore.setState({ reviewNonceByTask: {}, prNonceByTask: {} });
+    useVigieStore.getState().bumpReview("task-1");
+    useVigieStore.getState().bumpReview("task-1");
+    useVigieStore.getState().bumpReview("task-2");
+    expect(useVigieStore.getState().reviewNonceByTask).toEqual({ "task-1": 2, "task-2": 1 });
+    expect(useVigieStore.getState().prNonceByTask).toEqual({});
+  });
+
+  it("bumpPr increments only the named task's PR nonce", () => {
+    useVigieStore.setState({ reviewNonceByTask: {}, prNonceByTask: {} });
+    useVigieStore.getState().bumpPr("task-1");
+    expect(useVigieStore.getState().prNonceByTask).toEqual({ "task-1": 1 });
+    expect(useVigieStore.getState().reviewNonceByTask).toEqual({});
   });
 
   describe("removeRepo (TASK-69)", () => {
@@ -91,7 +147,7 @@ describe("useVigieStore", () => {
       expect(invokeMock).toHaveBeenNthCalledWith(1, "remove_repo", { repoId: "repo-1" });
       expect(invokeMock).toHaveBeenNthCalledWith(2, "list_state");
       expect(useVigieStore.getState().repos).toEqual([repo2]);
-      expect(useVigieStore.getState().tasks).toEqual([task2]);
+      expect(useVigieStore.getState().tasks).toEqual([{ ...task2, blockedBy: [] }]);
     });
 
     it("clears the selection when the selected task belonged to the removed repo", async () => {
@@ -126,6 +182,28 @@ describe("useVigieStore", () => {
       await useVigieStore.getState().removeRepo("repo-1");
 
       expect(useVigieStore.getState().sessionsByTask["task-1"]).toBeUndefined();
+    });
+
+    it("clears the orchestrator selection when its repo is removed (TASK-126)", async () => {
+      useVigieStore.setState({ repos: [sampleRepo], tasks: [], selectedOrchestratorRepoId: "repo-1" });
+      invokeMock
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce({ repos: [], tasks: [] });
+
+      await useVigieStore.getState().removeRepo("repo-1");
+
+      expect(useVigieStore.getState().selectedOrchestratorRepoId).toBeNull();
+    });
+
+    it("keeps the orchestrator selection when a different repo is removed (TASK-126)", async () => {
+      useVigieStore.setState({ repos: [sampleRepo, repo2], tasks: [], selectedOrchestratorRepoId: "repo-2" });
+      invokeMock
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce({ repos: [repo2], tasks: [] });
+
+      await useVigieStore.getState().removeRepo("repo-1");
+
+      expect(useVigieStore.getState().selectedOrchestratorRepoId).toBe("repo-2");
     });
   });
 

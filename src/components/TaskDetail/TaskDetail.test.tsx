@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { TaskDetail } from "./TaskDetail";
@@ -118,6 +118,7 @@ const task: Task = {
   status: "idle",
   createdAt: 1,
   updatedAt: 1,
+  inPlace: false,
 };
 
 describe("TaskDetail", () => {
@@ -231,7 +232,7 @@ describe("TaskDetail", () => {
 
     render(<TaskDetail />);
     // Resume is enabled now that the claude spec (with resumeArgs) is available.
-    await vi.waitFor(() => expect(screen.getByRole("button", { name: /resume/i })).not.toBeDisabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: /resume/i })).not.toBeDisabled());
     fireEvent.click(screen.getByText("Resume"));
 
     const sessions = useVigieStore.getState().sessionsByTask["task-1"];
@@ -275,7 +276,7 @@ describe("TaskDetail", () => {
     render(<TaskDetail />);
     fireEvent.click(screen.getByRole("button", { name: /stop agent/i }));
 
-    await vi.waitFor(() => {
+    await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("stop_session", { sessionId: "a1" });
     });
     // removeAgentSession clears agent from sessions
@@ -302,6 +303,7 @@ describe("TaskDetail", () => {
       status: "idle",
       createdAt: 1,
       updatedAt: 1,
+      inPlace: false,
     };
 
     useVigieStore.setState({ tasks: [task, task2], selectedTaskId: "task-1" });
@@ -317,6 +319,21 @@ describe("TaskDetail", () => {
     // Select task-2
     useVigieStore.setState({ selectedTaskId: "task-2" });
     rerender(<TaskDetail />);
+    expect(screen.getByTestId("terminal-host")).toBe(hostBefore);
+  });
+
+  it("TerminalHost DOM node is NOT remounted when the store's tasks array is replaced (keep-alive, TASK-120 refreshSnapshot)", () => {
+    useVigieStore.setState({ tasks: [task], selectedTaskId: "task-1" });
+
+    render(<TaskDetail />);
+    const hostBefore = screen.getByTestId("terminal-host");
+
+    // Simulate refreshSnapshot()/list_state swapping the tasks array with a
+    // brand-new reference (same task content, new array + object identity).
+    act(() => {
+      useVigieStore.getState().setTasks([{ ...task }]);
+    });
+
     expect(screen.getByTestId("terminal-host")).toBe(hostBefore);
   });
 
@@ -714,6 +731,22 @@ describe("TaskDetail — Finish flow", () => {
     expect(screen.getByRole("button", { name: /cancel/i })).toBeInTheDocument();
   });
 
+  it("in-place task: finish confirm shows Keep branch but hides Discard branch", () => {
+    useVigieStore.setState({
+      tasks: [{ ...task, inPlace: true }],
+      selectedTaskId: "task-1",
+      sessionsByTask: {},
+      activeTabByTask: {},
+    });
+
+    render(<TaskDetail />);
+    fireEvent.click(screen.getByRole("button", { name: /finish task/i }));
+
+    expect(screen.getByRole("button", { name: /keep branch/i })).toBeInTheDocument();
+    // "Discard branch" would be a no-op for in-place (branch is always preserved).
+    expect(screen.queryByRole("button", { name: /discard branch/i })).not.toBeInTheDocument();
+  });
+
   it("clicking Cancel hides the confirmation without calling finish_task", () => {
     render(<TaskDetail />);
 
@@ -745,7 +778,7 @@ describe("TaskDetail — Finish flow", () => {
     fireEvent.click(screen.getByRole("button", { name: /finish task/i }));
     fireEvent.click(screen.getByRole("button", { name: /discard branch/i }));
 
-    await vi.waitFor(() => {
+    await waitFor(() => {
       expect(useVigieStore.getState().selectedTaskId).toBeNull();
       expect(invokeMock).toHaveBeenCalledWith("stop_session", { sessionId: "agent-99" });
       expect(invokeMock).toHaveBeenCalledWith("finish_task", { taskId: "task-1", mode: "discard" });
@@ -762,7 +795,7 @@ describe("TaskDetail — Finish flow", () => {
     fireEvent.click(screen.getByRole("button", { name: /finish task/i }));
     fireEvent.click(screen.getByRole("button", { name: /keep branch/i }));
 
-    await vi.waitFor(() => {
+    await waitFor(() => {
       expect(useVigieStore.getState().selectedTaskId).toBeNull();
     });
 
@@ -882,7 +915,7 @@ describe("TaskDetail — Merge PR & finish (T5)", () => {
     render(<TaskDetail />);
     fireEvent.click(screen.getByRole("button", { name: /finish task/i }));
 
-    await vi.waitFor(() => {
+    await waitFor(() => {
       expect(screen.getByRole("button", { name: /merge pr & finish/i })).toBeInTheDocument();
     });
   });
@@ -897,7 +930,7 @@ describe("TaskDetail — Merge PR & finish (T5)", () => {
     fireEvent.click(screen.getByRole("button", { name: /finish task/i }));
 
     // Wait for PR fetch to settle (get_pr_status returns null)
-    await vi.waitFor(() => {
+    await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("get_pr_status", { taskId: "task-1" });
     });
 
@@ -917,13 +950,13 @@ describe("TaskDetail — Merge PR & finish (T5)", () => {
     render(<TaskDetail />);
     fireEvent.click(screen.getByRole("button", { name: /finish task/i }));
 
-    await vi.waitFor(() => {
+    await waitFor(() => {
       expect(screen.getByRole("button", { name: /merge pr & finish/i })).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole("button", { name: /merge pr & finish/i }));
 
-    await vi.waitFor(() => {
+    await waitFor(() => {
       expect(useVigieStore.getState().selectedTaskId).toBeNull();
       expect(invokeMock).toHaveBeenCalledWith("finish_task", { taskId: "task-1", mode: "merge" });
     });
@@ -949,13 +982,13 @@ describe("TaskDetail — Merge PR & finish (T5)", () => {
     render(<TaskDetail />);
     fireEvent.click(screen.getByRole("button", { name: /finish task/i }));
 
-    await vi.waitFor(() => {
+    await waitFor(() => {
       expect(screen.getByRole("button", { name: /merge pr & finish/i })).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole("button", { name: /merge pr & finish/i }));
 
-    await vi.waitFor(() => {
+    await waitFor(() => {
       expect(useVigieStore.getState().selectedTaskId).toBeNull();
       expect(invokeMock).toHaveBeenCalledWith("stop_session", { sessionId: "agent-42" });
       expect(invokeMock).toHaveBeenCalledWith("finish_task", { taskId: "task-1", mode: "merge" });
@@ -974,13 +1007,13 @@ describe("TaskDetail — Merge PR & finish (T5)", () => {
     render(<TaskDetail />);
     fireEvent.click(screen.getByRole("button", { name: /finish task/i }));
 
-    await vi.waitFor(() => {
+    await waitFor(() => {
       expect(screen.getByRole("button", { name: /merge pr & finish/i })).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole("button", { name: /merge pr & finish/i }));
 
-    await vi.waitFor(() => {
+    await waitFor(() => {
       expect(screen.getByRole("alert")).toBeInTheDocument();
       expect(screen.getByRole("alert")).toHaveTextContent("merge conflict");
     });
@@ -1023,7 +1056,7 @@ describe("TaskDetail — Finish stops ALL sessions (Fix: shell PTY leak)", () =>
     fireEvent.click(screen.getByRole("button", { name: /finish task/i }));
     fireEvent.click(screen.getByRole("button", { name: /keep branch/i }));
 
-    await vi.waitFor(() => {
+    await waitFor(() => {
       expect(useVigieStore.getState().selectedTaskId).toBeNull();
     });
 
@@ -1093,13 +1126,13 @@ describe("TaskDetail — agent picker (TASK-21)", () => {
     expect(setTaskModelMock).toHaveBeenCalledWith("task-1", null);
 
     // Resume is disabled for aider (empty resumeArgs).
-    await vi.waitFor(() => {
+    await waitFor(() => {
       expect(screen.getByRole("button", { name: /resume/i })).toBeDisabled();
     });
 
     // Start passes lifecycle:true for a lifecycle agent.
     await userEvent.click(screen.getByRole("button", { name: /start agent/i }));
-    await vi.waitFor(() => {
+    await waitFor(() => {
       expect(startAgentSessionMock).toHaveBeenCalledWith("task-1", false, { label: "Aider", lifecycle: true });
     });
   });
@@ -1198,5 +1231,22 @@ describe("TaskDetail — queued placeholder for pending tasks (TASK-90)", () => 
     // a queued task must never cause TerminalHost to unmount.
     expect(screen.getByTestId("terminal-host")).toBeInTheDocument();
     expect(document.querySelector(".terminal-pane__body")).toBeInTheDocument();
+  });
+
+  it("lists the task's actual blockers in the queued placeholder (TASK-177)", () => {
+    const withBlockers: Task = {
+      ...pendingTask,
+      blockedBy: [
+        { taskId: "b1", title: "Build the API", status: "working" },
+        { taskId: "b2", title: null, status: null },
+      ],
+    };
+    useVigieStore.setState({ tasks: [withBlockers], selectedTaskId: withBlockers.id });
+    render(<TaskDetail />);
+    const placeholder = document.querySelector(".task-detail__queued");
+    expect(placeholder).toBeTruthy();
+    expect(placeholder).toHaveTextContent("Build the API");
+    // A dangling blocker with no title falls back to its id.
+    expect(placeholder).toHaveTextContent("b2");
   });
 });

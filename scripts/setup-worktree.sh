@@ -14,7 +14,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 echo "==> Installing npm dependencies in $ROOT"
-npm install
+# Prefer `npm ci`: it installs strictly from the committed lockfile and never
+# rewrites it, so a fresh worktree can't start life with a phantom
+# `package-lock.json` diff (some npm versions, e.g. 11.4–11.5, rewrite the lock
+# on a non-Linux host by stripping `libc` from optional Linux deps — TASK-208).
+# Fall back to `npm install` when the lockfile is out of sync with package.json
+# (npm ci errors hard in that case), where updating the lock is the intent.
+npm ci || npm install
 
 # Warm the Rust build so the first `tauri dev` isn't a cold compile.
 # Best-effort: a missing Rust toolchain shouldn't fail worktree setup.

@@ -148,3 +148,81 @@
   font-size: 11px;
   cursor: default;
 }
+
+/* Free-text model pane (engines that take `--model` but can't enumerate — TASK-209) */
+.amp__freetext {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 6px;
+}
+
+.amp__model-input {
+  margin: 2px 12px 0;
+  padding: 5px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  outline: none;
+}
+
+.amp__model-input:focus {
+  border-color: var(--accent);
+}
+
+.amp__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0 12px;
+}
+
+.amp__chip {
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: background 0.1s ease, border-color 0.1s ease;
+}
+
+.amp__chip:hover {
+  background: var(--bg-hover);
+}
+
+.amp__chip.is-selected {
+  background: var(--bg-selected);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.amp__model-set {
+  margin: 0 12px;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.1s ease;
+}
+
+.amp__model-set:hover {
+  background: var(--bg-hover);
+}
+
+.amp__default-row {
+  border-top: 1px solid var(--border-strong);
+  margin-top: 2px;
+  font-family: inherit;
+}

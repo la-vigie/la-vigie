@@ -7,6 +7,7 @@ import { SOUND_PALETTE, SOUND_EVENTS, DEFAULT_SOUND_SETTINGS, soundLabel } from 
 import type { SoundEvent, RepoSoundOverride } from "../../sound/types";
 import { parseRepoOverride } from "../../sound/safe-parse";
 import { AgentModelPicker } from "../Agent/AgentModelPicker";
+import { SchedulesTab } from "./SchedulesTab";
 
 interface RepoSettingsModalProps {
   repo: Repo;
@@ -22,6 +23,7 @@ export function RepoSettingsModal({ repo, onClose }: RepoSettingsModalProps) {
   const taskCount = useVigieStore(
     (state) => state.tasks.filter((t) => t.repoId === repo.id).length,
   );
+  const [tab, setTab] = useState<"general" | "schedules">("general");
   const [confirmingRemove, setConfirmingRemove] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [name, setName] = useState(repo.name);
@@ -46,6 +48,7 @@ export function RepoSettingsModal({ repo, onClose }: RepoSettingsModalProps) {
   const [autoApprove, setAutoApprove] = useState<boolean | null>(
     repo.autoApprove ?? null,
   );
+  const [inPlaceDefault, setInPlaceDefault] = useState(repo.inPlaceDefault ?? false);
 
   // Populate the base-branch dropdown from the repo's local branches. Merge the
   // stored value in (it may be a branch that no longer exists locally) so it's
@@ -179,6 +182,7 @@ export function RepoSettingsModal({ repo, onClose }: RepoSettingsModalProps) {
         fetchRemoteBase,
         defaultAgent,
         autoApprove,
+        inPlaceDefault,
       );
       await setRepoDefaultModel(repo.id, defaultModel);
       await refresh();
@@ -239,6 +243,28 @@ export function RepoSettingsModal({ repo, onClose }: RepoSettingsModalProps) {
           </button>
         </header>
 
+        <div className="repo-settings__tabs" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "general"}
+            className={`repo-settings__tab${tab === "general" ? " repo-settings__tab--active" : ""}`}
+            onClick={() => setTab("general")}
+          >
+            General
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "schedules"}
+            className={`repo-settings__tab${tab === "schedules" ? " repo-settings__tab--active" : ""}`}
+            onClick={() => setTab("schedules")}
+          >
+            Schedules
+          </button>
+        </div>
+
+        {tab === "general" && (
         <div className="repo-settings__body">
           <div className="repo-settings__row">
             <label className="repo-settings__field">
@@ -424,6 +450,29 @@ export function RepoSettingsModal({ repo, onClose }: RepoSettingsModalProps) {
             )}
           </div>
 
+          <div className="repo-settings__field">
+            <label className="repo-settings__toggle">
+              <input
+                type="checkbox"
+                role="switch"
+                className="repo-settings__switch"
+                checked={inPlaceDefault}
+                onChange={(e) => setInPlaceDefault(e.target.checked)}
+                aria-label="Work in place (no worktrees)"
+              />
+              <span className="repo-settings__switch-track" aria-hidden="true">
+                <span className="repo-settings__switch-thumb" />
+              </span>
+              <span className="repo-settings__toggle-text">
+                <span className="repo-settings__toggle-title">Work in place (no worktrees)</span>
+                <span className="repo-settings__hint">
+                  New tasks in this repo default to running the agent in the repo's existing
+                  checkout instead of a git worktree. One in-place task per repo.
+                </span>
+              </span>
+            </label>
+          </div>
+
           <div className="repo-settings__divider" />
 
           <div className="repo-settings__field">
@@ -504,62 +553,79 @@ export function RepoSettingsModal({ repo, onClose }: RepoSettingsModalProps) {
 
           {error && <p className="repo-settings__error">{error}</p>}
         </div>
+        )}
 
-        {confirmingRemove ? (
-          <footer className="repo-settings__footer repo-settings__footer--confirm">
-            <p className="repo-settings__danger-text">
-              Remove <strong>{repo.name}</strong> and its {taskLabel}? This detaches the
-              repository from La Vigie and removes the worktrees it created. Your original
-              checkout at <code>{repo.path}</code> is left untouched.
-            </p>
-            <div className="repo-settings__footer-right">
+        {tab === "schedules" && (
+          <div className="repo-settings__body">
+            <SchedulesTab repoId={repo.id} defaultBranch={defaultBranch} />
+          </div>
+        )}
+
+        {tab === "general" ? (
+          confirmingRemove ? (
+            <footer className="repo-settings__footer repo-settings__footer--confirm">
+              <p className="repo-settings__danger-text">
+                Remove <strong>{repo.name}</strong> and its {taskLabel}? This detaches the
+                repository from La Vigie and removes the worktrees it created. Your original
+                checkout at <code>{repo.path}</code> is left untouched.
+              </p>
+              <div className="repo-settings__footer-right">
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  onClick={() => setConfirmingRemove(false)}
+                  disabled={removing}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--danger"
+                  onClick={remove}
+                  disabled={removing}
+                >
+                  Remove
+                </button>
+              </div>
+            </footer>
+          ) : (
+            <footer className="repo-settings__footer">
               <button
                 type="button"
-                className="btn btn--ghost"
-                onClick={() => setConfirmingRemove(false)}
-                disabled={removing}
+                className="repo-settings__remove"
+                onClick={() => setConfirmingRemove(true)}
               >
-                Cancel
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
+                  <path
+                    d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V7"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+                Remove repository
               </button>
-              <button
-                type="button"
-                className="btn btn--danger"
-                onClick={remove}
-                disabled={removing}
-              >
-                Remove
-              </button>
-            </div>
-          </footer>
+              <div className="repo-settings__footer-right">
+                <button type="button" className="btn btn--ghost" onClick={onClose}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--primary"
+                  onClick={save}
+                  disabled={saving}
+                >
+                  Save
+                </button>
+              </div>
+            </footer>
+          )
         ) : (
           <footer className="repo-settings__footer">
-            <button
-              type="button"
-              className="repo-settings__remove"
-              onClick={() => setConfirmingRemove(true)}
-            >
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
-                <path
-                  d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V7"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-              Remove repository
-            </button>
             <div className="repo-settings__footer-right">
               <button type="button" className="btn btn--ghost" onClick={onClose}>
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="btn btn--primary"
-                onClick={save}
-                disabled={saving}
-              >
-                Save
+                Close
               </button>
             </div>
           </footer>

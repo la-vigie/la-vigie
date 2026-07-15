@@ -104,6 +104,7 @@ describe("useAgentStatus", () => {
           status: "idle",
           createdAt: 1,
           updatedAt: 1,
+          inPlace: false,
         },
       ],
       selectedTaskId: null,
@@ -217,6 +218,7 @@ describe("useAgentStatus", () => {
           path: "/tmp/repo",
           defaultBranch: "main",
           soundSettings: repoSoundSettings,
+          inPlaceDefault: false,
         },
       ],
       tasks: [
@@ -230,6 +232,7 @@ describe("useAgentStatus", () => {
           status: "idle",
           createdAt: 1,
           updatedAt: 1,
+          inPlace: false,
         },
       ],
       sessionsByTask: {
@@ -399,5 +402,67 @@ describe("useAgentStatus", () => {
     await act(async () => {});
 
     expect(sendNotificationMock).toHaveBeenCalled();
+  });
+
+  // ---- Out-of-band refresh (TASK-120) ----
+
+  it("on idle: refreshes the snapshot and bumps review + pr for the owning task", async () => {
+    vi.useFakeTimers();
+    const snap = vi.spyOn(useVigieStore.getState(), "refreshSnapshot").mockResolvedValue();
+    const review = vi.spyOn(useVigieStore.getState(), "bumpReview");
+    const pr = vi.spyOn(useVigieStore.getState(), "bumpPr");
+    renderHook(() => useAgentStatus());
+    await act(async () => {});
+
+    act(() => pushAgentStatusEvent({ agentId: "agent-1", status: "idle" }));
+    act(() => {
+      vi.advanceTimersByTime(8000);
+    });
+
+    expect(snap).toHaveBeenCalled();
+    expect(review).toHaveBeenCalledWith("task-1");
+    expect(pr).toHaveBeenCalledWith("task-1");
+    vi.useRealTimers();
+    snap.mockRestore();
+    review.mockRestore();
+    pr.mockRestore();
+  });
+
+  it("on working: refreshes the snapshot but does not bump review/pr", async () => {
+    vi.useFakeTimers();
+    const snap = vi.spyOn(useVigieStore.getState(), "refreshSnapshot").mockResolvedValue();
+    const review = vi.spyOn(useVigieStore.getState(), "bumpReview");
+    const pr = vi.spyOn(useVigieStore.getState(), "bumpPr");
+    renderHook(() => useAgentStatus());
+    await act(async () => {});
+
+    act(() => pushAgentStatusEvent({ agentId: "agent-1", status: "working" }));
+    act(() => {
+      vi.advanceTimersByTime(8000);
+    });
+
+    expect(snap).toHaveBeenCalled();
+    expect(review).not.toHaveBeenCalled();
+    expect(pr).not.toHaveBeenCalled();
+    vi.useRealTimers();
+    snap.mockRestore();
+    review.mockRestore();
+    pr.mockRestore();
+  });
+
+  it("on needs_attention: snapshot only, no review/pr bump", async () => {
+    vi.useFakeTimers();
+    const review = vi.spyOn(useVigieStore.getState(), "bumpReview");
+    renderHook(() => useAgentStatus());
+    await act(async () => {});
+
+    act(() => pushAgentStatusEvent({ agentId: "agent-1", status: "needs_attention" }));
+    act(() => {
+      vi.advanceTimersByTime(8000);
+    });
+
+    expect(review).not.toHaveBeenCalled();
+    vi.useRealTimers();
+    review.mockRestore();
   });
 });

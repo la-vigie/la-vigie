@@ -1,7 +1,7 @@
 {
   "name": "la-vigie",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Local desktop app to manage parallel AI coding agents and their git worktrees",
   "author": "evermax",
   "license": "MIT",
@@ -18,6 +18,7 @@
     "tauri": "tauri",
     "test": "vitest run",
     "setup": "./scripts/setup-worktree.sh",
+    "skills:generate": "node scripts/generate-skills.mjs",
     "tauri:dev": "npm install && npm run tauri dev",
     "tauri:build": "npm install && npm run tauri build"
   },
@@ -48,11 +49,12 @@
     "@testing-library/user-event": "^14.6.1",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
-    "@vitejs/plugin-react": "^4.6.0",
+    "@vitejs/plugin-react": "^6.0.3",
     "jsdom": "^29.1.1",
-    "typescript": "~5.8.3",
-    "vite": "^7.3.6",
-    "vitest": "^4.1.9"
+    "rulesync": "9.6.3",
+    "typescript": "~7.0.2",
+    "vite": "^8.1.4",
+    "vitest": "^4.1.10"
   },
   "overrides": {
     "typed-rest-client": {

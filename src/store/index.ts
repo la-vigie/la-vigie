@@ -14,6 +14,12 @@ export type TaskStatus =
 
 export type SetupStatus = "running" | "succeeded" | "failed";
 
+export interface Blocker {
+  taskId: string;
+  title?: string | null;
+  status?: TaskStatus | null;
+}
+
 export interface Repo {
   id: string;
   name: string;
@@ -29,6 +35,7 @@ export interface Repo {
   soundSettings?: string | null;
   fetchRemoteBase?: boolean | null;
   autoApprove?: boolean | null;
+  inPlaceDefault: boolean;
 }
 
 export interface Task {
@@ -50,6 +57,9 @@ export interface Task {
   pendingPrompt?: string | null;
   hidden?: boolean;
   autoApprove?: boolean | null;
+  /** Outstanding blockers this task is queued behind (pending tasks only). TASK-177. */
+  blockedBy?: Blocker[];
+  inPlace: boolean;
 }
 
 export type PromptMode = "stdin" | "arg" | "none";
@@ -68,6 +78,7 @@ export interface AgentSpec {
   builtin: boolean;
   modelArg?: string | null;
   modelsListArgs?: string[] | null;
+  skillInjection?: "none" | "pluginDir" | { worktreeBundle: { provider: string } };
 }
 
 interface AppSnapshot {
@@ -77,6 +88,7 @@ interface AppSnapshot {
   soundSettings?: string | null;
   fetchRemoteBase?: boolean | null;
   injectLavigieSkills?: boolean | null;
+  blockedBy?: Record<string, Blocker[]>;
 }
 
 export type AgentStatus = "starting" | "running" | "exited";
@@ -84,7 +96,22 @@ export type AgentStatus = "starting" | "running" | "exited";
 export type AgentActivity = "working" | "needs_attention" | "idle" | "error";
 
 export const AGENT_TAB = "agent";
-export type SessionKind = "agent" | "shell";
+export type SessionKind = "agent" | "shell" | "orchestrator";
+
+/** Surface-id namespace for the worktree-less orchestrator chat (TASK-126). A
+ *  "surface id" keys `sessionsByTask`/`activeTabByTask`/the TerminalHost and is
+ *  either a task id or `orchestrator:{repoId}` — the prefix guarantees it can't
+ *  collide with a task UUID. */
+export const ORCHESTRATOR_PREFIX = "orchestrator:";
+export function orchestratorSurfaceId(repoId: string): string {
+  return `${ORCHESTRATOR_PREFIX}${repoId}`;
+}
+export function repoIdFromSurface(surfaceId: string): string {
+  return surfaceId.startsWith(ORCHESTRATOR_PREFIX)
+    ? surfaceId.slice(ORCHESTRATOR_PREFIX.length)
+    : surfaceId;
+}
+
 export interface TerminalSession {
   localId: string;
   kind: SessionKind;
@@ -110,6 +137,9 @@ export interface VigieState {
   tasks: Task[];
   worktreesRoot: string;
   selectedTaskId: string | null;
+  /** The repo whose worktree-less orchestrator chat is selected (TASK-126).
+   *  Mutually exclusive with `selectedTaskId`. */
+  selectedOrchestratorRepoId: string | null;
   sessionsByTask: Record<string, TerminalSession[]>;
   activeTabByTask: Record<string, string>;
   /** Per-task "needs your attention" flag, set when a non-selected task's
@@ -140,12 +170,26 @@ export interface VigieState {
   setFetchRemoteBase: (enabled: boolean) => Promise<void>;
   setInjectLavigieSkills: (enabled: boolean) => Promise<void>;
   setSelectedTask: (id: string | null) => void;
+  setSelectedOrchestrator: (repoId: string | null) => void;
+  startOrchestratorSession: (repoId: string) => void;
+  removeOrchestratorSession: (repoId: string) => void;
   setRepos: (repos: Repo[]) => void;
   setTasks: (tasks: Task[]) => void;
   /** Patch one task's title in place (TASK-40 agent-driven rename), leaving all
    *  other task state untouched. */
   setTaskTitle: (taskId: string, title: string) => void;
   refresh: () => Promise<void>;
+  /** Per-task nonce for the git/fs Review group (Diff + Spec + count badges).
+   *  Bumping asks the currently-viewed ReviewPanel to re-fetch those. */
+  reviewNonceByTask: Record<string, number>;
+  /** Per-task nonce for the gh Review group (PR dock). Separate so it can carry
+   *  a longer debounce window than the git/fs group. */
+  prNonceByTask: Record<string, number>;
+  /** Lightweight snapshot refresh: re-run list_state → repos/tasks/flags only
+   *  (no prompt/custom-sound reloads). Safe to fire on frequent auto-triggers. */
+  refreshSnapshot: () => Promise<void>;
+  bumpReview: (taskId: string) => void;
+  bumpPr: (taskId: string) => void;
   /** Remove a repo and its tasks: detaches in the backend (which also cleans up
    *  the worktrees La Vigie created), drops local session/selection state for
    *  the removed tasks, then refreshes. */
@@ -192,11 +236,14 @@ export const useVigieStore = create<VigieState>((set, get) => ({
   tasks: [],
   worktreesRoot: "",
   selectedTaskId: null,
+  selectedOrchestratorRepoId: null,
   sessionsByTask: {},
   activeTabByTask: {},
   attentionByTask: {},
   consoleByAgentId: {},
   setupByTask: {},
+  reviewNonceByTask: {},
+  prNonceByTask: {},
   sidebarCollapsed: localStorage.getItem("vigie.sidebarCollapsed") === "true",
   sidebarWidth: Number(localStorage.getItem("vigie.sidebarWidth")) || 260,
   theme: initialTheme(),
@@ -216,10 +263,41 @@ export const useVigieStore = create<VigieState>((set, get) => ({
     }),
   setSelectedTask: (id) =>
     set((state) => {
-      if (id == null) return { selectedTaskId: id };
-      // Viewing a task clears its attention cue.
+      if (id == null) return { selectedTaskId: id, selectedOrchestratorRepoId: null };
+      // Viewing a task clears its attention cue and any orchestrator selection.
       const { [id]: _cleared, ...attentionByTask } = state.attentionByTask;
-      return { selectedTaskId: id, attentionByTask };
+      return { selectedTaskId: id, selectedOrchestratorRepoId: null, attentionByTask };
+    }),
+  setSelectedOrchestrator: (repoId) =>
+    set({ selectedOrchestratorRepoId: repoId, selectedTaskId: null }),
+  startOrchestratorSession: (repoId) =>
+    set((state) => {
+      const key = orchestratorSurfaceId(repoId);
+      // Idempotent: if the orchestrator terminal is already open, keep the live
+      // one (KEEP-ALIVE) — don't remount/respawn.
+      if (state.sessionsByTask[key]?.some((s) => s.kind === "orchestrator")) return state;
+      const session: TerminalSession = {
+        localId: AGENT_TAB,
+        kind: "orchestrator",
+        status: "starting",
+        title: "Orchestrator",
+      };
+      return {
+        sessionsByTask: { ...state.sessionsByTask, [key]: [session] },
+        activeTabByTask: { ...state.activeTabByTask, [key]: AGENT_TAB },
+      };
+    }),
+  removeOrchestratorSession: (repoId) =>
+    set((state) => {
+      const key = orchestratorSurfaceId(repoId);
+      const prev = state.sessionsByTask[key] ?? [];
+      const backendId = prev.find((s) => s.kind === "orchestrator")?.backendId;
+      const consoleByAgentId = { ...state.consoleByAgentId };
+      if (backendId) delete consoleByAgentId[backendId];
+      return {
+        sessionsByTask: { ...state.sessionsByTask, [key]: prev.filter((s) => s.kind !== "orchestrator") },
+        consoleByAgentId,
+      };
     }),
   setRepos: (repos) => set({ repos }),
   setTasks: (tasks) => set({ tasks }),
@@ -228,29 +306,66 @@ export const useVigieStore = create<VigieState>((set, get) => ({
       tasks: state.tasks.map((t) => (t.id === taskId ? { ...t, title } : t)),
     })),
   refresh: async () => {
+    // Swallow+log on failure, mirroring refreshPrompts/refreshCustomSounds. Several
+    // components fire refresh() fire-and-forget (Sidebar/SettingsModal/DiffPanel/
+    // useTaskCreated); if it rejected, that un-awaited rejection would surface as a global
+    // unhandled rejection and, under vitest's file-parallel/shuffled ordering, get
+    // misattributed to an unrelated test (the TASK-189 PrPanel flake). list_state does not
+    // fail in prod, so this only ever guards test/edge conditions. (TASK-189)
+    try {
+      const snapshot = await invoke<AppSnapshot>("list_state");
+      const parsed = parseSoundSettings(snapshot.soundSettings);
+      set({
+        repos: snapshot.repos,
+        tasks: snapshot.tasks.map((t) => ({
+          ...t,
+          blockedBy: snapshot.blockedBy?.[t.id] ?? [],
+        })),
+        worktreesRoot: snapshot.worktreesRoot,
+        soundSettings: parsed
+          ? {
+              muted: parsed.muted ?? DEFAULT_SOUND_SETTINGS.muted,
+              automute: parsed.automute ?? DEFAULT_SOUND_SETTINGS.automute,
+              events: {
+                completed: { ...DEFAULT_SOUND_SETTINGS.events.completed, ...(parsed.events?.completed ?? {}) },
+                failed: { ...DEFAULT_SOUND_SETTINGS.events.failed, ...(parsed.events?.failed ?? {}) },
+                awaitingInput: { ...DEFAULT_SOUND_SETTINGS.events.awaitingInput, ...(parsed.events?.awaitingInput ?? {}) },
+              },
+            }
+          : DEFAULT_SOUND_SETTINGS,
+        fetchRemoteBase: snapshot.fetchRemoteBase ?? true,
+        injectLavigieSkills: snapshot.injectLavigieSkills ?? false,
+      });
+      await get().refreshCustomSounds();
+      await get().refreshPrompts();
+    } catch (err) {
+      console.error("Failed to refresh state", err);
+    }
+  },
+  refreshSnapshot: async () => {
     const snapshot = await invoke<AppSnapshot>("list_state");
-    const parsed = parseSoundSettings(snapshot.soundSettings);
     set({
       repos: snapshot.repos,
       tasks: snapshot.tasks,
       worktreesRoot: snapshot.worktreesRoot,
-      soundSettings: parsed
-        ? {
-            muted: parsed.muted ?? DEFAULT_SOUND_SETTINGS.muted,
-            automute: parsed.automute ?? DEFAULT_SOUND_SETTINGS.automute,
-            events: {
-              completed: { ...DEFAULT_SOUND_SETTINGS.events.completed, ...(parsed.events?.completed ?? {}) },
-              failed: { ...DEFAULT_SOUND_SETTINGS.events.failed, ...(parsed.events?.failed ?? {}) },
-              awaitingInput: { ...DEFAULT_SOUND_SETTINGS.events.awaitingInput, ...(parsed.events?.awaitingInput ?? {}) },
-            },
-          }
-        : DEFAULT_SOUND_SETTINGS,
       fetchRemoteBase: snapshot.fetchRemoteBase ?? true,
       injectLavigieSkills: snapshot.injectLavigieSkills ?? false,
     });
-    await get().refreshCustomSounds();
-    await get().refreshPrompts();
   },
+  bumpReview: (taskId) =>
+    set((state) => ({
+      reviewNonceByTask: {
+        ...state.reviewNonceByTask,
+        [taskId]: (state.reviewNonceByTask[taskId] ?? 0) + 1,
+      },
+    })),
+  bumpPr: (taskId) =>
+    set((state) => ({
+      prNonceByTask: {
+        ...state.prNonceByTask,
+        [taskId]: (state.prNonceByTask[taskId] ?? 0) + 1,
+      },
+    })),
   removeRepo: async (repoId) => {
     await apiRemoveRepo(repoId);
     const { tasks, selectedTaskId, clearTaskSessions, refresh } = get();
@@ -260,6 +375,12 @@ export const useVigieStore = create<VigieState>((set, get) => ({
     // Clear the selection if it pointed at a removed task.
     if (selectedTaskId && removedIds.includes(selectedTaskId)) {
       set({ selectedTaskId: null });
+    }
+    // Clear the orchestrator selection if it pointed at the removed repo (TASK-126).
+    // The backend revoke_orchestrator_for_repo already stops that repo's live
+    // orchestrator; this drops the now-dangling desktop selection.
+    if (get().selectedOrchestratorRepoId === repoId) {
+      set({ selectedOrchestratorRepoId: null });
     }
     await refresh();
   },

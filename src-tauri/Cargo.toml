@@ -1,6 +1,6 @@
 [package]
 name = "vigie"
-version = "0.1.0"
+version = "0.3.0"
 description = "Local desktop app to manage parallel AI coding agents and their git worktrees"
 authors = ["evermax"]
 edition = "2021"
@@ -21,12 +21,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = ["process", "rt", "macros", "rt-multi-thread", "net"] }
@@ -37,6 +37,8 @@ tauri-plugin-notification = "2.3.3"
 # Holds a macOS IOPMAssertion (PreventUserIdleSystemSleep) via Drop-based release;
 # keeps the host reachable over the tailnet while remote control is enabled (TASK-104).
 keepawake = "0.6"
+croner = "3"
+chrono = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
