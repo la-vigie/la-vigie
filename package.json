@@ -49,7 +49,7 @@
     "@testing-library/user-event": "^14.6.1",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
-    "@vitejs/plugin-react": "^6.0.3",
+    "@vitejs/plugin-react": "^6.0.4",
     "jsdom": "^29.1.1",
     "rulesync": "9.6.3",
     "typescript": "~7.0.2",
