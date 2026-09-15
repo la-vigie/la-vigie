@@ -1,0 +1,7 @@
+# macOS only: re-sign the dev binary with a stable identity on every `cargo run` /
+# `tauri dev` (which runs `cargo run` from this dir), so macOS TCC grants
+# (Screen Recording, Accessibility, ...) survive rebuilds instead of being revoked
+# on each new cdhash. The runner no-ops when the signing identity is absent
+# (CI, other checkouts), so it never breaks `cargo run` / `cargo test`.
+[target.'cfg(target_os = "macos")']
+runner = "./scripts/dev-codesign-runner.sh"

@@ -1,4 +1,4 @@
-//! Worktree adoption detection (TASK-125).
+//! Worktree adoption detection.
 //!
 //! When a task's derived worktree path already exists on disk, `git worktree add`
 //! fails. Instead of surfacing a cryptic git error, we classify the target path

@@ -18,7 +18,7 @@ describe("combineInitialPrompts", () => {
     expect(combineInitialPrompts()).toBeUndefined();
   });
 
-  // TASK-160: skipping the repo-level prompt is expressed by passing null for the
+  // Skipping the repo-level prompt is expressed by passing null for the
   // repo arg. skip-on → task prompt only; skip-off → repo prompt still prepended.
   describe("skipping the repo prompt (TASK-160)", () => {
     it("skip-on: a null repo arg yields the task prompt alone", () => {

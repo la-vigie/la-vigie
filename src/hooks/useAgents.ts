@@ -1,22 +1,22 @@
 import { useEffect, useState } from "react";
-import { listAgents, listAgentModels } from "../api";
-import type { AgentSpec } from "../store";
+import { listAgentModels } from "../api";
+import { useVigieStore } from "../store";
 
+// The catalog also drives engine routing (startAgentSession picks PTY vs ACP
+// by spec.execution), so it lives in zustand. Each fresh consumer mount
+// re-fetches (keeping the catalog current after Settings edits); loadAgents
+// dedups concurrent in-flight calls.
 export function useAgents() {
-  const [agents, setAgents] = useState<AgentSpec[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const agents = useVigieStore((s) => s.agents);
+  const loaded = useVigieStore((s) => s.agentsLoaded);
+  const error = useVigieStore((s) => s.agentsError);
   useEffect(() => {
-    let live = true;
-    listAgents()
-      .then((a) => { if (live) { setAgents(a); setLoading(false); } })
-      .catch((e) => {
-        if (live) { setError(String(e)); setLoading(false); }
-        console.error("listAgents failed:", e);
-      });
-    return () => { live = false; };
+    void useVigieStore.getState().loadAgents();
   }, []);
-  return { agents, loading, error };
+  // An errored load is not "still loading" — loadAgents leaves `agentsLoaded`
+  // false on failure (so it retries) but surfaces `agentsError`, so treat a set
+  // error as done to avoid a perpetual spinner.
+  return { agents, loading: !loaded && !error, error };
 }
 
 export function useAgentModels(agentName: string | undefined) {

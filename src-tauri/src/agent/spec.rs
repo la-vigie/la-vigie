@@ -1,13 +1,12 @@
-//! Pluggable agent definitions (TASK-21): the data describing how to launch a
-//! coding agent in a worktree, the code-defined built-in presets, the pure
+//! Pluggable agent definitions: the data describing how to launch a coding
+//! agent in a worktree, the code-defined built-in presets, the pure
 //! launch-command builder, and the pure registry resolver.
 //!
 //! Everything here is pure and unit-tested. Wiring into the PTY supervisor
 //! (`agent/mod.rs`) and the store registry is separate.
 
-// Inert Phase-1 model/registry code: Phase 2 wires these into the PTY
-// supervisor and the store registry. Allow dead code until then rather than
-// reach prematurely into live code paths.
+// Not everything here is exercised by every build; allow dead code rather
+// than reach prematurely into live code paths.
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
@@ -38,8 +37,8 @@ pub enum StatusMechanism {
 }
 
 /// How La Vigie injects its bundled way-of-working skills into a launched
-/// agent (TASK-35). Distinct from `StatusMechanism`: skill injection and
-/// status/hook wiring are independent concerns.
+/// agent. Distinct from `StatusMechanism`: skill injection and status/hook
+/// wiring are independent concerns.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SkillInjection {
@@ -61,6 +60,19 @@ impl Default for SkillInjection {
     }
 }
 
+/// Which backend runs the agent: the existing PTY supervisor, or the ACP
+/// (Agent Client Protocol) connection driver (`acp/`, see
+/// `docs/superpowers/specs/2026-07-17-acp-backend-engine-design.md`). Defaults
+/// to `Pty` so stored/custom `AgentSpec` JSON without this field decodes
+/// unchanged, same trick as `skill_injection`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    #[default]
+    Pty,
+    Acp,
+}
+
 /// A definition of a launchable coding agent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,7 +92,7 @@ pub struct AgentSpec {
     /// Flag(s) that enable the agent's auto-approve/skip-confirmation mode,
     /// appended after `base_args` (before `resume_args`) only when the resolved
     /// per-task/per-repo setting is on. Empty ⇒ the agent has no auto-approve
-    /// concept, so the setting is a no-op for it. (TASK-135)
+    /// concept, so the setting is a no-op for it.
     #[serde(default)]
     pub auto_approve_args: Vec<String>,
     /// How an initial prompt is delivered (forward-looking; see TASK-49).
@@ -90,7 +102,7 @@ pub struct AgentSpec {
     /// Flag used to pass a selected model id, e.g. `--model`. `None` ⇒ the
     /// agent takes no model selection (no Model control shown for it). Set but
     /// with `models_list_args` `None` ⇒ the agent takes a model but can't
-    /// enumerate them, so the picker offers free-text entry (TASK-209).
+    /// enumerate them, so the picker offers free-text entry.
     #[serde(default)]
     pub model_arg: Option<String>,
     /// Argv appended to `binary` to enumerate available models (one id per
@@ -100,10 +112,14 @@ pub struct AgentSpec {
     pub models_list_args: Option<Vec<String>>,
     /// True for code-defined presets (read-only in the UI).
     pub builtin: bool,
-    /// How La Vigie's bundled skills are injected for this agent (TASK-35).
+    /// How La Vigie's bundled skills are injected for this agent.
     /// Defaults to `None` so stored/custom specs and older rows decode safely.
     #[serde(default)]
     pub skill_injection: SkillInjection,
+    /// Which backend runs this agent: PTY supervisor or ACP connection driver.
+    /// Defaults to `Pty` so stored/custom specs and older rows decode safely.
+    #[serde(default)]
+    pub execution: ExecutionMode,
 }
 
 /// The id of the global default agent, used when neither task nor repo selects one.
@@ -123,13 +139,14 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
             auto_approve_args: vec![],
             prompt_mode: PromptMode::Arg,
             status: StatusMechanism::ClaudeHooks,
-            // TASK-209: Claude Code accepts `--model <id>` but has no `models`
+            // Claude Code accepts `--model <id>` but has no `models`
             // subcommand to enumerate ids, so `models_list_args` stays `None` and
             // the picker offers free-text entry (see `AgentModelPicker`).
             model_arg: Some("--model".into()),
             models_list_args: None,
             builtin: true,
             skill_injection: SkillInjection::PluginDir,
+            execution: ExecutionMode::Pty,
         },
         AgentSpec {
             name: "aider".into(),
@@ -145,6 +162,7 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
             models_list_args: None,
             builtin: true,
             skill_injection: SkillInjection::None,
+            execution: ExecutionMode::Pty,
         },
         AgentSpec {
             name: "codex".into(),
@@ -160,6 +178,7 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
             models_list_args: None,
             builtin: true,
             skill_injection: SkillInjection::WorktreeBundle { provider: "codex".into() },
+            execution: ExecutionMode::Pty,
         },
         AgentSpec {
             name: "antigravity".into(),
@@ -171,10 +190,11 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
             auto_approve_args: vec![],
             prompt_mode: PromptMode::Arg,
             status: StatusMechanism::Lifecycle,
-            model_arg: None,
-            models_list_args: None,
+            model_arg: Some("--model".into()),
+            models_list_args: Some(vec!["models".into()]),
             builtin: true,
             skill_injection: SkillInjection::WorktreeBundle { provider: "antigravity".into() },
+            execution: ExecutionMode::Pty,
         },
         AgentSpec {
             name: "cursor".into(),
@@ -190,6 +210,7 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
             models_list_args: None,
             builtin: true,
             skill_injection: SkillInjection::None,
+            execution: ExecutionMode::Pty,
         },
         AgentSpec {
             name: "opencode".into(),
@@ -205,6 +226,7 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
             models_list_args: Some(vec!["models".into()]),
             builtin: true,
             skill_injection: SkillInjection::WorktreeBundle { provider: "opencode".into() },
+            execution: ExecutionMode::Pty,
         },
         AgentSpec {
             name: "mistral".into(),
@@ -220,6 +242,57 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
             models_list_args: None,
             builtin: true,
             skill_injection: SkillInjection::WorktreeBundle { provider: "mistral".into() },
+            execution: ExecutionMode::Pty,
+        },
+        // ACP (Agent Client Protocol) engines: run via the `acp/` connection
+        // driver instead of the PTY supervisor (see
+        // docs/superpowers/specs/2026-07-17-acp-backend-engine-design.md).
+        // Appended at the end — an ordering test upstream pins the existing
+        // built-in name order, so new entries only ever extend the list.
+        AgentSpec {
+            name: "claude-acp".into(),
+            display_name: "Claude Code (ACP)".into(),
+            binary: "npx".into(),
+            base_args: vec!["-y".into(), "@agentclientprotocol/claude-agent-acp".into()],
+            resume_args: vec![],
+            extra_args: vec![],
+            // Auto-approve is handled by the ACP session mode set at spawn
+            // (bypassPermissions/default), not an argv flag.
+            auto_approve_args: vec![],
+            // The initial prompt travels over `session/prompt`, not argv/stdin.
+            prompt_mode: PromptMode::None,
+            // ACP status is driven in-process by the connection driver
+            // (`acp::translate::map_status`); `ClaudeHooks` stays reserved for
+            // the Claude PTY path (its `--settings` hook injection has no
+            // meaning for an ACP-launched process).
+            status: StatusMechanism::Lifecycle,
+            // The model is set via the ACP `model` configOption at spawn, not
+            // a launch flag.
+            model_arg: None,
+            models_list_args: None,
+            builtin: true,
+            // No bundled-skill injection for ACP engines in v1: `PluginDir`/
+            // `WorktreeBundle` assume a PTY-launched CLI reading its own
+            // config/plugin directories; wiring La Vigie's skills into an ACP
+            // session (via its MCP tool listing) is a follow-up.
+            skill_injection: SkillInjection::None,
+            execution: ExecutionMode::Acp,
+        },
+        AgentSpec {
+            name: "mistral-acp".into(),
+            display_name: "Mistral Vibe (ACP)".into(),
+            binary: "vibe-acp".into(),
+            base_args: vec![],
+            resume_args: vec![],
+            extra_args: vec![],
+            auto_approve_args: vec![],
+            prompt_mode: PromptMode::None,
+            status: StatusMechanism::Lifecycle,
+            model_arg: None,
+            models_list_args: None,
+            builtin: true,
+            skill_injection: SkillInjection::None,
+            execution: ExecutionMode::Acp,
         },
     ]
 }
@@ -238,8 +311,8 @@ pub fn builtin_specs() -> Vec<AgentSpec> {
 /// binary is returned unresolved; the caller resolves it via the binary resolver
 /// at spawn time. `hook_settings` and `mcp_config` are the inline JSON from
 /// `crate::agent::build_hook_settings` and `crate::agent::build_mcp_config`
-/// respectively; `plugin_dir` is the resolved La Vigie skill plugin path
-/// (TASK-153); all three are ignored for `Lifecycle` specs.
+/// respectively; `plugin_dir` is the resolved La Vigie skill plugin path;
+/// all three are ignored for `Lifecycle` specs.
 pub fn build_agent_command(
     spec: &AgentSpec,
     resume: bool,
@@ -257,9 +330,9 @@ pub fn build_agent_command(
     if resume && !spec.resume_args.is_empty() {
         args.extend(spec.resume_args.iter().cloned());
     }
-    // TASK-35: `--plugin-dir` is driven by the skill-injection strategy now, not
-    // the status mechanism. `claude` is both `PluginDir` and `ClaudeHooks`, so
-    // argv order (plugin-dir → mcp-config → settings) is unchanged for it.
+    // `--plugin-dir` is driven by the skill-injection strategy, not the status
+    // mechanism. `claude` is both `PluginDir` and `ClaudeHooks`, so argv order
+    // (plugin-dir → mcp-config → settings) is unchanged for it.
     if spec.skill_injection == SkillInjection::PluginDir {
         if let Some(dir) = plugin_dir {
             args.push("--plugin-dir".to_string());
@@ -304,13 +377,26 @@ pub struct PromptDelivery {
 /// yields an empty (no-op) delivery. The prompt's internal formatting is
 /// preserved (only outer blankness is checked) so a multi-line composed prompt
 /// is delivered verbatim.
-pub fn initial_prompt_delivery(mode: PromptMode, prompt: Option<&str>) -> PromptDelivery {
+///
+/// `arg_flag`, used only in `PromptMode::Arg`, is pushed immediately before
+/// the prompt when a CLI needs its own flag to treat the following argument
+/// as a prompt rather than something else — e.g. antigravity's `agy` requires
+/// `-i <prompt>` (`--prompt-interactive`) to seed an initial message and keep
+/// the session interactive; a bare positional prompt with no flag falls
+/// through to `agy`'s default interactive-picker launch and the prompt is
+/// silently dropped. It's only emitted alongside a real prompt, so a
+/// no-initial-prompt launch (e.g. opening a bare terminal) is unaffected.
+pub fn initial_prompt_delivery(mode: PromptMode, prompt: Option<&str>, arg_flag: Option<&str>) -> PromptDelivery {
     let prompt = match prompt {
         Some(p) if !p.trim().is_empty() => p,
         _ => return PromptDelivery::default(),
     };
     match mode {
-        PromptMode::Arg => PromptDelivery { args: vec![prompt.to_string()], stdin: None },
+        PromptMode::Arg => {
+            let mut args: Vec<String> = arg_flag.map(|f| f.to_string()).into_iter().collect();
+            args.push(prompt.to_string());
+            PromptDelivery { args, stdin: None }
+        }
         PromptMode::Stdin => PromptDelivery { args: Vec::new(), stdin: Some(prompt.to_string()) },
         PromptMode::None => PromptDelivery::default(),
     }
@@ -342,9 +428,9 @@ pub fn resolve_for_task(
 }
 
 /// The effective auto-approve setting for a session, using the precedence
-/// task override → repo default → global default. The global default is `true`,
-/// preserving the historical always-on behavior for agents that support
-/// auto-approve (an agent with empty `auto_approve_args` ignores it). (TASK-135)
+/// task override → repo default → global default. The global default is
+/// `true` so agents that support auto-approve keep working unattended by
+/// default (an agent with empty `auto_approve_args` ignores it).
 pub fn effective_auto_approve(task: Option<bool>, repo: Option<bool>) -> bool {
     task.or(repo).unwrap_or(true)
 }
@@ -357,8 +443,38 @@ mod tests {
     fn builtins_now_include_cursor_opencode_and_mistral() {
         let specs = builtin_specs();
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["claude", "aider", "codex", "antigravity", "cursor", "opencode", "mistral"]);
+        assert_eq!(
+            names,
+            vec![
+                "claude",
+                "aider",
+                "codex",
+                "antigravity",
+                "cursor",
+                "opencode",
+                "mistral",
+                "claude-acp",
+                "mistral-acp",
+            ]
+        );
         assert!(specs.iter().all(|s| s.builtin));
+    }
+
+    #[test]
+    fn acp_builtins_use_acp_execution_and_no_prompt_delivery() {
+        let specs = builtin_specs();
+        for name in ["claude-acp", "mistral-acp"] {
+            let s = specs.iter().find(|s| s.name == name).unwrap();
+            assert_eq!(s.execution, ExecutionMode::Acp, "{name} must run over ACP");
+            assert_eq!(s.prompt_mode, PromptMode::None, "{name}'s prompt goes over session/prompt");
+            assert_eq!(s.skill_injection, SkillInjection::None, "{name} has no skill injection in v1");
+            assert_eq!(s.status, StatusMechanism::Lifecycle, "{name} status is driven by the ACP driver");
+        }
+        for s in &specs {
+            if s.name != "claude-acp" && s.name != "mistral-acp" {
+                assert_eq!(s.execution, ExecutionMode::Pty, "{} must default to Pty execution", s.name);
+            }
+        }
     }
 
     #[test]
@@ -366,13 +482,14 @@ mod tests {
         let specs = builtin_specs();
         for s in &specs {
             match s.name.as_str() {
-                // OpenCode both takes a model and can enumerate them (list picker).
-                "opencode" => {
+                // OpenCode and Antigravity both take a model and can enumerate
+                // them (list picker) via a `models` subcommand.
+                "opencode" | "antigravity" => {
                     assert_eq!(s.model_arg.as_deref(), Some("--model"));
                     assert_eq!(s.models_list_args, Some(vec!["models".to_string()]));
                 }
                 // Claude Code takes `--model` but has no `models` subcommand, so it
-                // lists none — the picker offers free-text entry (TASK-209).
+                // lists none — the picker offers free-text entry.
                 "claude" => {
                     assert_eq!(s.model_arg.as_deref(), Some("--model"));
                     assert_eq!(s.models_list_args, None, "claude cannot enumerate models");
@@ -437,6 +554,7 @@ mod tests {
             models_list_args: None,
             builtin: false,
             skill_injection: SkillInjection::None,
+            execution: ExecutionMode::Pty,
         }
     }
 
@@ -511,29 +629,46 @@ mod tests {
 
     #[test]
     fn arg_mode_appends_prompt_as_positional_arg() {
-        let d = initial_prompt_delivery(PromptMode::Arg, Some("do the thing"));
+        let d = initial_prompt_delivery(PromptMode::Arg, Some("do the thing"), None);
         assert_eq!(d.args, vec!["do the thing".to_string()]);
         assert_eq!(d.stdin, None);
     }
 
     #[test]
+    fn arg_mode_prefixes_arg_flag_before_the_prompt_when_set() {
+        // antigravity's `agy` needs `-i` immediately before the prompt.
+        let d = initial_prompt_delivery(PromptMode::Arg, Some("do the thing"), Some("-i"));
+        assert_eq!(d.args, vec!["-i".to_string(), "do the thing".to_string()]);
+        assert_eq!(d.stdin, None);
+    }
+
+    #[test]
+    fn arg_flag_is_a_noop_without_a_real_prompt() {
+        // A bare-terminal launch (no initial prompt) must not emit `-i` with
+        // no value — `agy -i` alone is a hard CLI error ("flag needs an
+        // argument: -i"), so a no-prompt launch must stay flag-free.
+        assert_eq!(initial_prompt_delivery(PromptMode::Arg, None, Some("-i")), PromptDelivery::default());
+        assert_eq!(initial_prompt_delivery(PromptMode::Arg, Some("   "), Some("-i")), PromptDelivery::default());
+    }
+
+    #[test]
     fn stdin_mode_routes_prompt_to_stdin() {
-        let d = initial_prompt_delivery(PromptMode::Stdin, Some("hello"));
+        let d = initial_prompt_delivery(PromptMode::Stdin, Some("hello"), None);
         assert!(d.args.is_empty());
         assert_eq!(d.stdin, Some("hello".to_string()));
     }
 
     #[test]
     fn none_mode_ignores_prompt() {
-        let d = initial_prompt_delivery(PromptMode::None, Some("ignored"));
+        let d = initial_prompt_delivery(PromptMode::None, Some("ignored"), None);
         assert_eq!(d, PromptDelivery::default());
     }
 
     #[test]
     fn blank_or_absent_prompt_is_a_noop_in_any_mode() {
         for mode in [PromptMode::Arg, PromptMode::Stdin, PromptMode::None] {
-            assert_eq!(initial_prompt_delivery(mode, None), PromptDelivery::default());
-            assert_eq!(initial_prompt_delivery(mode, Some("   ")), PromptDelivery::default());
+            assert_eq!(initial_prompt_delivery(mode, None, None), PromptDelivery::default());
+            assert_eq!(initial_prompt_delivery(mode, Some("   "), None), PromptDelivery::default());
         }
     }
 
@@ -555,7 +690,7 @@ mod tests {
 
     #[test]
     fn claude_command_appends_model_when_selected() {
-        // TASK-209: claude now takes `--model <id>`; the selected model reaches spawn.
+        // claude takes `--model <id>`; the selected model reaches spawn.
         let claude = builtin_specs().into_iter().find(|s| s.name == "claude").unwrap();
         let (_b, args) = build_agent_command(&claude, false, Some("{\"hooks\":{}}"), None, Some("opus"), None, false);
         assert_eq!(args, vec!["--settings", "{\"hooks\":{}}", "--model", "opus"]);
@@ -700,6 +835,22 @@ mod tests {
             "extraArgs":[],"promptMode":"none","status":"lifecycle","builtin":false}"#;
         let spec: AgentSpec = serde_json::from_str(json).unwrap();
         assert_eq!(spec.skill_injection, SkillInjection::None);
+    }
+
+    #[test]
+    fn execution_defaults_to_pty_when_absent_in_json() {
+        // A stored/custom AgentSpec JSON written before ExecutionMode existed
+        // (every row on disk today) must still decode — defaulting to `Pty`.
+        let json = r#"{"name":"x","displayName":"x","binary":"x","baseArgs":[],"resumeArgs":[],
+            "extraArgs":[],"promptMode":"none","status":"lifecycle","builtin":false}"#;
+        let spec: AgentSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.execution, ExecutionMode::Pty);
+    }
+
+    #[test]
+    fn execution_mode_serializes_snake_case() {
+        assert_eq!(serde_json::to_string(&ExecutionMode::Pty).unwrap(), "\"pty\"");
+        assert_eq!(serde_json::to_string(&ExecutionMode::Acp).unwrap(), "\"acp\"");
     }
 
     #[test]

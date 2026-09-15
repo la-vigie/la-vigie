@@ -27,8 +27,12 @@ pub struct Repo {
     pub sound_settings: Option<String>,
     pub fetch_remote_base: Option<bool>,
     pub auto_approve: Option<bool>,
-    /// TASK-163: default for the New-Task "work in place" checkbox in this repo.
+    /// Default for the New-Task "work in place" checkbox in this repo.
     pub in_place_default: bool,
+    /// JSON-encoded auto-routing policy (`agent::routing::RoutingPolicy`).
+    /// `None` (or a disabled/malformed policy) ⇒ routing off — a task with no
+    /// explicit agent keeps the static `resolve_for_task` default.
+    pub routing_policy: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -38,6 +42,19 @@ pub struct Prompt {
     pub label: String,
     pub body: String,
     pub position: i64,
+}
+
+/// A stored WebAuthn passkey credential. `passkey_json` is the serialized
+/// webauthn-rs `Passkey` — opaque to the store; the remote layer (de)serializes it.
+/// `id` is its base64url credential id (the primary key). Sent to the client without
+/// `passkey_json` (the remote layer projects to a metadata-only view).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredCredential {
+    pub id: String,
+    pub passkey_json: String,
+    pub label: String,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -60,19 +77,29 @@ pub struct Task {
     pub setup_status: Option<SetupStatus>,
     pub hidden: bool,
     /// The seeded launch prompt for a queued (Pending) task; emitted as the
-    /// initial prompt when the task auto-launches on its dependency's merge
-    /// (TASK-90). None for normal tasks.
+    /// initial prompt when the task auto-launches on its dependency's merge.
+    /// None for normal tasks.
     pub pending_prompt: Option<String>,
     pub auto_approve: Option<bool>,
-    /// TASK-163: this task runs in the repo's existing checkout (`worktree_path`
+    /// This task runs in the repo's existing checkout (`worktree_path`
     /// == repo path) instead of an isolated worktree. Gates teardown so the
     /// shared checkout is never `git worktree remove`d.
     pub in_place: bool,
+    /// Why this task's engine was auto-selected by the repo's routing
+    /// policy (e.g. `auto-routed by rule #2 (hard/debug) → codex`). `None` when
+    /// the engine was chosen explicitly or routing was off — surfaced read-only
+    /// in the UI for observability.
+    pub routing_reason: Option<String>,
+    /// The ACP session id this task last ran with (a real agent-native session
+    /// id, e.g. Claude Code's own session UUID for `claude-acp`). `None` ⇒ this
+    /// task has never run an ACP-backed agent. Used to prefer `session/load` /
+    /// `session/resume` over a fresh `session/new` on relaunch (ACP backend
+    /// engine design doc, "Persistence & resume").
+    pub acp_session_id: Option<String>,
 }
 
 /// A repo-scoped recurring schedule: on `cron`, launch a task in `repo_id`
 /// whose initial prompt is `prompt` (typically a repo skill like `/security-scan`).
-/// TASK-173.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Schedule {
@@ -86,12 +113,12 @@ pub struct Schedule {
     pub base_branch: Option<String>,
     /// A one-time (non-recurring) schedule: fires once at `next_run_at`, then
     /// the poller retires it (enabled=false, next_run_at=NULL). One-shot rows
-    /// carry an empty `cron` (never cron-parsed). TASK-179.
+    /// carry an empty `cron` (never cron-parsed).
     pub one_shot: bool,
-    /// Skip prepending the repo's `initial_prompt` when this schedule fires
-    /// (TASK-181). Defaults to `true` — a scheduled run's prompt is usually
+    /// Skip prepending the repo's `initial_prompt` when this schedule fires.
+    /// Defaults to `true` — a scheduled run's prompt is usually
     /// self-contained (e.g. `/security-scan`), so the repo's interactive-onboarding
-    /// prompt is noise. Routed into TASK-160's `combineInitialPrompts(null, …)` skip
+    /// prompt is noise. Routed into `combineInitialPrompts(null, …)`'s skip
     /// path via the `task_launched` event.
     pub skip_repo_prompt: bool,
     pub enabled: bool,
@@ -100,6 +127,28 @@ pub struct Schedule {
     pub last_run_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// One persisted ACP usage/cost/rate-limit sample (a row of
+/// `acp_usage_events`): `AcpEvent::Usage` plus the attribution context the
+/// event itself lacks (provider/model/task/session). `cost_amount` is the
+/// cumulative session cost when the agent reported it (else `None`); `used`/
+/// `size` are a context-window gauge, not cumulative tokens.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpUsageEvent {
+    pub agent_id: String,
+    pub task_id: String,
+    pub session_id: Option<String>,
+    pub provider: String,
+    pub model: Option<String>,
+    pub used: i64,
+    pub size: i64,
+    pub cost_amount: Option<f64>,
+    pub currency: Option<String>,
+    pub rate_status: Option<String>,
+    /// Unix seconds at capture time.
+    pub ts: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -259,6 +308,40 @@ impl TaskStore {
                 created_at   INTEGER NOT NULL,
                 updated_at   INTEGER NOT NULL
             );
+
+            -- WebAuthn passkey credentials for durable remote auth. The
+            -- `passkey_json` is the serialized webauthn-rs `Passkey` (opaque here —
+            -- the remote layer owns (de)serialization); `id` is its base64url
+            -- credential id. A new table, so existing DBs get it on next open.
+            CREATE TABLE IF NOT EXISTS webauthn_credentials (
+                id           TEXT PRIMARY KEY,
+                passkey_json TEXT NOT NULL,
+                label        TEXT NOT NULL,
+                created_at   INTEGER NOT NULL
+            );
+
+            -- Per-model usage/cost/rate-limit events for ACP sessions, one row
+            -- per `UsageUpdate`. `cost_amount` is the *cumulative* session cost
+            -- (monotonic) — aggregation collapses to the latest per session,
+            -- never SUMs raw rows; `used`/`size` are a context-window gauge, not
+            -- cumulative tokens. `model` is nullable (agent may expose no model
+            -- selector → provider-only attribution). No FK on task_id: spend
+            -- must outlive task teardown.
+            CREATE TABLE IF NOT EXISTS acp_usage_events (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id     TEXT NOT NULL,
+                task_id      TEXT NOT NULL,
+                session_id   TEXT,
+                provider     TEXT NOT NULL,
+                model        TEXT,
+                used         INTEGER NOT NULL,
+                size         INTEGER NOT NULL,
+                cost_amount  REAL,
+                currency     TEXT,
+                rate_status  TEXT,
+                ts           INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_acp_usage_ts ON acp_usage_events(ts);
             ",
         )
         .context("creating schema")?;
@@ -311,8 +394,20 @@ impl TaskStore {
             conn.execute("ALTER TABLE tasks ADD COLUMN in_place INTEGER NOT NULL DEFAULT 0", [])
                 .context("adding tasks.in_place column")?;
         }
+        // Records why a task's engine was auto-selected by routing.
+        if !existing.contains("routing_reason") {
+            conn.execute("ALTER TABLE tasks ADD COLUMN routing_reason TEXT", [])
+                .context("adding tasks.routing_reason column")?;
+        }
+        // ACP backend engine: the ACP session id this task last ran with, so a
+        // relaunch can prefer session/load or session/resume over a fresh
+        // session/new. NULL ⇒ never ran an ACP-backed agent.
+        if !existing.contains("acp_session_id") {
+            conn.execute("ALTER TABLE tasks ADD COLUMN acp_session_id TEXT", [])
+                .context("adding tasks.acp_session_id column")?;
+        }
 
-        // TASK-179: add the one_shot column to schedules tables created before it.
+        // Add the one_shot column to schedules tables created before it.
         let sched_cols: std::collections::HashSet<String> = conn
             .prepare("PRAGMA table_info(schedules)")
             .context("reading schedules table_info")?
@@ -327,7 +422,7 @@ impl TaskStore {
             )
             .context("adding one_shot column")?;
         }
-        // TASK-181: skip-repo-prompt flag on schedules created before it. Default 1
+        // Skip-repo-prompt flag on schedules created before it. Default 1
         // (skip) — matches the new-schedule default; a one-time behavior change for
         // pre-existing schedules that relied on the repo prompt being prepended.
         if !sched_cols.contains("skip_repo_prompt") {
@@ -392,6 +487,11 @@ impl TaskStore {
             )
             .context("adding repos.in_place_default column")?;
         }
+        // Per-repo auto-routing policy (JSON). NULL ⇒ routing off.
+        if !repo_cols.contains("routing_policy") {
+            conn.execute("ALTER TABLE repos ADD COLUMN routing_policy TEXT", [])
+                .context("adding repos.routing_policy column")?;
+        }
 
         // Migrate agents table: add model columns if missing.
         let agent_cols: std::collections::HashSet<String> = conn
@@ -418,8 +518,8 @@ impl TaskStore {
     pub fn insert_repo(&self, repo: &Repo) -> Result<()> {
         self.conn
             .execute(
-                "INSERT INTO repos (id, name, path, default_branch, remote_url, worktree_root, setup_command, default_agent, auto_start_agent, initial_prompt, default_model, sound_settings, fetch_remote_base, auto_approve, in_place_default)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                "INSERT INTO repos (id, name, path, default_branch, remote_url, worktree_root, setup_command, default_agent, auto_start_agent, initial_prompt, default_model, sound_settings, fetch_remote_base, auto_approve, in_place_default, routing_policy)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     repo.id,
                     repo.name,
@@ -436,6 +536,7 @@ impl TaskStore {
                     repo.fetch_remote_base,
                     repo.auto_approve,
                     repo.in_place_default,
+                    repo.routing_policy,
                 ],
             )
             .context("inserting repo")?;
@@ -446,7 +547,7 @@ impl TaskStore {
         let repo = self
             .conn
             .query_row(
-                "SELECT id, name, path, default_branch, remote_url, worktree_root, setup_command, default_agent, auto_start_agent, initial_prompt, default_model, sound_settings, fetch_remote_base, auto_approve, in_place_default
+                "SELECT id, name, path, default_branch, remote_url, worktree_root, setup_command, default_agent, auto_start_agent, initial_prompt, default_model, sound_settings, fetch_remote_base, auto_approve, in_place_default, routing_policy
                  FROM repos WHERE id = ?1",
                 params![id],
                 Self::row_to_repo,
@@ -459,7 +560,7 @@ impl TaskStore {
     pub fn list_repos(&self) -> Result<Vec<Repo>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, name, path, default_branch, remote_url, worktree_root, setup_command, default_agent, auto_start_agent, initial_prompt, default_model, sound_settings, fetch_remote_base, auto_approve, in_place_default FROM repos")
+            .prepare("SELECT id, name, path, default_branch, remote_url, worktree_root, setup_command, default_agent, auto_start_agent, initial_prompt, default_model, sound_settings, fetch_remote_base, auto_approve, in_place_default, routing_policy FROM repos")
             .context("preparing list_repos")?;
         let rows = stmt
             .query_map([], Self::row_to_repo)
@@ -531,8 +632,8 @@ impl TaskStore {
         Ok(())
     }
 
-    /// List every key in `app_settings` (TASK-180: startup orchestrator-marker
-    /// prune diffs these against the live repo ids).
+    /// List every key in `app_settings` (startup orchestrator-marker prune
+    /// diffs these against the live repo ids).
     pub fn list_app_setting_keys(&self) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
@@ -608,6 +709,128 @@ impl TaskStore {
         tx.commit().context("committing reorder")
     }
 
+    // ── ACP usage/cost/rate-limit events ────────────────────────────────────
+
+    /// Append one ACP usage sample. The ACP driver calls this best-effort and
+    /// swallows the error — a persistence hiccup must never disrupt a live
+    /// session.
+    pub fn insert_acp_usage_event(&self, e: &AcpUsageEvent) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO acp_usage_events
+                    (agent_id, task_id, session_id, provider, model, used, size,
+                     cost_amount, currency, rate_status, ts)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    e.agent_id,
+                    e.task_id,
+                    e.session_id,
+                    e.provider,
+                    e.model,
+                    e.used,
+                    e.size,
+                    e.cost_amount,
+                    e.currency,
+                    e.rate_status,
+                    e.ts,
+                ],
+            )
+            .context("inserting acp usage event")?;
+        Ok(())
+    }
+
+    /// All ACP usage samples at or after `since_ts` (unix seconds), oldest
+    /// first. The pure `acp::usage::summarize_usage` collapses these per session
+    /// and groups them; keeping the query dumb keeps the aggregation testable.
+    pub fn acp_usage_events_since(&self, since_ts: i64) -> Result<Vec<AcpUsageEvent>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT agent_id, task_id, session_id, provider, model, used, size,
+                        cost_amount, currency, rate_status, ts
+                 FROM acp_usage_events
+                 WHERE ts >= ?1
+                 ORDER BY ts ASC",
+            )
+            .context("preparing acp_usage_events_since")?;
+        let rows = stmt
+            .query_map(params![since_ts], |row| {
+                Ok(AcpUsageEvent {
+                    agent_id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    session_id: row.get(2)?,
+                    provider: row.get(3)?,
+                    model: row.get(4)?,
+                    used: row.get(5)?,
+                    size: row.get(6)?,
+                    cost_amount: row.get(7)?,
+                    currency: row.get(8)?,
+                    rate_status: row.get(9)?,
+                    ts: row.get(10)?,
+                })
+            })
+            .context("querying acp usage events")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().context("collecting acp usage events")
+    }
+
+    // ---- WebAuthn passkey credentials --------------------------------------
+    // The store treats `passkey_json` as an opaque TEXT blob; the remote layer owns
+    // (de)serialization of the webauthn-rs `Passkey`. Ordered oldest-first so the UI
+    // list is stable.
+
+    pub fn list_credentials(&self) -> Result<Vec<StoredCredential>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, passkey_json, label, created_at FROM webauthn_credentials \
+                 ORDER BY created_at ASC",
+            )
+            .context("preparing list_credentials")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(StoredCredential {
+                    id: row.get(0)?,
+                    passkey_json: row.get(1)?,
+                    label: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            })
+            .context("querying webauthn_credentials")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().context("collecting credentials")
+    }
+
+    pub fn insert_credential(&self, c: &StoredCredential) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO webauthn_credentials (id, passkey_json, label, created_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![c.id, c.passkey_json, c.label, c.created_at],
+            )
+            .context("inserting webauthn credential")?;
+        Ok(())
+    }
+
+    /// Persist a mutated passkey (e.g. after a signature-counter update). No-op
+    /// error if the row vanished — the credential may have been revoked mid-flight.
+    pub fn update_credential_passkey(&self, id: &str, passkey_json: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE webauthn_credentials SET passkey_json = ?2 WHERE id = ?1",
+                params![id, passkey_json],
+            )
+            .context("updating webauthn credential")?;
+        Ok(())
+    }
+
+    /// Revoke a credential. Returns whether a row was actually deleted.
+    pub fn delete_credential(&self, id: &str) -> Result<bool> {
+        let n = self
+            .conn
+            .execute("DELETE FROM webauthn_credentials WHERE id = ?1", params![id])
+            .context("deleting webauthn credential")?;
+        Ok(n > 0)
+    }
+
     pub fn set_repo_sound_settings(&self, repo_id: &str, json: Option<&str>) -> Result<()> {
         let n = self
             .conn
@@ -681,6 +904,7 @@ impl TaskStore {
             fetch_remote_base: row.get(12)?,
             auto_approve: row.get(13)?,
             in_place_default: row.get(14)?,
+            routing_policy: row.get(15)?,
         })
     }
 
@@ -775,6 +999,10 @@ impl TaskStore {
                     .transpose()?,
                 builtin: false,
                 skill_injection: crate::agent::spec::SkillInjection::None,
+                // Custom agents are always PTY-backed (forced at
+                // `upsert_custom_agent`, mirrored here); ACP execution is
+                // builtin-only in v1.
+                execution: crate::agent::spec::ExecutionMode::Pty,
             })
         };
         Ok(parse())
@@ -785,8 +1013,8 @@ impl TaskStore {
     pub fn insert_task(&self, task: &Task) -> Result<()> {
         self.conn
             .execute(
-                "INSERT INTO tasks (id, repo_id, title, worktree_path, branch, base_branch, status, created_at, updated_at, pr_number, pr_url, ticket_key, agent, model, setup_status, hidden, pending_prompt, auto_approve, in_place)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                "INSERT INTO tasks (id, repo_id, title, worktree_path, branch, base_branch, status, created_at, updated_at, pr_number, pr_url, ticket_key, agent, model, setup_status, hidden, pending_prompt, auto_approve, in_place, routing_reason, acp_session_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
                 params![
                     task.id,
                     task.repo_id,
@@ -807,6 +1035,8 @@ impl TaskStore {
                     task.pending_prompt,
                     task.auto_approve,
                     task.in_place,
+                    task.routing_reason,
+                    task.acp_session_id,
                 ],
             )
             .context("inserting task")?;
@@ -817,7 +1047,7 @@ impl TaskStore {
         let task = self
             .conn
             .query_row(
-                "SELECT id, repo_id, title, worktree_path, branch, base_branch, status, created_at, updated_at, pr_number, pr_url, ticket_key, agent, model, setup_status, hidden, pending_prompt, auto_approve, in_place
+                "SELECT id, repo_id, title, worktree_path, branch, base_branch, status, created_at, updated_at, pr_number, pr_url, ticket_key, agent, model, setup_status, hidden, pending_prompt, auto_approve, in_place, routing_reason, acp_session_id
                  FROM tasks WHERE id = ?1",
                 params![id],
                 Self::row_to_task,
@@ -831,7 +1061,7 @@ impl TaskStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, repo_id, title, worktree_path, branch, base_branch, status, created_at, updated_at, pr_number, pr_url, ticket_key, agent, model, setup_status, hidden, pending_prompt, auto_approve, in_place
+                "SELECT id, repo_id, title, worktree_path, branch, base_branch, status, created_at, updated_at, pr_number, pr_url, ticket_key, agent, model, setup_status, hidden, pending_prompt, auto_approve, in_place, routing_reason, acp_session_id
                  FROM tasks",
             )
             .context("preparing list_tasks")?;
@@ -849,7 +1079,7 @@ impl TaskStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, repo_id, title, worktree_path, branch, base_branch, status, created_at, updated_at, pr_number, pr_url, ticket_key, agent, model, setup_status, hidden, pending_prompt, auto_approve, in_place
+                "SELECT id, repo_id, title, worktree_path, branch, base_branch, status, created_at, updated_at, pr_number, pr_url, ticket_key, agent, model, setup_status, hidden, pending_prompt, auto_approve, in_place, routing_reason, acp_session_id
                  FROM tasks WHERE repo_id = ?1",
             )
             .context("preparing list_tasks_for_repo")?;
@@ -889,7 +1119,7 @@ impl TaskStore {
     }
 
     /// Update a task's display title (and bump `updated_at`). Used by the
-    /// agent-driven rename primitive (TASK-40); the caller validates/trims the
+    /// agent-driven rename primitive; the caller validates/trims the
     /// name before persisting.
     pub fn update_task_title(&self, id: &str, title: &str) -> Result<()> {
         let now = std::time::SystemTime::now()
@@ -951,7 +1181,7 @@ impl TaskStore {
         Ok(())
     }
 
-    /// Set (or clear) a queued task's seeded launch prompt (TASK-90).
+    /// Set (or clear) a queued task's seeded launch prompt.
     pub fn set_task_pending_prompt(&self, id: &str, prompt: Option<&str>) -> Result<()> {
         self.conn
             .execute(
@@ -964,7 +1194,7 @@ impl TaskStore {
 
     /// Promote a queued (Pending) task to a live, launchable task: attach the
     /// freshly-created worktree + branch, flip status to Idle, and clear the
-    /// seeded prompt (it's delivered via the task_launched event). TASK-90.
+    /// seeded prompt (it's delivered via the task_launched event).
     pub fn promote_task(&self, id: &str, worktree_path: &str, branch: &str) -> Result<()> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1001,6 +1231,36 @@ impl TaskStore {
         Ok(())
     }
 
+    /// Persist a repo's auto-routing policy (JSON), or clear it (`None`).
+    pub fn set_repo_routing_policy(&self, id: &str, policy: Option<&str>) -> Result<()> {
+        let n = self
+            .conn
+            .execute("UPDATE repos SET routing_policy = ?1 WHERE id = ?2", params![policy, id])
+            .context("setting repo routing policy")?;
+        if n == 0 {
+            anyhow::bail!("repo not found: {id}");
+        }
+        Ok(())
+    }
+
+    /// Record why a task's engine was auto-selected (observability).
+    pub fn set_task_routing_reason(&self, id: &str, reason: Option<&str>) -> Result<()> {
+        self.conn
+            .execute("UPDATE tasks SET routing_reason = ?1 WHERE id = ?2", params![reason, id])
+            .context("setting task routing reason")?;
+        Ok(())
+    }
+
+    /// Record (or clear) the ACP session id this task last ran with, so a
+    /// relaunch can prefer `session/load`/`session/resume` over a fresh
+    /// `session/new` (ACP backend engine design doc, "Persistence & resume").
+    pub fn set_task_acp_session_id(&self, id: &str, value: Option<&str>) -> Result<()> {
+        self.conn
+            .execute("UPDATE tasks SET acp_session_id = ?1 WHERE id = ?2", params![value, id])
+            .context("setting task acp_session_id")?;
+        Ok(())
+    }
+
     pub fn delete_task(&self, id: &str) -> Result<()> {
         self.conn
             .execute("DELETE FROM tasks WHERE id = ?1", params![id])
@@ -1008,7 +1268,7 @@ impl TaskStore {
         Ok(())
     }
 
-    // ---- Task dependencies (TASK-90) ----
+    // ---- Task dependencies ----
 
     /// Queue `task_id` behind `depends_on_task_id`'s merge. Idempotent per edge.
     pub fn add_task_dependency(&self, task_id: &str, depends_on_task_id: &str) -> Result<()> {
@@ -1040,7 +1300,7 @@ impl TaskStore {
 
     /// The `depends_on_task_id`s `task_id` is still queued behind (its unmet
     /// blockers). Mirror of `dependents_of`; used to describe a pending task's
-    /// outstanding blockers to the UI (TASK-177).
+    /// outstanding blockers to the UI.
     pub fn blockers_of(&self, task_id: &str) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
@@ -1070,7 +1330,7 @@ impl TaskStore {
     /// Atomically read every dependent queued on `dep_id` AND remove those edges,
     /// in a single transaction, returning the dependents captured at removal time.
     ///
-    /// TASK-182: this is the authoritative promotion set for `promote_dependents_of`.
+    /// This is the authoritative promotion set for `promote_dependents_of`.
     /// Folding the read and the remove into one lock/txn scope means an edge
     /// inserted by a concurrent `launch_task` (the queue-vs-finish window) is
     /// either fully seen-and-returned (so it gets promoted) or not yet inserted —
@@ -1116,7 +1376,7 @@ impl TaskStore {
         Ok(count)
     }
 
-    // ── Schedules (TASK-173) ──────────────────────────────────────────────────
+    // ── Schedules ────────────────────────────────────────────────────────────
 
     /// Column list for schedule reads, kept positionally in lockstep with
     /// `map_schedule_row`'s `row.get(0..=14)`. Shared by every read query so
@@ -1245,40 +1505,60 @@ impl TaskStore {
         Ok(out)
     }
 
+    /// Atomically claim a due recurring schedule by advancing it to its next
+    /// occurrence. The `WHERE` clause is a compare-and-swap that mirrors
+    /// the `due_schedules` selection predicate against `due_at` (the `now` used to
+    /// select it) — so a concurrent poller that already advanced this row (its
+    /// `next_run_at` now sits in the future) matches 0 rows. Returns `true` iff
+    /// this call won the claim (exactly one row changed); a `false` return means
+    /// another poller got there first and the caller must not launch.
     pub fn advance_schedule(
         &self,
         id: &str,
         next_run_at: Option<i64>,
         last_run_at: i64,
         updated_at: i64,
-    ) -> Result<()> {
-        self.conn
+        due_at: i64,
+    ) -> Result<bool> {
+        let changed = self
+            .conn
             .execute(
-                "UPDATE schedules SET next_run_at = ?1, last_run_at = ?2, updated_at = ?3 WHERE id = ?4",
-                params![next_run_at, last_run_at, updated_at, id],
+                "UPDATE schedules SET next_run_at = ?1, last_run_at = ?2, updated_at = ?3
+                 WHERE id = ?4 AND enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?5",
+                params![next_run_at, last_run_at, updated_at, id, due_at],
             )
             .context("advancing schedule")?;
-        Ok(())
+        Ok(changed == 1)
     }
 
     /// Retire a one-shot schedule after it has fired: disable it and clear its
     /// next fire time so it is never re-selected by `due_schedules`, while
-    /// recording when it ran. TASK-179.
-    pub fn retire_schedule(&self, id: &str, last_run_at: i64, updated_at: i64) -> Result<()> {
-        self.conn
+    /// recording when it ran. The same compare-and-swap guard
+    /// as `advance_schedule` makes the retire an atomic claim — returns `true`
+    /// iff this call won it (exactly one row changed).
+    pub fn retire_schedule(
+        &self,
+        id: &str,
+        last_run_at: i64,
+        updated_at: i64,
+        due_at: i64,
+    ) -> Result<bool> {
+        let changed = self
+            .conn
             .execute(
-                "UPDATE schedules SET enabled = 0, next_run_at = NULL, last_run_at = ?1, updated_at = ?2 WHERE id = ?3",
-                params![last_run_at, updated_at, id],
+                "UPDATE schedules SET enabled = 0, next_run_at = NULL, last_run_at = ?1, updated_at = ?2
+                 WHERE id = ?3 AND enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?4",
+                params![last_run_at, updated_at, id, due_at],
             )
             .context("retiring schedule")?;
-        Ok(())
+        Ok(changed == 1)
     }
 
     /// Maps a row to a `Result<Task>`, where the outer `rusqlite::Result` covers
     /// row-reading errors and the inner `anyhow::Result` covers status parsing.
     fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Result<Task>> {
         let status_str: String = row.get(6)?;
-        // TASK-167: degrade gracefully on an unknown/future TaskStatus (e.g. a
+        // Degrade gracefully on an unknown/future TaskStatus (e.g. a
         // row written by a newer La Vigie sharing this store) instead of failing
         // the whole list — map it to Idle (harmless render) and log a warning.
         let status = TaskStatus::from_str(&status_str).unwrap_or_else(|_| {
@@ -1315,6 +1595,8 @@ impl TaskStore {
             pending_prompt: row.get(16)?,
             auto_approve: row.get(17)?,
             in_place: row.get(18)?,
+            routing_reason: row.get(19)?,
+            acp_session_id: row.get(20)?,
         }))
     }
 }
@@ -1348,6 +1630,7 @@ mod tests {
             fetch_remote_base: None,
             auto_approve: None,
             in_place_default: false,
+            routing_policy: None,
         }
     }
 
@@ -1372,6 +1655,8 @@ mod tests {
             pending_prompt: None,
             auto_approve: None,
             in_place: false,
+            routing_reason: None,
+            acp_session_id: None,
         }
     }
 
@@ -1543,7 +1828,7 @@ mod tests {
 
     #[test]
     fn list_tasks_tolerates_unknown_status_and_keeps_loading() {
-        // TASK-167: a row carrying an unknown/future TaskStatus (e.g. written by a
+        // A row carrying an unknown/future TaskStatus (e.g. written by a
         // newer La Vigie sharing this store) must not brick the whole list.
         let (_dir, store) = open_test_store();
         store.insert_repo(&sample_repo("repo-1")).unwrap();
@@ -1868,7 +2153,7 @@ mod tests {
         let dir = TempDir::new().expect("create temp dir");
         let db_path = dir.path().join("old.db");
         // Simulate a DB created before the setup_command column existed
-        // (worktree_root is present — this is a post-TASK-25 schema).
+        // (worktree_root is present).
         {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch(
@@ -1936,6 +2221,7 @@ mod tests {
             models_list_args: None,
             builtin: false,
             skill_injection: crate::agent::spec::SkillInjection::None,
+            execution: crate::agent::spec::ExecutionMode::Pty,
         }
     }
 
@@ -2003,6 +2289,7 @@ mod tests {
             setup_command: None, default_agent: None, auto_start_agent: false,
             initial_prompt: None, default_model: None, sound_settings: None, fetch_remote_base: None,
             auto_approve: None, in_place_default: false,
+            routing_policy: None,
         };
         store.insert_repo(&repo).unwrap();
         assert_eq!(store.get_repo("r1").unwrap().unwrap().sound_settings, None);
@@ -2017,7 +2304,7 @@ mod tests {
 
     #[test]
     fn migrates_old_db_adding_sound_settings_and_app_settings() {
-        // Pre-TASK-78 schema: repos without sound_settings, no app_settings table.
+        // Old schema: repos without sound_settings, no app_settings table.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("old.db");
         {
@@ -2322,6 +2609,47 @@ mod tests {
     }
 
     #[test]
+    fn acp_session_id_column_migration() {
+        let dir = TempDir::new().expect("create temp dir");
+        let db_path = dir.path().join("test.db");
+        let store = TaskStore::open(&db_path).expect("open + migrate");
+
+        // Verify column exists.
+        let cols: Vec<String> = store
+            .conn
+            .prepare("PRAGMA table_info(tasks)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(cols.contains(&"acp_session_id".to_string()));
+
+        // Verify default is NULL by inserting and retrieving.
+        let task = sample_task("task-1", "repo-1");
+        assert_eq!(task.acp_session_id, None);
+        store.insert_repo(&sample_repo("repo-1")).unwrap();
+        store.insert_task(&task).unwrap();
+        let retrieved = store.get_task("task-1").unwrap().unwrap();
+        assert_eq!(retrieved.acp_session_id, None);
+
+        // Verify a set value persists via the setter and round-trips.
+        store.set_task_acp_session_id("task-1", Some("sess-123")).unwrap();
+        let updated = store.get_task("task-1").unwrap().unwrap();
+        assert_eq!(updated.acp_session_id, Some("sess-123".to_string()));
+
+        // Clearing back to None persists too.
+        store.set_task_acp_session_id("task-1", None).unwrap();
+        let cleared = store.get_task("task-1").unwrap().unwrap();
+        assert_eq!(cleared.acp_session_id, None);
+
+        // Idempotent migration: re-opening the same DB must not panic.
+        drop(store);
+        let store2 = TaskStore::open(&db_path).expect("re-open + migrate");
+        assert_eq!(store2.get_task("task-1").unwrap().unwrap().acp_session_id, None);
+    }
+
+    #[test]
     fn prompts_crud_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let store = TaskStore::open(&dir.path().join("t.db")).unwrap();
@@ -2421,14 +2749,14 @@ mod tests {
         assert!(store.dependents_of("d2").unwrap().is_empty());
     }
 
-    // TASK-182: `promote_dependents_of` must capture its promotion set atomically
+    // `promote_dependents_of` must capture its promotion set atomically
     // with removing the blocker's edges. A dependent edge inserted in the
     // queue-vs-finish window (a launch queues `waiter → blocker` while the blocker
     // still exists) must be BOTH returned for promotion AND cleared in the same
     // step — otherwise the edge is deleted with no promoter (or left dangling once
     // the blocker row is gone) and the waiter is stranded Pending forever.
     // `take_dependents_on` folds the read + remove into one transaction; this is
-    // the seam the fixed promote path consumes.
+    // the seam the promote path consumes.
     #[test]
     fn take_dependents_on_reads_and_removes_atomically() {
         let dir = tempfile::tempdir().unwrap();
@@ -2483,7 +2811,7 @@ mod tests {
         assert!(store.blockers_of("b1").unwrap().is_empty());
     }
 
-    // TASK-177: a task queued behind TWO blockers stays not-ready until BOTH
+    // A task queued behind TWO blockers stays not-ready until BOTH
     // blockers' edges are cleared. This is the exact predicate promote_dependents_of
     // gates on (unmet_dependency_count == 0). Landing a strict subset must not
     // make it ready.
@@ -2532,7 +2860,7 @@ mod tests {
         assert_eq!(got.pending_prompt, None);
     }
 
-    // ── Schedules (TASK-173) ──────────────────────────────────────────────
+    // ── Schedules ────────────────────────────────────────────────────────
 
     fn sample_schedule(id: &str, repo_id: &str) -> Schedule {
         Schedule {
@@ -2604,11 +2932,31 @@ mod tests {
         store.insert_repo(&sample_repo("repo-1")).unwrap();
         store.insert_schedule(&sample_schedule("s1", "repo-1")).unwrap();
 
-        store.advance_schedule("s1", Some(9_999), 1_000, 1_000).unwrap();
+        // Fixture next_run_at = 1_000; due_at = 1_000 satisfies the CAS guard.
+        assert!(store.advance_schedule("s1", Some(9_999), 1_000, 1_000, 1_000).unwrap());
 
         let got = store.get_schedule("s1").unwrap().unwrap();
         assert_eq!(got.next_run_at, Some(9_999));
         assert_eq!(got.last_run_at, Some(1_000));
+    }
+
+    #[test]
+    fn advance_schedule_second_claim_no_ops() {
+        // Two sequential claims of the same due row — the first wins
+        // (advances next_run_at into the future), the second finds next_run_at no
+        // longer <= due_at and changes 0 rows, so it must not re-launch.
+        let (_tmp, store) = open_test_store();
+        store.insert_repo(&sample_repo("repo-1")).unwrap();
+        store.insert_schedule(&sample_schedule("s1", "repo-1")).unwrap();
+
+        // First poller claims the row (next_run_at 1_000 -> 9_999).
+        assert!(store.advance_schedule("s1", Some(9_999), 1_000, 1_000, 1_000).unwrap());
+        // Second poller, same due instant, sees the advanced row and no-ops.
+        assert!(!store.advance_schedule("s1", Some(8_888), 1_000, 1_000, 1_000).unwrap());
+
+        // The loser's write never landed — the row still reflects the winner.
+        let got = store.get_schedule("s1").unwrap().unwrap();
+        assert_eq!(got.next_run_at, Some(9_999));
     }
 
     #[test]
@@ -2629,7 +2977,7 @@ mod tests {
 
     #[test]
     fn skip_repo_prompt_roundtrips_and_updates() {
-        // TASK-181: the per-schedule skip flag persists through insert/get and
+        // The per-schedule skip flag persists through insert/get and
         // through update_schedule_fields (both true→false and false→true).
         let (_tmp, store) = open_test_store();
         store.insert_repo(&sample_repo("repo-1")).unwrap();
@@ -2662,7 +3010,8 @@ mod tests {
         s.next_run_at = Some(500);
         store.insert_schedule(&s).unwrap();
 
-        store.retire_schedule("once", 1_234, 1_234).unwrap();
+        // next_run_at = 500; due_at = 1_234 satisfies the CAS guard.
+        assert!(store.retire_schedule("once", 1_234, 1_234, 1_234).unwrap());
 
         let got = store.get_schedule("once").unwrap().unwrap();
         assert!(!got.enabled);
@@ -2670,6 +3019,22 @@ mod tests {
         assert_eq!(got.last_run_at, Some(1_234));
         // A retired one-shot is never re-selected as due.
         assert!(store.due_schedules(9_999).unwrap().is_empty());
+    }
+
+    #[test]
+    fn retire_schedule_second_claim_no_ops() {
+        // The one-shot retire is an atomic claim too — the first poller
+        // wins and clears next_run_at; the second finds the row already retired
+        // (next_run_at NULL / disabled) and changes 0 rows, so it won't re-launch.
+        let (_tmp, store) = open_test_store();
+        store.insert_repo(&sample_repo("repo-1")).unwrap();
+        let mut s = sample_schedule("once", "repo-1");
+        s.one_shot = true;
+        s.next_run_at = Some(500);
+        store.insert_schedule(&s).unwrap();
+
+        assert!(store.retire_schedule("once", 1_234, 1_234, 1_234).unwrap());
+        assert!(!store.retire_schedule("once", 1_234, 1_234, 1_234).unwrap());
     }
 
     #[test]
@@ -2694,6 +3059,7 @@ mod tests {
             fetch_remote_base: None,
             auto_approve: None,
             in_place_default: false,
+            routing_policy: None,
         };
         store.insert_repo(&repo).unwrap();
         assert!(!store.get_repo("r1").unwrap().unwrap().in_place_default);
@@ -2721,6 +3087,8 @@ mod tests {
             pending_prompt: None,
             auto_approve: None,
             in_place: true,
+            routing_reason: None,
+            acp_session_id: None,
         };
         store.insert_task(&task).unwrap();
         assert!(store.get_task("t1").unwrap().unwrap().in_place);
@@ -2729,5 +3097,57 @@ mod tests {
         drop(store);
         let store2 = TaskStore::open(&db).unwrap();
         assert!(store2.get_task("t1").unwrap().unwrap().in_place);
+    }
+
+    // ---- Webauthn credential CRUD ----
+
+    fn sample_credential(id: &str) -> StoredCredential {
+        StoredCredential {
+            id: id.to_string(),
+            passkey_json: format!("{{\"cred\":\"{id}\"}}"),
+            label: format!("label-{id}"),
+            created_at: 1000,
+        }
+    }
+
+    #[test]
+    fn credentials_insert_list_update_delete_roundtrip() {
+        let (_dir, store) = open_test_store();
+        assert!(store.list_credentials().unwrap().is_empty());
+
+        // Inserted oldest-first ordering is by created_at.
+        let mut a = sample_credential("aaa");
+        a.created_at = 10;
+        let mut b = sample_credential("bbb");
+        b.created_at = 20;
+        store.insert_credential(&b).unwrap();
+        store.insert_credential(&a).unwrap();
+        let list = store.list_credentials().unwrap();
+        assert_eq!(list.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["aaa", "bbb"]);
+        assert_eq!(list[0].passkey_json, a.passkey_json);
+
+        // Update persists the mutated passkey blob (e.g. counter bump).
+        store.update_credential_passkey("aaa", "{\"cred\":\"aaa\",\"counter\":5}").unwrap();
+        let updated = store.list_credentials().unwrap();
+        assert_eq!(updated[0].passkey_json, "{\"cred\":\"aaa\",\"counter\":5}");
+
+        // Delete reports whether a row went; a second delete reports false.
+        assert!(store.delete_credential("aaa").unwrap());
+        assert!(!store.delete_credential("aaa").unwrap());
+        let remaining = store.list_credentials().unwrap();
+        assert_eq!(remaining.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["bbb"]);
+    }
+
+    #[test]
+    fn credentials_survive_reopen() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("creds.db");
+        {
+            let store = TaskStore::open(&db).unwrap();
+            store.insert_credential(&sample_credential("keep")).unwrap();
+        }
+        // A new table on an existing DB is created on next open; the row persists.
+        let store2 = TaskStore::open(&db).unwrap();
+        assert_eq!(store2.list_credentials().unwrap().len(), 1);
     }
 }

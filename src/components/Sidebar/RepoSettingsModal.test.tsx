@@ -38,7 +38,7 @@ describe("RepoSettingsModal", () => {
       if (cmd === "set_repo_default_model") return Promise.resolve();
       if (cmd === "list_schedules") return Promise.resolve([]);
       if (cmd === "preview_next_run") return Promise.resolve(1_800_000_000);
-      // TASK-189: Save/Remove trigger the real store.refresh(), whose tail loads prompts and
+      // Save/Remove trigger the real store.refresh(), whose tail loads prompts and
       // custom sounds. Resolve them to correctly-typed empties so refresh() spawns no
       // wrong-typed/dangling async that could leak across test files.
       if (cmd === "list_prompts") return Promise.resolve([]);
@@ -299,7 +299,7 @@ describe("RepoSettingsModal", () => {
       fireEvent.click(await screen.findByTestId("amp-trigger"));
       fireEvent.click(await screen.findByText("Antigravity"));
       fireEvent.click(screen.getByText("Save"));
-      // The agent override now rides along in the single update_repo round-trip.
+      // The agent override rides along in the single update_repo round-trip.
       await waitFor(() =>
         expect(invokeMock).toHaveBeenCalledWith(
           "update_repo",

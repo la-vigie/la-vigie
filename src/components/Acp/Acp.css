@@ -1,0 +1,366 @@
+/* ACP bubbles/timeline surface (TASK-244). Overlays the terminal pane body
+   (`.terminal-pane__body` is `position: relative`; see
+   src/components/TaskDetail/TaskDetail.css) — it must sit above the PTY
+   without ever wrapping/remounting it (KEEP-ALIVE invariant lives in the
+   parent, not here). */
+
+.acp-surface {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  z-index: 1;
+  background: var(--bg-app);
+}
+
+.acp-surface__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 20px 8px;
+}
+
+.acp-surface__empty {
+  max-width: 52rem;
+  margin: 0 auto;
+  padding: 4px 4px;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+/* ── Timeline ─────────────────────────────────────────────────────────── */
+
+.acp-timeline {
+  max-width: 52rem;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Plan card */
+.acp-plan {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-size: 12px;
+}
+.acp-plan__summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.acp-plan__list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.acp-plan__entry {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--text-muted);
+}
+.acp-plan__entry[data-status="completed"] {
+  color: var(--text-faint);
+  text-decoration: line-through;
+}
+.acp-plan__entry[data-status="in_progress"] {
+  color: var(--text);
+}
+.acp-plan__glyph {
+  flex-shrink: 0;
+  color: var(--accent);
+  font-size: 11px;
+}
+.acp-plan__content {
+  flex: 1;
+}
+
+/* Message bubbles */
+.acp-message {
+  display: flex;
+}
+.acp-message--user {
+  justify-content: flex-end;
+}
+.acp-message--assistant {
+  justify-content: flex-start;
+}
+.acp-message--replay {
+  opacity: 0.55;
+}
+.acp-message__bubble {
+  max-width: 85%;
+  padding: 8px 12px;
+  border-radius: var(--radius-lg);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.acp-message--assistant .acp-message__bubble {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.acp-message--user .acp-message__bubble {
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  color: var(--text);
+}
+
+/* Thoughts */
+.acp-thought {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.acp-thought > summary {
+  cursor: pointer;
+  color: var(--text-faint);
+}
+.acp-thought--replay {
+  opacity: 0.55;
+}
+.acp-thought__body {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-muted);
+  font-style: italic;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Tool calls */
+.acp-tool {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 7px 10px;
+  font-size: 12px;
+}
+.acp-tool__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.acp-tool__icon {
+  flex-shrink: 0;
+}
+.acp-tool__title {
+  flex: 1;
+  font-family: var(--font-mono);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.acp-tool__status {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 500;
+  padding: 2px 7px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-pill);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.acp-tool__status--pending {
+  background: var(--bg-pill);
+  color: var(--text-muted);
+}
+.acp-tool__status--in_progress {
+  background: var(--accent-soft);
+  color: #b3a7ff;
+}
+.acp-tool__status--completed {
+  background: var(--green-soft);
+  color: var(--green-strong);
+}
+.acp-tool__status--failed {
+  background: var(--red-soft);
+  color: var(--red);
+}
+.acp-tool__status--unknown {
+  background: var(--bg-pill);
+  color: var(--text-faint);
+}
+.acp-tool__details {
+  margin-top: 6px;
+}
+.acp-tool__details > summary {
+  cursor: pointer;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+.acp-tool__content {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.acp-tool__text,
+.acp-tool__raw {
+  margin: 0;
+  padding: 6px 8px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.acp-tool__raw {
+  color: var(--text-faint);
+}
+
+/* Diff content blocks — colors mirror the Diff panel's add/remove tints
+   (src/components/Diff/DiffPanel.css, diff-dark.css). */
+.acp-diff {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.acp-diff__path {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.acp-diff__old,
+.acp-diff__new {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.acp-diff__old {
+  background: var(--red-soft);
+  color: #ff8a98;
+}
+.acp-diff__new {
+  background: var(--green-soft);
+  color: var(--green-strong);
+}
+
+/* Error rows */
+.acp-error {
+  padding: 7px 10px;
+  border-radius: var(--radius);
+  background: var(--red-soft);
+  border: 1px solid var(--red);
+  color: var(--red);
+  font-size: 12px;
+}
+
+/* ── Permission banner ────────────────────────────────────────────────── */
+
+.acp-permission {
+  flex-shrink: 0;
+  margin: 0 20px 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: rgba(227, 160, 8, 0.1);
+  border: 1px solid var(--status-attention);
+}
+.acp-permission__title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+.acp-permission__options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.acp-permission__option--allow_always,
+.acp-permission__option--allow_once {
+  border-color: var(--green-strong);
+  color: var(--green-strong);
+}
+.acp-permission__option--reject_always,
+.acp-permission__option--reject_once {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+/* ── Composer ─────────────────────────────────────────────────────────── */
+
+.acp-composer {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+  padding: 10px 20px 12px;
+}
+.acp-composer__input {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}
+.acp-composer__input:focus {
+  outline: none;
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.acp-composer__input:disabled {
+  opacity: 0.6;
+}
+.acp-composer__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+}
+.acp-composer__meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.acp-composer__mode {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.acp-composer__mode select {
+  font: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+}
+.acp-composer__usage {
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+.acp-composer__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}

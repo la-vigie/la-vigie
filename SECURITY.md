@@ -28,3 +28,24 @@ sensitive and only expose it over networks you trust.
 
 This project is under active development; security fixes target the latest `main`. Please make sure
 you're on the most recent release before reporting.
+
+## Known accepted risks
+
+Advisories the scheduled security scan (`security-scan.yml`, TASK-71) will keep re-flagging because
+no viable fix exists yet, tracked here so they aren't repeatedly re-investigated from scratch:
+
+- **`deepmerge-ts` <8.0.0 (GHSA-ggr8-5vv4-36mx, high)** and its transitive sibling **`extract-zip` \*
+  (GHSA-jmr9-qjv8-65gv / GHSA-7pqw-9j4j-h8q3, high)** — both reachable only through
+  `@wdio/tauri-service`'s own pinned `webdriverio@9.30.x`, which hasn't yet picked up the
+  `@wdio/config`/`@wdio/utils` bump to `deepmerge-ts@^8.0.0` (that fix landed only in
+  `@wdio/config@9.31.x`+, upstream at commit history for `webdriverio/desktop-mobile`). Confirmed as
+  of 2026-09-15 that even `@wdio/tauri-service`'s `next` prerelease still pins `webdriverio@9.30.0`,
+  and `npm audit fix --force` does not fix it either — it can only *downgrade* the whole `@wdio/*`
+  tree to 8.14.x (which also regresses `deepmerge-ts` itself to 5.1.0, i.e. more exposed, not less)
+  and npm reports "No fix available for @wdio/tauri-service@*" even after that downgrade.
+  - **Reach:** dev-only. `@wdio/*` and `@wdio/tauri-service` are `devDependencies` used solely by the
+    WebDriver e2e harness (TASK-142); they are never bundled into the shipped Tauri app, so this does
+    not reach production or any end user.
+  - **Re-check:** re-run `npm audit fix --dry-run` after any `@wdio/tauri-service` version bump — once
+    it repins to `webdriverio@>=9.31.x`, this resolves on its own via `npm audit fix` (no `--force`,
+    no `package.json` range change needed; `@wdio/tauri-service` is already declared as `^1.2.0`).

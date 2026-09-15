@@ -1,0 +1,13 @@
+{
+  "sessionId": "ea603afd-d858-423b-ac83-8940cf0e279c",
+  "update": {
+    "sessionUpdate": "tool_call",
+    "toolCallId": "call_1",
+    "title": "Read src/lib.rs",
+    "kind": "read",
+    "status": "pending",
+    "rawInput": {
+      "path": "src/lib.rs"
+    }
+  }
+}

@@ -2,7 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, configure } from "@testing-library/react";
 import { afterEach } from "vitest";
 
-// TASK-189: The default `waitFor`/`findBy*` timeout is 1000ms. Heavy component flows
+// The default `waitFor`/`findBy*` timeout is 1000ms. Heavy component flows
 // (e.g. PrPanel's create round-trip, TaskDetail's finish flow) legitimately complete just
 // under that bound on an unloaded machine, but occasionally exceed it under CI resource
 // contention / unlucky file ordering — surfacing as a rare, re-run-green flake where a

@@ -23,7 +23,12 @@ export function TerminalHost() {
   return (
     <>
       {Object.entries(sessionsByTask).flatMap(([surfaceId, sessions]) =>
-        sessions.map((session) => (
+        sessions
+          // ACP agent sessions have no PTY: their surface is <AcpSurface/>,
+          // and their live Channel is store-owned — mounting a
+          // TerminalView here would spawn a phantom PTY agent.
+          .filter((session) => session.engine !== "acp")
+          .map((session) => (
           <TerminalView
             key={`${surfaceId}:${session.localId}`}
             taskId={surfaceId}

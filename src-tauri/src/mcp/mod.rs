@@ -1,7 +1,7 @@
-//! In-process MCP server (TASK-89): exposes `start_task`, `finish_task`,
+//! In-process MCP server: exposes `start_task`, `finish_task`,
 //! `list_repos`, the control-plane read tools, and the schedule-management
 //! tools (`create_schedule` / `list_schedules` / `update_schedule` /
-//! `set_schedule_enabled` / `delete_schedule`, TASK-178) to spawned Claude
+//! `set_schedule_enabled` / `delete_schedule`) to spawned Claude
 //! agents over a loopback HTTP JSON-RPC endpoint, so an agent can
 //! self-dispatch, self-tear-down, and manage recurring schedules.
 //!
@@ -33,18 +33,18 @@ pub const PROTOCOL_VERSION: &str = "2024-11-05";
 /// Resolved scope of an MCP call (from the bearer token's tier).
 #[derive(Debug, Clone)]
 pub enum CallContext {
-    /// Per-agent, repo-scoped token (TASK-89). `task_id` is the caller's own task
+    /// Per-agent, repo-scoped token. `task_id` is the caller's own task
     /// (the default target for `finish_task`); `repo_id` is the default target
     /// for `start_task`.
     Agent {
         task_id: String,
         repo_id: String,
     },
-    /// Per-repo orchestrator: broad act+read confined to `repo_id` (TASK-180).
+    /// Per-repo orchestrator: broad act+read confined to `repo_id`.
     Orchestrator {
         repo_id: String,
     },
-    /// Broad-scope concierge token: cross-repo reads (TASK-111).
+    /// Broad-scope concierge token: cross-repo reads.
     Concierge,
 }
 
@@ -82,11 +82,11 @@ pub struct StartTaskArgs {
     /// Optional initial prompt for the new agent. Combined with the repo's
     /// configured prompt (repo prefix + this), mirroring the New-Task form.
     pub prompt: Option<String>,
-    /// Optional model override for the launched agent (TASK-223). Flows to the
+    /// Optional model override for the launched agent. Flows to the
     /// created task's `model`; the spawn then passes `--model <id>` for engines
-    /// with a `model_arg` (TASK-209). Omitted ⇒ the engine's own default.
+    /// with a `model_arg`. Omitted ⇒ the engine's own default.
     pub model: Option<String>,
-    /// La Vigie task ids to queue this task behind (start-on-merge, TASK-90/177).
+    /// La Vigie task ids to queue this task behind (start-on-merge).
     /// Accepts a single id or an array; the created task stays `Pending` until
     /// all of them are merged through La Vigie.
     pub after_merge_of: Vec<String>,
@@ -103,7 +103,7 @@ pub struct FinishTaskArgs {
 
 /// Parsed `create_schedule` arguments (validated downstream by
 /// `schedule::validate_schedule_fields`; `repo` scoped by the `authorize_call`
-/// choke-point (TASK-180)).
+/// choke-point).
 #[derive(Debug, Default, PartialEq)]
 pub struct CreateScheduleArgs {
     pub repo: Option<String>,
@@ -132,14 +132,14 @@ pub struct UpdateScheduleArgs {
 /// Parsed `schedule_task` tool arguments. Identity of the deferred launch is a
 /// title + prompt in the caller's repo (override via `repo`); the fire time is
 /// a relative delay (`in_seconds`, derived from `inSeconds`/`inHours`) and/or an
-/// absolute unix time (`at_unix`). TASK-179.
+/// absolute unix time (`at_unix`).
 #[derive(Debug, Default, PartialEq)]
 pub struct ScheduleTaskArgs {
     pub title: Option<String>,
     pub prompt: Option<String>,
     pub repo: Option<String>,
     pub agent: Option<String>,
-    /// Optional model override for the deferred launch (TASK-223); mirrors
+    /// Optional model override for the deferred launch; mirrors
     /// `create_schedule`'s `model`. Omitted ⇒ the engine's own default.
     pub model: Option<String>,
     pub in_seconds: Option<i64>,
@@ -204,7 +204,7 @@ pub struct CreatedTask {
     pub id: String,
     pub branch: String,
     pub worktree_path: String,
-    /// TASK-90/177: true when the task was QUEUED (Pending) behind other tasks'
+    /// True when the task was QUEUED (Pending) behind other tasks'
     /// landings rather than started now. Then branch/worktree_path are empty and
     /// `blocking` lists every task it waits on.
     pub queued: bool,
@@ -220,7 +220,7 @@ pub enum Routed {
     /// A complete response ready to return (initialize / tools/list / errors).
     Respond(Value),
     StartTask { id: Value, args: StartTaskArgs },
-    /// `queue_dependency` (TASK-164): start_task with a *required* non-empty
+    /// `queue_dependency`: start_task with a *required* non-empty
     /// dependency list. Dispatched via the same `do_start_task` path, so the
     /// created task is always `Pending`.
     QueueDependency { id: Value, args: StartTaskArgs },
@@ -265,7 +265,8 @@ fn tools_list_result() -> Value {
         "tools": [
             {
                 "name": "start_task",
-                "description": "Create and start a La Vigie task (git worktree + branch + agent). \
+                "description": "Call this whenever a request implies code work or investigation in the repo and nothing needs to land first — this is your default dispatch; reach for it rather than doing the work yourself. \
+Creates and starts a La Vigie task (git worktree + branch + agent). \
 Defaults to the calling agent's repo; a `repo` arg must match the calling token's repo (cross-repo is denied). \
 Provide a `title` and/or a `ticketKey` (the task's branch derives from the ticket key).",
                 "inputSchema": {
@@ -283,7 +284,8 @@ Provide a `title` and/or a `ticketKey` (the task's branch derives from the ticke
             },
             {
                 "name": "queue_dependency",
-                "description": "Create a NEW La Vigie task QUEUED behind one or more existing tasks — a clearer, dependency-first alternative to start_task's afterMergeOf. \
+                "description": "Call this when the work you want to dispatch must wait for other tasks to merge first because it builds on their result — dispatch it now and let La Vigie release it automatically. \
+Creates a NEW La Vigie task QUEUED behind one or more existing tasks — a clearer, dependency-first alternative to start_task's afterMergeOf. \
 The new task stays Pending (no worktree/agent yet) and auto-starts only once ALL of the tasks in `dependsOn` are merged through La Vigie. \
 `dependsOn` is required (one La Vigie task id or an array). Otherwise identical to start_task: defaults to the calling agent's repo (a `repo` arg must match; cross-repo denied), and takes an optional `title`/`ticketKey`/`prompt`/`agent`.",
                 "inputSchema": {
@@ -302,7 +304,8 @@ The new task stays Pending (no worktree/agent yet) and auto-starts only once ALL
             },
             {
                 "name": "finish_task",
-                "description": "Finish (tear down) a La Vigie task: stop its agent, remove the git worktree, and delete the task. \
+                "description": "Call this when a task's work is complete (merge it) or abandoned (keep/discard it) and you want it torn down. Discard deletes unmerged work — treat it as destructive and confirm intent before using it. \
+Finishes (tears down) a La Vigie task: stop its agent, remove the git worktree, and delete the task. \
 Defaults to the calling agent's own task; pass `taskId` to target another, which requires an orchestrator-scope token for that task's repo (cross-repo is denied). \
 `mode` is keep (default: leave the branch), discard (delete the branch), or merge (squash-merge the PR, then delete the branch). \
 Refuses a task with uncommitted or unmerged work unless `force` is true.",
@@ -317,7 +320,8 @@ Refuses a task with uncommitted or unmerged work unless `force` is true.",
             },
             {
                 "name": "schedule_task",
-                "description": "Schedule a La Vigie task to launch ONCE at a future time, then retire (a one-shot deferred launch). \
+                "description": "Call this when work should start LATER at a specific time rather than now — to defer a launch past a Claude quota reset, or run it overnight. \
+Schedules a La Vigie task to launch ONCE at a future time, then retire (a one-shot deferred launch). \
 Defaults to the calling agent's repo; a `repo` arg must match the calling token's repo (cross-repo is denied). Give a `title` and/or `prompt`. \
 Set `inHours` (e.g. 3 = in three hours) or `inSeconds` for a relative delay, or `atUnix` for an absolute unix time. \
 Useful to defer a launch until Claude quota resets. Does NOT create a worktree now — La Vigie launches it when due.",
@@ -337,17 +341,17 @@ Useful to defer a launch until Claude quota resets. Does NOT create a worktree n
             },
             {
                 "name": "list_repos",
-                "description": "List the repos registered in La Vigie so you can pick or confirm a target for start_task.",
+                "description": "Call this when you need a repo id you don't already have — to pick or confirm the target for a dispatch. Lists the repos registered in La Vigie.",
                 "inputSchema": { "type": "object", "properties": {} }
             },
             {
                 "name": "list_tasks",
-                "description": "List La Vigie tasks with their current status. Available to the concierge (across all repos) and to a repo-scoped orchestrator (its own repo only).",
+                "description": "Call this when you need an overview of what's in flight before deciding what to dispatch, finish, or nudge. Lists La Vigie tasks with their current status. Available to the concierge (across all repos) and to a repo-scoped orchestrator (its own repo only).",
                 "inputSchema": { "type": "object", "properties": {} }
             },
             {
                 "name": "task_status",
-                "description": "Get one task's current status and metadata by id. Available to the concierge (all repos) and to a repo-scoped orchestrator (its own repo).",
+                "description": "Call this when you want the current state of one specific task whose id you already have. Gets one task's status and metadata by id. Available to the concierge (all repos) and to a repo-scoped orchestrator (its own repo).",
                 "inputSchema": {
                     "type": "object",
                     "properties": { "taskId": { "type": "string", "description": "The task id." } },
@@ -356,7 +360,7 @@ Useful to defer a launch until Claude quota resets. Does NOT create a worktree n
             },
             {
                 "name": "get_task_activity",
-                "description": "Read a task's recent agent conversation/activity (chat-shaped messages). Poll incrementally by passing the returned `cursor` as `since`. Available to the concierge (all repos) and to a repo-scoped orchestrator (its own repo).",
+                "description": "Call this when you want to see what a task's agent is actually doing — to check progress after dispatching, or to read its reply after send_task_message. Reads a task's recent agent conversation/activity (chat-shaped messages). Poll incrementally by passing the returned `cursor` as `since`. Available to the concierge (all repos) and to a repo-scoped orchestrator (its own repo).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -368,7 +372,7 @@ Useful to defer a launch until Claude quota resets. Does NOT create a worktree n
             },
             {
                 "name": "send_task_message",
-                "description": "Send a message to another task's running agent — 'stir' it to keep it moving (unblock, redirect, or nudge a waiting agent). The message is delivered to the agent's input and submitted, as if typed. Repo-scoped: you may only message a task in your own repo. Requires a live agent — if the task has no running agent this errors (start or resume it first). Read the agent's reply afterward via get_task_activity.",
+                "description": "Call this when a running task is stuck, drifting, or waiting on you and you want to unblock or redirect it without tearing it down. Sends a message to another task's running agent — 'stir' it to keep it moving (unblock, redirect, or nudge a waiting agent). The message is delivered to the agent's input and submitted, as if typed. Repo-scoped: you may only message a task in your own repo. Requires a live agent — if the task has no running agent this errors (start or resume it first). Read the agent's reply afterward via get_task_activity.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -380,7 +384,8 @@ Useful to defer a launch until Claude quota resets. Does NOT create a worktree n
             },
             {
                 "name": "create_schedule",
-                "description": "Create a recurring schedule that launches a task on a cron. \
+                "description": "Call this when work should RECUR on a cron (e.g. a nightly security scan), not run just once. \
+Creates a recurring schedule that launches a task on a cron. \
 Defaults to the calling agent's repo; a `repoId` arg must match the calling token's repo (cross-repo is denied). \
 `prompt` is the initial prompt the launched agent receives (typically a repo skill like `/security-scan`). \
 `cron` is standard 5/6-field cron in the app's local time. Returns the created schedule (incl. `nextRunAt`).",
@@ -400,7 +405,7 @@ Defaults to the calling agent's repo; a `repoId` arg must match the calling toke
             },
             {
                 "name": "list_schedules",
-                "description": "List the recurring schedules for a repo. Defaults to the calling agent's repo; a `repoId` arg must match the calling token's repo (cross-repo is denied).",
+                "description": "Call this when you need to see a repo's existing recurring schedules before adding, editing, or disabling one. Lists the recurring schedules for a repo. Defaults to the calling agent's repo; a `repoId` arg must match the calling token's repo (cross-repo is denied).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -410,7 +415,7 @@ Defaults to the calling agent's repo; a `repoId` arg must match the calling toke
             },
             {
                 "name": "update_schedule",
-                "description": "Update all fields of an existing schedule (full replace). Requires `scheduleId` and `enabled`. \
+                "description": "Call this when an existing schedule needs changed fields (its cron, prompt, or agent). Updates all fields of an existing schedule (full replace). Requires `scheduleId` and `enabled`. \
 Confined to the calling token's repo (cross-repo denied); the schedule's repo must match. Returns the updated schedule.",
                 "inputSchema": {
                     "type": "object",
@@ -429,7 +434,7 @@ Confined to the calling token's repo (cross-repo denied); the schedule's repo mu
             },
             {
                 "name": "set_schedule_enabled",
-                "description": "Enable or disable a schedule without editing its other fields. Requires `scheduleId` and `enabled`. \
+                "description": "Call this when you only want to pause or resume a schedule, leaving its other fields intact. Enables or disables a schedule without editing its other fields. Requires `scheduleId` and `enabled`. \
 Confined to the calling token's repo (cross-repo denied); the schedule's repo must match. Returns the updated schedule.",
                 "inputSchema": {
                     "type": "object",
@@ -442,7 +447,7 @@ Confined to the calling token's repo (cross-repo denied); the schedule's repo mu
             },
             {
                 "name": "delete_schedule",
-                "description": "Delete a schedule by id. Confined to the calling token's repo (cross-repo denied); the schedule's repo must match.",
+                "description": "Call this when a recurring schedule should stop existing entirely (to keep it but pause it, use set_schedule_enabled instead). Deletes a schedule by id. Confined to the calling token's repo (cross-repo denied); the schedule's repo must match.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -501,7 +506,7 @@ fn parse_start_task_args(arguments: &Value) -> StartTaskArgs {
     }
 }
 
-/// Parse `queue_dependency` arguments (TASK-164). Identical to `start_task`'s
+/// Parse `queue_dependency` arguments. Identical to `start_task`'s
 /// fields except the dependency list is read from the clearer `dependsOn` key and
 /// is REQUIRED: an empty/missing list is a usage error, so the caller can't
 /// silently launch-now by forgetting it. Returns `StartTaskArgs` (with the deps
@@ -600,7 +605,7 @@ fn parse_schedule_task_args(arguments: &Value) -> ScheduleTaskArgs {
 
 /// Error returned when a normal Agent-tier token tries to finish a task other
 /// than its own — a cross-task teardown needs an orchestrator-scope token for
-/// that task's repo (TASK-180; the legacy concierge is read-only).
+/// that task's repo (the legacy concierge is read-only).
 const FINISH_SCOPE_REQUIRED: &str =
     "Finishing another agent's task requires an orchestrator-scope token for that task's repo.";
 
@@ -618,7 +623,7 @@ fn resolve_finish_target(ctx: &CallContext, task_id_arg: Option<&str>) -> Result
             Some(_) => Err(FINISH_SCOPE_REQUIRED.to_string()),
         },
         // Orchestrator has no own task, so it must name one explicitly; repo
-        // scoping is enforced by the choke-point (TASK-180 A3/B2).
+        // scoping is enforced by the choke-point.
         CallContext::Orchestrator { .. } => match arg {
             Some(t) => Ok(t.to_string()),
             None => {
@@ -895,16 +900,16 @@ struct TaskLaunchedPayload {
     /// Caller-supplied prompt to deliver to the new agent, if any. Combined with
     /// the repo's prompt by the frontend; not persisted on the task row.
     initial_prompt: Option<String>,
-    /// TASK-181: when `true`, the frontend skips prepending the repo's initial
-    /// prompt (TASK-160's `combineInitialPrompts(null, …)` path). Only the
+    /// When `true`, the frontend skips prepending the repo's initial
+    /// prompt (the same `combineInitialPrompts(null, …)` path). Only the
     /// scheduler sets this; manual/self-dispatch/promote paths pass `false`.
     skip_repo_prompt: bool,
 }
 
 /// Emit `task_launched` so the frontend's `useTaskLaunch` hook starts the agent
 /// on the existing path. Shared by `do_start_task` (MCP self-dispatch), the
-/// TASK-90 merge-time promote path, and the TASK-173 scheduler so all fire the
-/// identical event/payload. `skip_repo_prompt` (TASK-181) is `true` only for
+/// merge-time promote path, and the scheduler so all fire the
+/// identical event/payload. `skip_repo_prompt` is `true` only for
 /// scheduled runs configured to skip the repo prompt.
 pub(crate) fn emit_task_launched(
     app: &tauri::AppHandle,
@@ -921,14 +926,14 @@ pub(crate) fn emit_task_launched(
 
 /// Tauri event payload announcing a task the frontend didn't initiate itself —
 /// e.g. a pending/queued task created via MCP `start_task(afterMergeOf:…)`
-/// that has no worktree/agent yet, so `task_launched` never fires for it. TASK-90.
+/// that has no worktree/agent yet, so `task_launched` never fires for it.
 #[derive(serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct TaskCreatedPayload {
     task_id: String,
 }
 
-/// The single deny-by-default authorization choke-point (TASK-180). Resolve the
+/// The single deny-by-default authorization choke-point. Resolve the
 /// call's *target repo* from storage per `strategy` — never trusting a
 /// caller-supplied `args_repo` for id-addressed resources — then run the pure
 /// `authz::decide` policy against the caller's tier. Handlers receive an
@@ -1021,9 +1026,9 @@ async fn do_start_task(
     args: StartTaskArgs,
 ) -> Result<CreatedTask, String> {
     let StartTaskArgs { title, ticket_key, repo, agent, prompt, model, after_merge_of } = args;
-    // Deny-by-default choke-point (TASK-180): resolve + authorize the target repo
+    // Deny-by-default choke-point: resolve + authorize the target repo
     // (own repo unless an explicit repo arg is given; cross-repo is denied; the
-    // concierge cannot act). Replaces the old inline tier gate + `resolve_repo_id`.
+    // concierge cannot act).
     let authz = authorize_call(
         app,
         ctx,
@@ -1042,13 +1047,13 @@ async fn do_start_task(
         base_branch: None,
         ticket_key,
         agent,
-        // TASK-223: model override from the tool arg (normalized — trimmed,
+        // Model override from the tool arg (normalized — trimmed,
         // empty ⇒ None — by launch::resolve_launch); omitted ⇒ engine default.
         model,
         auto_approve: None,
         after_merge_of,
         prompt: prompt.clone(),
-        // TASK-163: placeholder default — the MCP start_task tool doesn't expose
+        // Placeholder default — the MCP start_task tool doesn't expose
         // in-place launches.
         in_place: false,
         branch_name: None,
@@ -1062,7 +1067,7 @@ async fn do_start_task(
     if task.status == crate::store::TaskStatus::Pending {
         // Queued behind other tasks' merges — no worktree/agent yet, so no
         // task_launched event. The landed-gated trigger promotes it once every
-        // blocker lands, from any finish surface. TASK-90/177. Emit task_created
+        // blocker lands, from any finish surface. Emit task_created
         // so the queued task shows in the sidebar right away.
         use tauri::Emitter as _;
         let _ = app.emit("task_created", TaskCreatedPayload { task_id: task.id.clone() });
@@ -1094,7 +1099,7 @@ async fn do_start_task(
 
     // The prompt is delivered when the frontend starts the agent (not persisted
     // on the task row), so it rides on the event rather than LaunchArgs.
-    // TASK-181: MCP self-dispatch keeps the repo-prompt combine (skip = false).
+    // MCP self-dispatch keeps the repo-prompt combine (skip = false).
     crate::mcp::emit_task_launched(app, task.id.clone(), prompt, false);
 
     Ok(CreatedTask {
@@ -1109,14 +1114,14 @@ async fn do_start_task(
 /// Execute `schedule_task`: resolve the repo (override → caller's context) and
 /// insert a one-shot schedule row that fires once at the resolved time. Agent
 /// tier only — like `start_task`, the concierge token cannot act. No launch or
-/// worktree now; the poller fires it when due. TASK-179.
+/// worktree now; the poller fires it when due.
 async fn do_schedule_task(
     app: &tauri::AppHandle,
     ctx: &CallContext,
     args: ScheduleTaskArgs,
 ) -> Result<ScheduledOnce, String> {
     let ScheduleTaskArgs { title, prompt, repo, agent, model, in_seconds, at_unix } = args;
-    // Deny-by-default choke-point (TASK-180): same repo resolution/authorization
+    // Deny-by-default choke-point: same repo resolution/authorization
     // as start_task — own repo by default, cross-repo denied, concierge cannot act.
     let authz = authorize_call(
         app,
@@ -1144,13 +1149,13 @@ async fn do_schedule_task(
         prompt: prompt.unwrap_or_default(),
         cron: String::new(),
         agent: agent.map(|a| a.trim().to_string()).filter(|a| !a.is_empty()),
-        // TASK-223: model override (trimmed; empty ⇒ None), mirroring `agent`
+        // Model override (trimmed; empty ⇒ None), mirroring `agent`
         // above and `create_schedule`. Omitted ⇒ engine default at fire time.
         model: model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty()),
         base_branch: None,
         enabled: true,
         one_shot: true,
-        // TASK-181: MCP-created schedules default to skipping the repo prompt.
+        // MCP-created schedules default to skipping the repo prompt.
         skip_repo_prompt: true,
         next_run_at: Some(fire_at),
         last_run_at: None,
@@ -1166,14 +1171,14 @@ async fn do_schedule_task(
     Ok(ScheduledOnce { id: schedule.id, fire_at })
 }
 
-/// Execute `finish_task`: enforce the scope tier, then compose the TASK-139
+/// Execute `finish_task`: enforce the scope tier, then compose the shared
 /// teardown core with the keep/discard/merge branch/PR semantics.
 ///
 ///   * scope — an Agent token may only finish its own task
 ///     (`resolve_finish_target`); an Orchestrator may finish any task **in its
 ///     own repo** and the read-only Concierge is denied outright — both enforced
 ///     by the `authorize_call(FinishTask, FromTaskId)` choke-point, which
-///     resolves the target's repo from storage (never caller input). TASK-180 B2.
+///     resolves the target's repo from storage (never caller input).
 ///   * merge — squash-merge the PR *before* teardown (gh runs in the worktree,
 ///     which teardown removes); the safety gate then passes via `pr_merged`.
 ///   * teardown — stops the PTY, removes the worktree, and deletes the row,
@@ -1209,7 +1214,7 @@ async fn do_finish_task(
         (task.worktree_path, task.branch, repo_path, task.in_place)
     };
 
-    // Deny-by-default choke-point (TASK-180 B2): resolve the target task's repo
+    // Deny-by-default choke-point: resolve the target task's repo
     // from storage and run the tier policy before any destructive step. An
     // Agent/Orchestrator may only finish a task in its own repo; the read-only
     // Concierge is denied. (An unknown task already short-circuited above as
@@ -1258,7 +1263,7 @@ async fn do_finish_task(
     // now-redundant gate and dodge a pr_status "is it MERGED yet" race. Other modes
     // use the caller's force verbatim.
     let effective_force = force || mode == "merge";
-    // Never delete the branch for an in-place task (TASK-163): it's the
+    // Never delete the branch for an in-place task: it's the
     // checkout's current branch, not a task-owned throwaway. Worktree removal
     // itself routes through `teardown::prepare_teardown`/`teardown_task`, which
     // already carry `in_place` via `TeardownPlan`.
@@ -1268,7 +1273,7 @@ async fn do_finish_task(
     // agent IS this MCP request's HTTP client, so that drops the connection and can
     // cancel this handler future mid-teardown, between worktree removal and the
     // DB-row delete + `task_removed` emit (stranding the task in the UI). Mirror the
-    // HookBridge self-teardown (TASK-139): detach the destructive phase so it runs to
+    // HookBridge self-teardown: detach the destructive phase so it runs to
     // completion regardless, and report Done optimistically. A cross-task finish (a
     // concierge tearing down someone else's task) has no such hazard — the caller
     // isn't the agent being stopped — so it awaits for an exact outcome.
@@ -1307,7 +1312,7 @@ async fn do_finish_task(
 
 /// Execute `send_task_message`: authorize (own-repo task only, concierge denied),
 /// find the task's live agent, and deliver `message` as a bracketed paste + Enter
-/// — mirroring the remote reply path (TASK-108). Unauthorized / no-live-agent /
+/// — mirroring the remote reply path. Unauthorized / no-live-agent /
 /// write failures return as an isError tool result.
 async fn do_send_task_message(
     app: &tauri::AppHandle,
@@ -1315,7 +1320,7 @@ async fn do_send_task_message(
     task_id: String,
     message: String,
 ) -> Result<String, String> {
-    // Deny-by-default choke-point (TASK-180): resolve the target task's repo from
+    // Deny-by-default choke-point: resolve the target task's repo from
     // storage and run the tier policy. An Agent/Orchestrator may only message a
     // task in its own repo; the read-only concierge is denied. The store guard is
     // taken briefly and dropped inside authorize_call — never held across an await.
@@ -1426,7 +1431,7 @@ async fn do_create_schedule(
     ctx: &CallContext,
     args: CreateScheduleArgs,
 ) -> Result<crate::store::Schedule, String> {
-    // Deny-by-default choke-point (TASK-180): resolve+authorize the target repo.
+    // Deny-by-default choke-point: resolve+authorize the target repo.
     // An Agent/Orchestrator manages only its own repo's schedules; a cross-repo
     // arg is denied and the read-only Concierge is denied outright.
     let repo_id = authorize_call(
@@ -1461,7 +1466,7 @@ async fn do_create_schedule(
         base_branch: fields.base_branch,
         enabled: true,
         one_shot: false,
-        // TASK-181: MCP-created schedules default to skipping the repo prompt.
+        // MCP-created schedules default to skipping the repo prompt.
         skip_repo_prompt: true,
         next_run_at,
         last_run_at: None,
@@ -1480,8 +1485,8 @@ async fn do_list_schedules(
     ctx: &CallContext,
     repo_arg: Option<String>,
 ) -> Result<Vec<crate::store::Schedule>, String> {
-    // Deny-by-default choke-point (TASK-180): only the caller's own repo; the
-    // read-only Concierge is denied (revoking the TASK-178 any-repo grant).
+    // Deny-by-default choke-point: only the caller's own repo; the
+    // read-only Concierge is denied.
     let repo_id = authorize_call(
         app,
         ctx,
@@ -1505,7 +1510,7 @@ async fn do_update_schedule(
     ctx: &CallContext,
     args: UpdateScheduleArgs,
 ) -> Result<crate::store::Schedule, String> {
-    // Deny-by-default choke-point (TASK-180): resolve the target repo from the
+    // Deny-by-default choke-point: resolve the target repo from the
     // stored schedule row (never caller input); an Agent/Orchestrator may touch
     // only its own repo, the read-only Concierge is denied.
     authorize_call(
@@ -1534,7 +1539,7 @@ async fn do_update_schedule(
     let now = crate::schedule::now_secs_pub();
     let state = app.state::<AppState>();
     let store = lock_store(&state)?;
-    // TASK-181: MCP update preserves the stored skip-repo-prompt flag (no MCP arg).
+    // MCP update preserves the stored skip-repo-prompt flag (no MCP arg).
     let current = store
         .get_schedule(&args.schedule_id)
         .map_err(|e| format!("{e:#}"))?
@@ -1560,7 +1565,7 @@ async fn do_set_schedule_enabled(
     schedule_id: &str,
     enabled: bool,
 ) -> Result<crate::store::Schedule, String> {
-    // Deny-by-default choke-point (TASK-180): repo resolved from the schedule row.
+    // Deny-by-default choke-point: repo resolved from the schedule row.
     authorize_call(
         app,
         ctx,
@@ -1603,7 +1608,7 @@ async fn do_delete_schedule(
     ctx: &CallContext,
     schedule_id: &str,
 ) -> Result<String, String> {
-    // Deny-by-default choke-point (TASK-180): repo resolved from the schedule row.
+    // Deny-by-default choke-point: repo resolved from the schedule row.
     authorize_call(
         app,
         ctx,
@@ -1651,7 +1656,7 @@ async fn mcp_handler(
             Json(start_task_response(id, result)).into_response()
         }
         Routed::QueueDependency { id, args } => {
-            // queue_dependency (TASK-164) is start_task with a guaranteed-non-empty
+            // queue_dependency is start_task with a guaranteed-non-empty
             // dependency list — same handler, same authz (Capability::StartTask),
             // same response formatter (the created task is always Pending/queued).
             let result = do_start_task(&app, &ctx, args).await;
@@ -1672,7 +1677,7 @@ async fn mcp_handler(
             Json(list_repos_response(id, result)).into_response()
         }
         Routed::ListTasks { id } => {
-            // Control-plane read via the choke-point (TASK-180). The legacy global
+            // Control-plane read via the choke-point. The legacy global
             // concierge keeps its cross-repo read (return all tasks); an
             // Agent/Orchestrator token is repo-filtered to its own repo.
             let result = match &ctx {
@@ -1695,7 +1700,7 @@ async fn mcp_handler(
         }
         Routed::TaskStatus { id, task_id } => {
             // Resolve the task's repo from storage, then authorize: the concierge
-            // may read any repo; an Agent/Orchestrator only its own (TASK-180).
+            // may read any repo; an Agent/Orchestrator only its own.
             let result = match authorize_call(
                 &app,
                 &ctx,
@@ -1748,7 +1753,7 @@ async fn mcp_handler(
             Json(delete_schedule_response(id, result)).into_response()
         }
         Routed::SendTaskMessage { id, task_id, message } => {
-            // Scope is enforced inside do_send_task_message via the TASK-180
+            // Scope is enforced inside do_send_task_message via the
             // choke-point: an Agent/Orchestrator may message a task in its own
             // repo; the concierge is denied. So we can't gate on tier here.
             let result = do_send_task_message(&app, &ctx, task_id, message).await;
@@ -1867,7 +1872,7 @@ mod tests {
         assert!(args.after_merge_of.is_empty());
     }
 
-    // --- queue_dependency (TASK-164) ---
+    // --- queue_dependency ---
 
     #[test]
     fn tools_list_advertises_queue_dependency_with_required_depends_on() {
@@ -1953,7 +1958,7 @@ mod tests {
         assert_eq!(resp["error"]["code"], -32602);
     }
 
-    // --- TASK-223: optional `model` on the task-creation tools ---
+    // --- optional `model` on the task-creation tools ---
 
     #[test]
     fn parse_start_task_args_reads_model() {
@@ -1966,7 +1971,7 @@ mod tests {
     #[test]
     fn start_task_routes_model_into_launch_args() {
         // Route-level wiring: a passed `model` reaches StartTaskArgs, which
-        // do_start_task threads verbatim into LaunchArgs.model (TASK-223).
+        // do_start_task threads verbatim into LaunchArgs.model.
         let req = json!({
             "jsonrpc":"2.0","id":30,"method":"tools/call",
             "params":{"name":"start_task","arguments":{"title":"x","model":"sonnet"}}
@@ -2080,7 +2085,7 @@ mod tests {
         assert!(text.contains("Started task"));
     }
 
-    // TASK-90: a queued (Pending, afterMergeOf) dispatch must not read as
+    // A queued (Pending, afterMergeOf) dispatch must not read as
     // "Started task  on branch  (worktree )." — it must say it's queued, and
     // name the dependency it's waiting on.
     #[test]
@@ -2152,6 +2157,8 @@ mod tests {
             pending_prompt: None,
             auto_approve: None,
             in_place: false,
+            routing_reason: None,
+            acp_session_id: None,
         };
         let s = task_summary(&t);
         assert_eq!(s.id, "t1");
@@ -2301,7 +2308,7 @@ mod tests {
         }
     }
 
-    // ── TASK-140: finish_task ──────────────────────────────────────────────
+    // ── finish_task ────────────────────────────────────────────────────────
 
     #[test]
     fn tools_list_advertises_finish_task() {
@@ -2378,8 +2385,8 @@ mod tests {
     fn resolve_finish_target_orchestrator_requires_explicit_task() {
         // An orchestrator has no own task, so — like a concierge — it must name a
         // target explicitly. Repo scoping (own-repo only) is then enforced by the
-        // `authorize_call(FinishTask, FromTaskId)` choke-point in `do_finish_task`
-        // (TASK-180 B2), which resolves the task's repo from storage.
+        // `authorize_call(FinishTask, FromTaskId)` choke-point in `do_finish_task`,
+        // which resolves the task's repo from storage.
         let orch = CallContext::Orchestrator { repo_id: "r1".into() };
         assert_eq!(resolve_finish_target(&orch, Some("  t9  ")).unwrap(), "t9");
         let err = resolve_finish_target(&orch, None).unwrap_err();
@@ -2445,7 +2452,7 @@ mod tests {
         assert!(resp["result"]["content"][0]["text"].as_str().unwrap().contains("orchestrator-scope token"));
     }
 
-    // ── TASK-178: schedule tools — pure parse + authz ──────────────────────
+    // ── schedule tools — pure parse + authz ───────────────────────────────
 
     #[test]
     fn parse_create_schedule_args_reads_all_fields() {
@@ -2613,7 +2620,7 @@ mod tests {
         assert!(err["result"]["content"][0]["text"].as_str().unwrap().contains("not authorized"));
     }
 
-    // ── TASK-179: schedule_task ────────────────────────────────────────────
+    // ── schedule_task ──────────────────────────────────────────────────────
 
     #[test]
     fn tools_list_advertises_schedule_task() {
@@ -2654,13 +2661,13 @@ mod tests {
 
     #[test]
     fn parse_schedule_task_reads_model() {
-        // TASK-223: model flows to the deferred launch's schedule row.
+        // Model flows to the deferred launch's schedule row.
         let args = parse_schedule_task_args(&json!({"title": "Later", "model": "opus"}));
         assert_eq!(args.model.as_deref(), Some("opus"));
         assert_eq!(parse_schedule_task_args(&json!({"title": "Later"})).model, None);
     }
 
-    // ── TASK-190: send_task_message ────────────────────────────────────────
+    // ── send_task_message ──────────────────────────────────────────────────
 
     #[test]
     fn tools_list_advertises_send_task_message() {

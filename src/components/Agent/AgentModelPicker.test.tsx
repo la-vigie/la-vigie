@@ -66,7 +66,19 @@ it("empty model list renders a selectable Default model row that emits (agent, n
   expect(screen.queryByRole("menu")).toBeNull();
 });
 
-// ── Free-text branch (TASK-209): engines with modelArg but no modelsListArgs ──
+it("shows a loading row (not the Default fallback) while an enumeration is in flight", async () => {
+  // opencode advertises models but the fetch hasn't resolved yet.
+  (hooks.useAgentModels as any).mockImplementation((n: string) =>
+    n === "opencode" ? { models: [], loading: true } : { models: [], loading: false });
+  render(<AgentModelPicker agent="aider" model={null} onChange={() => {}} />);
+  fireEvent.click(screen.getByTestId("amp-trigger"));
+  fireEvent.mouseEnter(within(screen.getByRole("menu")).getByText("OpenCode"));
+  expect(await screen.findByText("Loading models…")).toBeInTheDocument();
+  // The empty-list "Default model" fallback must not show while still loading.
+  expect(screen.queryByText("Default model")).toBeNull();
+});
+
+// ── Free-text branch: engines with modelArg but no modelsListArgs ──
 
 it("free-text: typing a model id and pressing Enter commits it", () => {
   const onChange = vi.fn();

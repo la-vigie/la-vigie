@@ -1,5 +1,6 @@
 import { useVigieStore } from "../../store";
 import { SettingsModal } from "../Settings/SettingsModal";
+import { UsagePanel } from "../Usage/UsagePanel";
 import "./TitleBar.css";
 
 /**
@@ -20,6 +21,10 @@ export function TitleBar() {
   const settingsOpen = useVigieStore((s) => s.settingsOpen);
   const openSettings = useVigieStore((s) => s.openSettings);
   const closeSettings = useVigieStore((s) => s.closeSettings);
+  const usageOpen = useVigieStore((s) => s.usageOpen);
+  const openUsage = useVigieStore((s) => s.openUsage);
+  const closeUsage = useVigieStore((s) => s.closeUsage);
+  const startOnboarding = useVigieStore((s) => s.startOnboarding);
   const muted = soundSettings?.muted ?? false;
   const toggleMute = () => {
     const cur = useVigieStore.getState().soundSettings;
@@ -93,12 +98,41 @@ export function TitleBar() {
         </button>
 
         {/*
-          Gear / settings button — deliberately omits data-tauri-drag-region so
-          a click does not drag the window (TASK-74 drag rule).
+          Usage & cost — opens the ACP per-model spend panel. Omits
+          data-tauri-drag-region so the click doesn't drag the window.
         */}
         <button
           type="button"
           className="icon-btn"
+          aria-label="Usage and cost"
+          title="Usage & cost"
+          onClick={openUsage}
+        >
+          <span aria-hidden>📊</span>
+        </button>
+
+        {/*
+          Help (?) — re-launches the first-run product tour on demand. Omits
+          data-tauri-drag-region so the click doesn't drag the window.
+        */}
+        <button
+          type="button"
+          className="icon-btn"
+          aria-label="Help — start product tour"
+          title="Start product tour"
+          onClick={() => startOnboarding()}
+        >
+          <span aria-hidden>?</span>
+        </button>
+
+        {/*
+          Gear / settings button — deliberately omits data-tauri-drag-region so
+          a click does not drag the window.
+        */}
+        <button
+          type="button"
+          className="icon-btn"
+          data-tour="remote"
           aria-label="Settings"
           onClick={openSettings}
         >
@@ -124,6 +158,7 @@ export function TitleBar() {
       {settingsOpen && (
         <SettingsModal onClose={closeSettings} />
       )}
+      {usageOpen && <UsagePanel onClose={closeUsage} />}
     </header>
   );
 }

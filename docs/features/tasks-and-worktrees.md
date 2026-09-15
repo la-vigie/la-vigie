@@ -28,9 +28,14 @@ list into a collapsible "N hidden" section at the bottom of the repo — useful 
 you're not actively working but don't want to delete yet. Right-click a hidden task and
 choose **Reopen** to bring it back.
 
-**Finish a task**: open it and click **Finish task** in the header. You'll get up to
-three options — **Merge PR & finish** (only shown when the task has an open PR), **Keep
-branch**, and **Discard branch** — plus **Cancel**.
+**Finish a task**: click **Finish task** in the header (or right-click the task and choose
+**Finish…**) — both open the same confirmation dialog. It shows the task's context (branch,
+base branch, PR state, and whether the worktree has uncommitted changes) and offers up to
+two easy paths: **Merge PR & finish** (the primary action, shown only when the task has an
+open PR) and **Keep branch**. Discarding the branch is a separate, de-emphasized action in a
+"danger zone" below: you first click **Discard branch instead…**, then confirm the explicit
+red **Discard `<branch>`** button — a two-step guard so it can't fire on a stray click. The
+danger zone is hidden for in-place tasks (their branch is always preserved).
 
 **Delete a task**: right-click it and choose **Delete**. A confirmation dialog lets you
 optionally also delete the branch; this is unconditional (no PR/merge step) and can't be

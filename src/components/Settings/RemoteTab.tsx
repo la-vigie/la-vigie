@@ -31,7 +31,7 @@ export function RemoteTab() {
 
   // Disambiguate remote sessions in the list: a per-repo orchestrator is labeled
   // by its repo (name if known, else the raw id); the legacy global concierge
-  // keeps its bare kind label (TASK-180).
+  // keeps its bare kind label.
   const sessionLabel = (s: RemoteSession): string => {
     if (s.kind === "orchestrator") {
       // Orchestrator sessions always carry a repoId (per remote_kind_label); the

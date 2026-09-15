@@ -24,7 +24,7 @@ export interface ReviewPanelProps {
  * "Option D" layout: the Changes diff owns the review pane; the Pull request
  * lives in a collapsible bottom dock (PrDock).
  *
- * Changes has two scopes (TASK-18): "Uncommitted" (working tree vs HEAD,
+ * Changes has two scopes: "Uncommitted" (working tree vs HEAD,
  * commit-able) and "Compared to <base>" (the whole branch diff, read-only).
  * The shared Refresh re-fetches the diff, the scope counts, and the dock.
  */
@@ -92,7 +92,7 @@ export function ReviewPanel({ taskId, diffPosition, onSetDiffPosition, onToggleD
       <div className="review-panel__changes">
         <div className="review-panel__changes-header">
           <span className="review-panel__changes-title">Changes</span>
-          <div className="segmented review-panel__scope">
+          <div className="segmented review-panel__scope" data-tour="review">
             <button
               type="button"
               className={

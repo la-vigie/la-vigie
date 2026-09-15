@@ -26,10 +26,10 @@ use crate::teardown::TeardownOutcome;
 
 /// Claude Code hook adapter: map a hook event name (+ optional notification_type)
 /// to a normalized `StatusEvent`. `PreToolUse` and `UserPromptSubmit` both mean
-/// "the agent is actively working" — mapping `PreToolUse` closes the TASK-47 gap
+/// "the agent is actively working" — mapping `PreToolUse` closes the gap
 /// where a permission approval (which resumes via `PreToolUse`, not a prompt
 /// submit) left the run-state stuck on NeedsAttention. `SubagentStart`/
-/// `SubagentStop` map to background-subagent events (TASK-85) so the state machine
+/// `SubagentStop` map to background-subagent events so the state machine
 /// keeps the pill active while a backgrounded subagent runs past the main `Stop`.
 /// Returns `None` for events that carry no status meaning.
 pub fn claude_event(
@@ -45,7 +45,7 @@ pub fn claude_event(
         },
         "Stop" => Some(StatusEvent::Idle),
         "StopFailure" => Some(StatusEvent::Failed),
-        // TASK-85: track in-flight background subagents so the pill stays active
+        // Track in-flight background subagents so the pill stays active
         // while a backgrounded subagent runs past the main loop's Stop.
         "SubagentStart" => Some(StatusEvent::SubagentStarted),
         "SubagentStop" => Some(StatusEvent::SubagentStopped),
@@ -91,12 +91,55 @@ pub fn parse_permission_mode(body: &[u8]) -> Option<String> {
     v["permission_mode"].as_str().map(str::to_string)
 }
 
-// ── Task-rename name sanitizer (TASK-40) ───────────────────────────────────────
+// ── StopFailure error text (surface agent error detail) ───────────────────────
+
+/// Generic fallback when a failure payload carries no recognizable reason — so an
+/// error state is explained *something*, never left as a silent red dot.
+const GENERIC_ERROR: &str = "The agent's turn ended in an error.";
+
+/// Cap on stored/surfaced error text (chars). `last_assistant_message` can be a
+/// long partial response; keep the banner and notification tidy.
+const MAX_ERROR_LEN: usize = 400;
+
+/// Truncate to `MAX_ERROR_LEN` chars at a char boundary, appending an ellipsis
+/// when clipped.
+fn cap_error(s: &str) -> String {
+    if s.chars().count() <= MAX_ERROR_LEN {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(MAX_ERROR_LEN - 1).collect();
+    out.push('…');
+    out
+}
+
+/// Map a Claude Code `StopFailure` failure category to a human-readable sentence.
+/// The category arrives under the `error` key (observed: Claude Code 2.1.x emits
+/// `"error":"model_not_found"`; `error_type` is checked too as a cross-version
+/// fallback). Unknown/other categories fall through to the raw category so no
+/// signal is lost; `unknown`/empty → generic.
+fn error_type_label(error_type: &str) -> String {
+    match error_type {
+        "rate_limit" => "Rate limited by the model API.",
+        "overloaded" => "The model API is overloaded.",
+        "authentication_failed" => "Authentication with the model API failed.",
+        "oauth_org_not_allowed" => "Your organization is not permitted to use this model (OAuth).",
+        "billing_error" => "A billing error stopped the agent.",
+        "invalid_request" => "The model API rejected the request as invalid.",
+        "model_not_found" => "The requested model was not found.",
+        "server_error" => "The model API returned a server error.",
+        "max_output_tokens" => "The turn hit the maximum output-token limit.",
+        "unknown" | "" => GENERIC_ERROR,
+        other => return format!("Agent error: {other}"),
+    }
+    .to_string()
+}
+
+// ── Task-rename name sanitizer ────────────────────────────────────────────────
 
 /// Maximum length (in chars) of an agent-set task name; longer input is truncated.
 const MAX_TASK_NAME_LEN: usize = 200;
 
-/// Normalize an agent-supplied task name (TASK-40): collapse every run of
+/// Normalize an agent-supplied task name: collapse every run of
 /// whitespace — including embedded newlines, tabs, and other control
 /// whitespace — to single spaces, trim the ends, and cap the length at a char
 /// boundary. Returns `None` when nothing usable remains, so a blank/whitespace
@@ -118,20 +161,26 @@ pub fn sanitize_task_name(raw: &str) -> Option<String> {
 pub trait StatusSink: Send + Sync + 'static {
     fn record(&self, agent_id: &str, event: StatusEvent);
     fn emit_console(&self, agent_id: &str, console: ConsoleStatus);
-    /// Rename the task identified by `task_id` to the (already-sanitized) `name`
-    /// (TASK-40/TASK-151). Keyed on the durable `task_id` (the agent presents its own
+    /// Rename the task identified by `task_id` to the (already-sanitized) `name`.
+    /// Keyed on the durable `task_id` (the agent presents its own
     /// `LAVIGIE_TASK_ID`), so it resolves after a restart. Returns `true` when the
     /// task existed and was renamed, `false` for an unknown id — the caller maps
     /// `false` to a 404 so a 200 genuinely means "renamed".
     fn set_task_name(&self, task_id: &str, name: &str) -> bool;
-    /// Record the filesystem path of `agent_id`'s transcript (TASK-108).
+    /// Record the filesystem path of `agent_id`'s transcript.
     /// Implementations resolve `agent_id → task_id` and store `task_id → path`;
     /// no-op for an unknown agent id.
     fn set_transcript(&self, agent_id: &str, transcript_path: &str);
     /// Store (or clear, with `None`) the pending `AskUserQuestion` for
-    /// `agent_id`'s task (TASK-122). Implementations resolve `agent_id → task_id`;
+    /// `agent_id`'s task. Implementations resolve `agent_id → task_id`;
     /// no-op for an unknown agent id.
     fn set_pending_question(&self, agent_id: &str, question: Option<PendingQuestion>);
+    /// Store (`Some`) or clear (`None`) the last error text for `agent_id`'s task,
+    /// captured from a `StopFailure` hook payload so the TaskDetail error banner
+    /// can explain the red dot. Implementations resolve `agent_id → task_id`,
+    /// store keyed by task_id, and forward to the webview; no-op for an unknown
+    /// agent id. Cleared when the agent transitions back to Working/Idle.
+    fn set_task_error(&self, agent_id: &str, message: Option<String>);
 }
 
 /// Boxed future returned by [`TaskTeardown::teardown`]. Written by hand (rather
@@ -140,7 +189,7 @@ pub trait StatusSink: Send + Sync + 'static {
 pub type TeardownFuture<'a> =
     Pin<Box<dyn Future<Output = Result<TeardownOutcome, String>> + Send + 'a>>;
 
-/// Tear down the task identified by `task_id` (TASK-139/TASK-151). Async + fallible,
+/// Tear down the task identified by `task_id`. Async + fallible,
 /// unlike the fire-and-forget `StatusSink` methods, so it is a separate seam.
 /// Implemented by `TauriSink` (real teardown) and by test doubles.
 pub trait TaskTeardown: Send + Sync + 'static {
@@ -177,7 +226,7 @@ pub struct AgentConsolePayload {
     pub console: ConsoleStatus,
 }
 
-/// Tauri event payload for `"task_renamed"` (TASK-40): the task whose title an
+/// Tauri event payload for `"task_renamed"`: the task whose title an
 /// agent changed, and its new title. The frontend patches the task in place so
 /// the sidebar/header refresh live.
 #[derive(serde::Serialize, Clone)]
@@ -185,6 +234,18 @@ pub struct AgentConsolePayload {
 struct TaskRenamedPayload {
     task_id: String,
     title: String,
+}
+
+/// Tauri event payload for `"agent_error"`: the last error text for a task whose
+/// agent turn ended in `StopFailure`, or `message: None` to clear it. The
+/// frontend stores it per task and shows the dismissible TaskDetail error banner.
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct AgentErrorPayload {
+    agent_id: String,
+    task_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
 }
 
 /// Production `StatusSink` that emits a Tauri event to all webview listeners.
@@ -237,7 +298,7 @@ impl StatusSink for TauriSink {
             },
         );
 
-        // 4. TASK-204: refresh the tray so its status glyphs track the transition.
+        // 4. Refresh the tray so its status glyphs track the transition.
         //    `apply_event` returned Some only on a real change, so this is bounded.
         crate::tray::refresh(&self.app);
     }
@@ -320,6 +381,44 @@ impl StatusSink for TauriSink {
                 }
             });
     }
+
+    fn set_task_error(&self, agent_id: &str, message: Option<String>) {
+        use tauri::{Emitter as _, Manager as _};
+        // Resolve the agent's own task; unknown id → no-op.
+        let task_id = self.app.state::<AppState>()
+            .agent_tasks
+            .lock()
+            .ok()
+            .and_then(|m| m.get(agent_id).cloned());
+        let Some(task_id) = task_id else { return };
+        // Set (Some) or clear (None). Mutex-safe: lock → mutate → drop guard.
+        // A clear only matters if there was actually an error stored — so a task
+        // with no error doesn't broadcast a redundant clear on every Working/Idle
+        // hook (Working fires many times per turn).
+        let should_emit = self.app.state::<AppState>()
+            .task_errors
+            .lock()
+            .map(|mut map| match message.clone() {
+                Some(m) => {
+                    map.insert(task_id.clone(), m);
+                    true
+                }
+                None => map.remove(&task_id).is_some(),
+            })
+            .unwrap_or(false);
+        if !should_emit {
+            return;
+        }
+        // Forward to the webview so the banner updates live (message: None clears).
+        let _ = self.app.emit(
+            "agent_error",
+            AgentErrorPayload {
+                agent_id: agent_id.to_string(),
+                task_id,
+                message,
+            },
+        );
+    }
 }
 
 impl TaskTeardown for TauriSink {
@@ -339,7 +438,7 @@ impl TaskTeardown for TauriSink {
                     let app2 = app.clone();
                     tauri::async_runtime::spawn(async move {
                         let state = app2.state::<AppState>();
-                        // TASK-90: promote landed dependents before the destructive
+                        // Promote landed dependents before the destructive
                         // teardown (worktree still present, row still resolves).
                         crate::commands::promote_dependents_of(
                             &state, &app2, &plan.task_id, &plan.branch, &plan.repo_path, promote,
@@ -365,6 +464,41 @@ struct HookBody {
     transcript_path: Option<String>,
     tool_name: Option<String>,
     tool_input: Option<serde_json::Value>,
+    /// Claude's own final text for the turn. On a `StopFailure` this carries the
+    /// human-readable failure explanation (e.g. which model was rejected) — the
+    /// best "why" available without scraping the transcript. Observed in the live
+    /// Claude Code 2.1.x payload.
+    last_assistant_message: Option<String>,
+    /// `StopFailure` categorical failure code, under the `error` key (observed:
+    /// `"error":"model_not_found"`). `error_type` is a cross-version fallback.
+    error: Option<String>,
+    error_type: Option<String>,
+    /// Tolerant free-text fallbacks for other providers.
+    reason: Option<String>,
+    message: Option<String>,
+}
+
+impl HookBody {
+    /// Best-available human error text for an error-bearing (`StopFailure`)
+    /// payload. Prefers Claude's own account of the failure
+    /// (`last_assistant_message`) or an explicit provider field, else maps the
+    /// categorical failure code (`error`/`error_type`), else a generic fallback —
+    /// so an error is never left unexplained. Capped for tidiness.
+    fn error_text(&self) -> String {
+        for cand in [
+            self.last_assistant_message.as_deref(),
+            self.reason.as_deref(),
+            self.message.as_deref(),
+        ] {
+            if let Some(s) = cand.map(str::trim).filter(|s| !s.is_empty()) {
+                return cap_error(s);
+            }
+        }
+        match self.error.as_deref().or(self.error_type.as_deref()).map(str::trim) {
+            Some(t) if !t.is_empty() => error_type_label(t),
+            _ => GENERIC_ERROR.to_string(),
+        }
+    }
 }
 
 /// `POST /hook/:agent_id` — receive a hook payload and (maybe) emit a status.
@@ -379,7 +513,7 @@ async fn hook_handler(
         let is_ask = parsed.hook_event_name.as_deref() == Some("PreToolUse")
             && parsed.tool_name.as_deref() == Some("AskUserQuestion");
         if is_ask {
-            // TASK-122: a structured question is awaiting input. Mark NeedsAttention
+            // A structured question is awaiting input. Mark NeedsAttention
             // (not the usual PreToolUse → Working) and capture the choices.
             let questions = parsed
                 .tool_input
@@ -390,6 +524,20 @@ async fn hook_handler(
             sink.set_pending_question(&agent_id, Some(PendingQuestion { questions }));
         } else if let Some(event) = parsed.hook_event_name.as_deref() {
             if let Some(status_event) = claude_event(event, parsed.notification_type.as_deref()) {
+                // Surface (or clear) the last error around the status transition.
+                // On failure, store the best-available reason so the red dot is
+                // explicable; on any move back to Working/Idle, clear it. Emitted
+                // BEFORE `record` so the frontend has the message when the matching
+                // `agent_status` error event arrives (for the notification body).
+                match status_event {
+                    StatusEvent::Failed => {
+                        sink.set_task_error(&agent_id, Some(parsed.error_text()));
+                    }
+                    StatusEvent::Working | StatusEvent::Idle => {
+                        sink.set_task_error(&agent_id, None);
+                    }
+                    _ => {}
+                }
                 sink.record(&agent_id, status_event);
                 // Clear a stale card only when the agent has moved PAST the question
                 // (Working/Idle/Failed/subagent). Never clear on NeedsAttention: an
@@ -410,7 +558,7 @@ async fn hook_handler(
     axum::http::StatusCode::OK
 }
 
-/// `POST /rename/:task_id` — rename the calling agent's own task (TASK-40/TASK-151).
+/// `POST /rename/:task_id` — rename the calling agent's own task.
 /// Keyed on the durable `task_id` so it resolves after an app restart. The request
 /// body is the raw new name (plain text). Returns 200 with the applied (sanitized)
 /// name on success; 400 for a blank/whitespace-only name; 404 for an unknown
@@ -456,10 +604,10 @@ fn finish_response(result: Result<TeardownOutcome, String>) -> (axum::http::Stat
 }
 
 /// `POST /finish/{task_id}?force=<bool>&promote=<bool>` — tear down the calling
-/// agent's own task (TASK-139/TASK-151). Keyed on the durable `task_id` so it
+/// agent's own task. Keyed on the durable `task_id` so it
 /// resolves after an app restart. 200 done / 404 unknown / 409 unsafe (uncommitted
 /// or unmerged work) / 500 on git/DB failure. Before the destructive teardown,
-/// promotes any dependents queued on this task once its work has landed (TASK-90);
+/// promotes any dependents queued on this task once its work has landed;
 /// `promote=true` bypasses the landed check (e.g. no-PR flows). Teardown of a
 /// `Ready` plan runs detached, so a 200 here means "accepted; teardown will run to
 /// completion in the background" — not that it has finished. The caller's PTY is
@@ -556,7 +704,7 @@ mod tests {
 
     #[test]
     fn claude_subagent_start_and_stop_map_to_background_events() {
-        // TASK-85: background-subagent lifecycle drives the in-flight counter so the
+        // Background-subagent lifecycle drives the in-flight counter so the
         // pill stays active while a backgrounded subagent runs past the main Stop.
         assert_eq!(claude_event("SubagentStart", None), Some(StatusEvent::SubagentStarted));
         assert_eq!(claude_event("SubagentStop", None), Some(StatusEvent::SubagentStopped));
@@ -577,6 +725,7 @@ mod tests {
         renames: Mutex<Vec<(String, String)>>,
         transcripts: Mutex<Vec<(String, String)>>,
         pending: Mutex<Vec<(String, Option<PendingQuestion>)>>,
+        errors: Mutex<Vec<(String, Option<String>)>>,
         /// What `set_task_name` returns — models "task found" (true) vs an unknown
         /// task_id (false → the handler 404s). Defaults to true via `new`.
         rename_result: bool,
@@ -594,6 +743,7 @@ mod tests {
                 renames: Mutex::new(Vec::new()),
                 transcripts: Mutex::new(Vec::new()),
                 pending: Mutex::new(Vec::new()),
+                errors: Mutex::new(Vec::new()),
                 rename_result,
             })
         }
@@ -617,6 +767,10 @@ mod tests {
         fn collected_pending(&self) -> Vec<(String, Option<PendingQuestion>)> {
             self.pending.lock().unwrap().clone()
         }
+
+        fn collected_errors(&self) -> Vec<(String, Option<String>)> {
+            self.errors.lock().unwrap().clone()
+        }
     }
 
     impl StatusSink for CollectingSink {
@@ -639,6 +793,10 @@ mod tests {
 
         fn set_pending_question(&self, agent_id: &str, question: Option<PendingQuestion>) {
             self.pending.lock().unwrap().push((agent_id.to_string(), question));
+        }
+
+        fn set_task_error(&self, agent_id: &str, message: Option<String>) {
+            self.errors.lock().unwrap().push((agent_id.to_string(), message));
         }
     }
 
@@ -770,7 +928,7 @@ mod tests {
 
     #[tokio::test]
     async fn pretooluse_records_working() {
-        // TASK-47: PreToolUse (the resume-after-approval event) is now delivered as Working.
+        // PreToolUse (the resume-after-approval event) is delivered as Working.
         let sink = CollectingSink::new();
         let router = make_router(Arc::clone(&sink) as Arc<dyn StatusSink>);
         let body = r#"{"hook_event_name":"PreToolUse","permission_mode":"default"}"#;
@@ -806,6 +964,133 @@ mod tests {
         assert_eq!(sink.collected(), vec![("agent-3".to_string(), StatusEvent::Failed)]);
     }
 
+    // ── error_text extraction (surface agent error detail) ────────────────────
+
+    fn body(json: &str) -> HookBody {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn error_text_maps_category_from_error_key() {
+        // Live Claude Code 2.1.x puts the category under `error` (NOT `error_type`).
+        assert_eq!(
+            body(r#"{"hook_event_name":"StopFailure","error":"rate_limit"}"#).error_text(),
+            "Rate limited by the model API.",
+        );
+        assert_eq!(
+            body(r#"{"hook_event_name":"StopFailure","error":"max_output_tokens"}"#).error_text(),
+            "The turn hit the maximum output-token limit.",
+        );
+    }
+
+    #[test]
+    fn error_text_error_type_is_a_cross_version_fallback() {
+        // If a build emits the category under the older `error_type` key, honor it.
+        assert_eq!(
+            body(r#"{"hook_event_name":"StopFailure","error_type":"overloaded"}"#).error_text(),
+            "The model API is overloaded.",
+        );
+    }
+
+    #[test]
+    fn error_text_prefers_last_assistant_message() {
+        // The real model_not_found payload — the human explanation (which names
+        // the bad model) beats the terse category label.
+        let real = r#"{"hook_event_name":"StopFailure","error":"model_not_found","last_assistant_message":"There's an issue with the selected model (bogus-xyz). It may not exist or you may not have access to it."}"#;
+        assert_eq!(
+            body(real).error_text(),
+            "There's an issue with the selected model (bogus-xyz). It may not exist or you may not have access to it.",
+        );
+    }
+
+    #[test]
+    fn error_text_unknown_category_falls_through_to_raw() {
+        // A category we don't have a phrase for still surfaces the raw signal.
+        assert_eq!(
+            body(r#"{"hook_event_name":"StopFailure","error":"some_new_thing"}"#).error_text(),
+            "Agent error: some_new_thing",
+        );
+    }
+
+    #[test]
+    fn error_text_generic_when_no_signal() {
+        // No category at all, and the `unknown`/empty category → generic message.
+        assert_eq!(body(r#"{"hook_event_name":"StopFailure"}"#).error_text(), GENERIC_ERROR);
+        assert_eq!(
+            body(r#"{"hook_event_name":"StopFailure","error":"unknown"}"#).error_text(),
+            GENERIC_ERROR,
+        );
+        assert_eq!(
+            body(r#"{"hook_event_name":"StopFailure","error":"  "}"#).error_text(),
+            GENERIC_ERROR,
+        );
+    }
+
+    #[test]
+    fn error_text_prefers_free_text_over_category() {
+        // A provider free-text field beats the category too.
+        assert_eq!(
+            body(r#"{"hook_event_name":"StopFailure","error":"server_error","reason":"disk full"}"#).error_text(),
+            "disk full",
+        );
+        assert_eq!(
+            body(r#"{"hook_event_name":"StopFailure","message":"  boom  "}"#).error_text(),
+            "boom",
+        );
+    }
+
+    #[test]
+    fn error_text_caps_overlong_message() {
+        let long = "x".repeat(MAX_ERROR_LEN + 100);
+        let json = format!(r#"{{"hook_event_name":"StopFailure","last_assistant_message":"{long}"}}"#);
+        let out = body(&json).error_text();
+        assert_eq!(out.chars().count(), MAX_ERROR_LEN);
+        assert!(out.ends_with('…'));
+    }
+
+    // ── hook_handler error capture/clear wiring ───────────────────────────────
+
+    #[tokio::test]
+    async fn stop_failure_sets_task_error() {
+        let sink = CollectingSink::new();
+        let router = make_router(Arc::clone(&sink) as Arc<dyn StatusSink>);
+        // Real Claude Code shape: category under `error`, human text in
+        // `last_assistant_message` (preferred).
+        let body = r#"{"hook_event_name":"StopFailure","error":"model_not_found","last_assistant_message":"Model 'x' not found."}"#;
+        post_hook(&router, "/hook/agent-e", body).await;
+        assert_eq!(
+            sink.collected_errors(),
+            vec![("agent-e".to_string(), Some("Model 'x' not found.".to_string()))],
+        );
+    }
+
+    #[tokio::test]
+    async fn working_and_idle_clear_task_error() {
+        // Moving back to Working (a new turn) or Idle clears the stored error.
+        let sink = CollectingSink::new();
+        let router = make_router(Arc::clone(&sink) as Arc<dyn StatusSink>);
+        post_hook(&router, "/hook/agent-e", r#"{"hook_event_name":"UserPromptSubmit"}"#).await;
+        post_hook(&router, "/hook/agent-e", r#"{"hook_event_name":"Stop"}"#).await;
+        assert_eq!(
+            sink.collected_errors(),
+            vec![
+                ("agent-e".to_string(), None),
+                ("agent-e".to_string(), None),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn needs_attention_does_not_touch_task_error() {
+        // A permission prompt is neither a failure nor a recovery — leave the
+        // error untouched (no set, no clear).
+        let sink = CollectingSink::new();
+        let router = make_router(Arc::clone(&sink) as Arc<dyn StatusSink>);
+        let body = r#"{"hook_event_name":"Notification","notification_type":"permission_prompt"}"#;
+        post_hook(&router, "/hook/agent-e", body).await;
+        assert!(sink.collected_errors().is_empty());
+    }
+
     #[tokio::test]
     async fn unmapped_event_returns_200_and_nothing_collected() {
         let sink = CollectingSink::new();
@@ -829,7 +1114,7 @@ mod tests {
         assert!(sink.collected().is_empty());
     }
 
-    // ── TASK-122: AskUserQuestion detection ────────────────────────────────────
+    // ── AskUserQuestion detection ─────────────────────────────────────────────
 
     #[tokio::test]
     async fn ask_user_question_sets_pending_and_needs_attention() {
@@ -923,7 +1208,7 @@ mod tests {
 
     #[tokio::test]
     async fn rename_unknown_task_returns_404() {
-        // TASK-151 Defect B: an unknown task_id must 404, mirroring `/finish`, so a
+        // An unknown task_id must 404, mirroring `/finish`, so a
         // 200 genuinely means "renamed" (not a silent no-op that echoes the name).
         let sink = CollectingSink::with_rename_result(false);
         let router = make_router(Arc::clone(&sink) as Arc<dyn StatusSink>);

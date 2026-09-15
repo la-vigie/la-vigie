@@ -1,6 +1,6 @@
-//! Recurring-schedule engine (TASK-173): pure cron math plus the background
-//! poller that fires due schedules. Timing is local-time (so `0 7 * * 1`
-//! means Monday 07:00 local).
+//! Recurring-schedule engine: pure cron math plus the background poller that
+//! fires due schedules. Timing is local-time (so `0 7 * * 1` means Monday
+//! 07:00 local).
 
 use chrono::{DateTime, Local};
 use croner::Cron;
@@ -34,8 +34,8 @@ pub fn normalize_opt(s: Option<String>) -> Option<String> {
 }
 
 /// The normalized+validated fields a schedule create/update shares across the
-/// Tauri and MCP surfaces (TASK-178). Single source of truth so the two paths
-/// can't drift on trims, empty-checks, or cron validation.
+/// Tauri and MCP surfaces. Single source of truth so the two paths can't
+/// drift on trims, empty-checks, or cron validation.
 #[derive(Debug)]
 pub struct ScheduleFields {
     pub name: String,
@@ -80,7 +80,7 @@ pub fn validate_schedule_fields(
 /// relative offset and/or an optional absolute time. An absolute `at_unix`
 /// wins when present; otherwise `now + in_seconds`. A negative offset is
 /// rejected; supplying neither is an error. A past `at_unix` is allowed — it
-/// simply fires on the next poll (the catch-up path). TASK-179.
+/// simply fires on the next poll (the catch-up path).
 pub fn resolve_fire_at(
     now: i64,
     in_seconds: Option<i64>,
@@ -119,7 +119,7 @@ pub fn now_secs_pub() -> i64 {
 
 /// Spawn the background schedule poller: every 60s, fire any due schedules.
 /// Runs for the app's lifetime on the Tauri runtime. Mirrors
-/// `concierge::spawn_reaper`. TASK-173.
+/// `concierge::spawn_reaper`.
 pub fn spawn_scheduler(app: tauri::AppHandle) {
     use tauri::Manager as _;
     tauri::async_runtime::spawn(async move {
@@ -135,7 +135,7 @@ pub fn spawn_scheduler(app: tauri::AppHandle) {
 /// One poll: claim every due schedule UNDER the store lock, drop the lock,
 /// then launch each claimed schedule. Recurring schedules are claimed by
 /// advancing `next_run_at` to the next occurrence strictly after now
-/// (stamping `last_run_at`); one-shot schedules (TASK-179) are retired instead
+/// (stamping `last_run_at`); one-shot schedules are retired instead
 /// (disabled, `next_run_at` cleared, `last_run_at` stamped) since there is no
 /// next occurrence. A schedule is launched only after its claim persists: if
 /// the claim call fails, the schedule is skipped this tick (logged) rather
@@ -163,15 +163,20 @@ async fn tick(state: &AppState, app: &tauri::AppHandle) {
         };
         let mut claimed = Vec::with_capacity(due.len());
         for s in due {
+            // The claim is an atomic compare-and-swap keyed on `now` (the
+            // instant used to select the due set). `Ok(true)` means this poller
+            // won the row and may launch; `Ok(false)` means a concurrent poller
+            // already claimed it — skip silently, no launch, no failed-task noise.
             let claim = if s.one_shot {
                 // One-shot: fire once, then retire (no next occurrence).
-                store.retire_schedule(&s.id, now, now)
+                store.retire_schedule(&s.id, now, now, now)
             } else {
                 let next = next_run_after(&s.cron, Local::now()).ok().flatten();
-                store.advance_schedule(&s.id, next, now, now)
+                store.advance_schedule(&s.id, next, now, now, now)
             };
             match claim {
-                Ok(()) => claimed.push(s),
+                Ok(true) => claimed.push(s),
+                Ok(false) => {}
                 Err(e) => eprintln!("scheduler: claim {} failed: {e:#}", s.id),
             }
         }
@@ -204,13 +209,13 @@ async fn launch_scheduled_run(
         after_merge_of: Vec::new(),
         prompt: Some(s.prompt.clone()),
         auto_approve: None,
-        // TASK-163: placeholder default — scheduled runs don't launch in-place tasks.
+        // Placeholder default — scheduled runs don't launch in-place tasks.
         in_place: false,
         branch_name: None,
     };
     let task = crate::commands::launch_and_kickoff_setup(state, app, args).await?;
-    // TASK-181: route the schedule's skip-repo-prompt flag to the frontend so it
-    // reuses TASK-160's combineInitialPrompts(null, …) skip path.
+    // Route the schedule's skip-repo-prompt flag to the frontend so it reuses
+    // combineInitialPrompts(null, …)'s skip path.
     crate::mcp::emit_task_launched(app, task.id, Some(s.prompt.clone()), s.skip_repo_prompt);
     Ok(())
 }

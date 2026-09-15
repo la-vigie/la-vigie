@@ -1,0 +1,18 @@
+{
+  "sessionId": "ea603afd-d858-423b-ac83-8940cf0e279c",
+  "update": {
+    "sessionUpdate": "usage_update",
+    "used": 23956,
+    "size": 1000000,
+    "_meta": {
+      "_claude/rateLimit": {
+        "status": "allowed",
+        "resetsAt": 1784312400,
+        "rateLimitType": "five_hour",
+        "overageStatus": "rejected",
+        "overageDisabledReason": "org_level_disabled",
+        "isUsingOverage": false
+      }
+    }
+  }
+}

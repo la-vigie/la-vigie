@@ -47,6 +47,11 @@
   padding: 2px 8px;
   border-radius: var(--radius-pill);
   flex: none;
+  /* Opt out of the app-chrome :root no-select (theme.css) so the ticket ID is
+     copyable. `all` selects the whole value in one click. -webkit- prefix is
+     required or the global wins in WKWebView. TASK-202. */
+  -webkit-user-select: all;
+  user-select: all;
 }
 
 .task-detail__branch {
@@ -66,6 +71,10 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* `all` copies the full branch name even though it's ellipsis-truncated —
+     the whole value lives in the DOM, only its rendering is clipped. TASK-202. */
+  -webkit-user-select: all;
+  user-select: all;
 }
 .task-detail__branch-icon {
   color: var(--text-faint);
@@ -77,6 +86,17 @@
 }
 .task-detail__based-value {
   color: var(--text-muted);
+  -webkit-user-select: all;
+  user-select: all;
+}
+/* TASK-58: why the engine was auto-routed. Muted, truncates, full text on hover. */
+.task-detail__routing {
+  font-size: 12px;
+  color: var(--text-faint);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .task-detail__actions {
@@ -84,12 +104,6 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-}
-
-.task-detail__finish-confirm {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
 }
 
 .task-detail__path {
@@ -100,12 +114,11 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.task-detail__finish-error {
-  margin: 8px 0 0;
-  font-size: 12px;
-  color: var(--red);
+  /* The visible text is truncated but the full worktree path is in the DOM;
+     `all` selects the whole value in one click so the complete path copies
+     despite the ellipsis. TASK-202. */
+  -webkit-user-select: all;
+  user-select: all;
 }
 
 /* ── State badge ────────────────────────────────────────────────────────── */
@@ -138,6 +151,44 @@
 .state-badge--idle {
   background: var(--bg-pill);
   color: var(--text-muted);
+}
+
+/* ── Error banner (surface agent error detail) ──────────────────────────── */
+.task-error-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: var(--red-soft);
+  color: #ff8a98;
+  border: 1px solid var(--red-soft);
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+  line-height: 1.35;
+}
+.task-error-banner__icon {
+  flex: 0 0 auto;
+  line-height: 1.35;
+}
+.task-error-banner__text {
+  flex: 1 1 auto;
+  user-select: text;
+  word-break: break-word;
+}
+.task-error-banner__dismiss {
+  flex: 0 0 auto;
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0 2px;
+  opacity: 0.75;
+}
+.task-error-banner__dismiss:hover {
+  opacity: 1;
 }
 
 /* ── Empty state ────────────────────────────────────────────────────────── */
@@ -335,6 +386,10 @@
   font-family: var(--mono, monospace);
   font-size: 11px;
   white-space: pre-wrap;
+  /* Setup log is diagnostic output — allow normal text selection to copy it.
+     `text` (not `all`) so partial lines can be selected. TASK-202. */
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 /* Subtle drop-target feedback while dragging a file over the terminal pane.
@@ -352,4 +407,118 @@
   border: 2px solid #4a9eff;
   pointer-events: none;
   z-index: 10;
+}
+
+/* ── Finish-task modal (TASK-39) ─────────────────────────────────────────────
+   Reuses the shared .new-task-modal__* shell (Sidebar.css). These rules cover
+   the context block, the safe-action hierarchy, and the guarded danger zone. */
+.finish-modal__context {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.finish-modal__row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0;
+}
+.finish-modal__row dt {
+  flex: 0 0 6.5rem;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.finish-modal__row dd {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.finish-modal__row code {
+  font-size: 12.5px;
+}
+.finish-modal__pr {
+  text-transform: capitalize;
+}
+.finish-modal__pr--merged {
+  color: #a371f7;
+  font-weight: 600;
+}
+.finish-modal__pr--open {
+  color: var(--accent);
+  font-weight: 600;
+}
+.finish-modal__pr--none {
+  color: var(--text-muted);
+}
+.finish-modal__actions {
+  display: flex;
+  gap: 9px;
+}
+.finish-modal__hint {
+  margin: -4px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.finish-modal__danger {
+  margin-top: 4px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.finish-modal__discard-arm {
+  align-self: flex-start;
+  background: transparent;
+  border: none;
+  padding: 2px 0;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.finish-modal__discard-arm:hover:not(:disabled) {
+  color: var(--red);
+}
+.finish-modal__discard-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--red-soft);
+  border: 1px solid var(--red);
+  border-radius: var(--radius-sm);
+}
+.finish-modal__discard-warning {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text);
+}
+.finish-modal__discard-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+}
+.finish-modal__danger-aside {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.finish-modal__error {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--red);
 }

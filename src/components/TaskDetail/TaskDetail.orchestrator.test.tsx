@@ -71,6 +71,30 @@ describe("TaskDetail orchestrator view", () => {
     expect(stopSessionMock).toHaveBeenCalledWith("agent-1");
   });
 
+  it("a failed Stop surfaces an error banner and leaves the orchestrator session running", async () => {
+    useVigieStore.setState({
+      selectedTaskId: null,
+      selectedOrchestratorRepoId: "r1",
+      repos: [{ id: "r1", name: "acme", path: "/x", defaultBranch: "main" } as never],
+      tasks: [],
+      sessionsByTask: {
+        [orchestratorSurfaceId("r1")]: [
+          { localId: "agent", kind: "orchestrator", status: "running", title: "Orchestrator", backendId: "agent-1" },
+        ],
+      },
+      activeTabByTask: { [orchestratorSurfaceId("r1")]: "agent" },
+    });
+    stopSessionMock.mockRejectedValueOnce(new Error("no such process"));
+
+    render(<TaskDetail />);
+    fireEvent.click(screen.getByRole("button", { name: /stop/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("no such process");
+    expect(
+      useVigieStore.getState().sessionsByTask[orchestratorSurfaceId("r1")].some((s) => s.kind === "orchestrator"),
+    ).toBe(true);
+  });
+
   it('shows an "Open orchestrator" placeholder when the repo has no live session', () => {
     useVigieStore.setState({
       selectedTaskId: null,

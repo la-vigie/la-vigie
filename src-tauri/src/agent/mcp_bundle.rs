@@ -1,4 +1,4 @@
-//! TASK-193: materialize a vendored per-provider MCP config into a worktree.
+//! Materialize a vendored per-provider MCP config into a worktree.
 //!
 //! Sibling of `skill_bundle` (which injects skill *content*). Non-Claude engines
 //! discover a project-local MCP config from the working tree
@@ -24,7 +24,7 @@ pub const MCP_PORT_PLACEHOLDER: &str = "__LAVIGIE_MCP_PORT__";
 pub const MCP_TOKEN_PLACEHOLDER: &str = "__LAVIGIE_MCP_TOKEN__";
 
 /// Recursively copy `src`→`dst`, substituting placeholders in file *contents*,
-/// skipping any file whose worktree-relative path is tracked (TASK-201).
+/// skipping any file whose worktree-relative path is tracked.
 /// Substitute the per-spawn port + token into raw config `bytes`. Lossy UTF-8:
 /// rulesync only emits UTF-8 JSON/TOML, and a stray byte must not abort injection
 /// (skill_bundle copies bytes verbatim; here we must read to substitute).
@@ -46,7 +46,7 @@ fn git_check_ignore(worktree: &Path, rel: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// A worktree-relative target we must NOT write: the repo tracks it (TASK-201), or
+/// A worktree-relative target we must NOT write: the repo tracks it, or
 /// a user-authored file already sits there that La Vigie did not inject. Our own
 /// injected files are always git-excluded, so an on-disk file that is NOT ignored
 /// in the pre-injection state is the user's — never clobber it. MUST be evaluated
@@ -136,7 +136,7 @@ fn add_common_exclude(worktree: &Path, pattern: &str) -> io::Result<()> {
 /// Diff, and returns the injected top-level names (sorted). `bundle_root` absent →
 /// `Ok(vec![])`.
 ///
-/// Never overwrites a repo-tracked file (TASK-201) nor a user-authored untracked
+/// Never overwrites a repo-tracked file nor a user-authored untracked
 /// config already on disk — the `protected` set is computed against the
 /// pre-injection git state, before any `.gitignore`/exclude is written, so our own
 /// exclusion can't mask a user's file. A top-level **dir** gets `<dir>/.gitignore="*"`
@@ -192,7 +192,7 @@ pub fn materialize_mcp(
             let dst = worktree.join(name);
             fs::create_dir_all(&dst)?;
             // Exclude BEFORE copying (matches skill_bundle); don't clobber a
-            // repo-committed `.gitignore` for this dotdir (TASK-201).
+            // repo-committed `.gitignore` for this dotdir.
             let gitignore = dst.join(".gitignore");
             if !gitignore.exists() {
                 fs::write(&gitignore, BUNDLE_IGNORE)?;

@@ -1,0 +1,17 @@
+{
+  "sessionId": "ea603afd-d858-423b-ac83-8940cf0e279c",
+  "update": {
+    "sessionUpdate": "tool_call_update",
+    "toolCallId": "call_1",
+    "status": "completed",
+    "content": [
+      {
+        "type": "content",
+        "content": {
+          "type": "text",
+          "text": "fn main() {}"
+        }
+      }
+    ]
+  }
+}

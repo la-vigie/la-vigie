@@ -13,6 +13,7 @@ import { useCollapsedFiles } from "./useCollapsedFiles";
 import type { CollapsedFiles } from "./useCollapsedFiles";
 import { displayPath, fileChangeLabel } from "./diffHeader";
 import type { ComposerAnchor } from "./comments";
+import { clickShouldOpenComposer } from "./comments";
 import { CommentComposer } from "./CommentComposer";
 import { InlineComment } from "./InlineComment";
 import { ReviewFooter } from "./ReviewFooter";
@@ -213,6 +214,10 @@ function GitHubDiffRenderer({
         const codeEvents = comments
           ? {
               onClick: (args: { change: ChangeData | null }) => {
+                // A click that ends a text drag-select must not open the comment
+                // composer — the diff code cells are selectable. A plain click
+                // leaves the selection collapsed and still opens it.
+                if (!clickShouldOpenComposer(window.getSelection())) return;
                 const change = args.change;
                 if (!change) return;
                 const anchor: ComposerAnchor = {

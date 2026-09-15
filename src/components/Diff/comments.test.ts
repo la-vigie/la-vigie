@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { composePrompt, wrapBracketedPaste } from "./comments";
+import { clickShouldOpenComposer, composePrompt, wrapBracketedPaste } from "./comments";
 import type { Comment } from "./comments";
 
 const mk = (over: Partial<Comment>): Comment => ({
@@ -18,6 +18,20 @@ describe("composePrompt", () => {
       "1. src/people/crud.ts:42 — rename to fetchActivePeople\n" +
       "2. README.md:78 — drop the stray test line",
     );
+  });
+});
+
+describe("clickShouldOpenComposer", () => {
+  it("opens the composer on a plain click (collapsed selection)", () => {
+    expect(clickShouldOpenComposer({ isCollapsed: true })).toBe(true);
+  });
+
+  it("does not open the composer when a text drag-select is active (non-collapsed)", () => {
+    expect(clickShouldOpenComposer({ isCollapsed: false })).toBe(false);
+  });
+
+  it("treats a missing selection as a plain click", () => {
+    expect(clickShouldOpenComposer(null)).toBe(true);
   });
 });
 

@@ -1,4 +1,4 @@
-//! Resolve the absolute path to the bundled La Vigie skill *plugin* (TASK-153).
+//! Resolve the absolute path to the bundled La Vigie skill *plugin*.
 //!
 //! The plugin ships as a Tauri resource (`resources/lavigie-plugin/`) containing
 //! `.claude-plugin/plugin.json` + `skills/`. La Vigie passes `--plugin-dir <this>`

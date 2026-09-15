@@ -1,4 +1,4 @@
-//! Pure structured-question core (TASK-122): parse the `AskUserQuestion`
+//! Pure structured-question core: parse the `AskUserQuestion`
 //! `tool_input` a `PreToolUse` hook carries into a `PendingQuestion`, and
 //! translate a user's structured selection into the PTY keystrokes that drive
 //! the interactive terminal picker. Both halves are pure and unit-tested; the
@@ -85,12 +85,12 @@ pub enum Answer {
     },
 }
 
-// ── Pre-spike picker keystroke model (TASK-122) ──────────────────────────────
-// The exact bytes the AskUserQuestion TUI picker consumes are NOT documented and
-// MUST be confirmed by the live PTY spike (plan Task 0) before shipping — they
-// are centralized here so the spike adjusts one place. Current guess: the picker
-// starts on the first option; ↓ moves down one; Enter submits/advances to the
-// next question; Space toggles a multi-select option; the free-text "Other"
+// ── Picker keystroke model ──────────────────────────────────────────────────
+// The exact bytes the AskUserQuestion TUI picker consumes are not documented
+// upstream; this model was derived against the live PTY and is centralized
+// here so any correction only touches one place. The picker starts on the
+// first option; ↓ moves down one; Enter submits/advances to the next
+// question; Space toggles a multi-select option; the free-text "Other"
 // entry sits one row past the last option and is focused with Enter.
 const KEY_DOWN: &str = "\x1b[B";
 const KEY_ENTER: &str = "\r";

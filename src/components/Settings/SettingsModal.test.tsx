@@ -338,7 +338,7 @@ describe("SettingsModal — notification sounds section", () => {
         useVigieStore.setState({ fetchRemoteBase: enabled }),
     } as never);
     render(<SettingsModal onClose={() => {}} />);
-    // "New worktrees" lives on the General tab now.
+    // "New worktrees" lives on the General tab.
     fireEvent.click(screen.getByRole("tab", { name: "General" }));
     const toggle = screen.getByLabelText("Base new worktrees on the latest remote base branch");
     expect(toggle).toBeChecked();

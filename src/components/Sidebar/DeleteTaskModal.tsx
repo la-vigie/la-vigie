@@ -48,7 +48,7 @@ export function DeleteTaskModal({ task, onCancel, onConfirm }: DeleteTaskModalPr
           {task.inPlace ? (
             // In-place task: no worktree to remove and the branch is always kept,
             // so there's no "delete branch" option (it would be a no-op — teardown
-            // never touches the shared checkout). TASK-163.
+            // never touches the shared checkout).
             <p>
               This removes the task from La Vigie. Your checkout folder and its branch{" "}
               <code>{task.branch}</code> are kept — nothing on disk is deleted.

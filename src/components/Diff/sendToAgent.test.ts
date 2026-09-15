@@ -8,7 +8,9 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 describe("sendToAgent", () => {
   beforeEach(() => {
     invokeMock.mockReset().mockResolvedValue(undefined);
-    useVigieStore.setState({ sessionsByTask: {}, activeTabByTask: {} } as any);
+    // startAgentSession awaits the catalog before routing unless it's
+    // already loaded — keep the auto-start flow synchronous here.
+    useVigieStore.setState({ sessionsByTask: {}, activeTabByTask: {}, agentsLoaded: true } as any);
   });
 
   it("writes bracketed-paste prompt (no trailing CR) to a running agent", async () => {
@@ -43,6 +45,23 @@ describe("sendToAgent", () => {
       sessionId: "a9",
       data: "\x1b[200~review notes\x1b[201~",
     });
+  });
+
+  it("routes an ACP agent session through acp_prompt, never write_session (TASK-244)", async () => {
+    useVigieStore.setState({
+      sessionsByTask: {
+        "task-1": [{ localId: AGENT_TAB, kind: "agent", status: "running", title: "Claude Code (ACP)", backendId: "acp-1", engine: "acp" }],
+      },
+      activeTabByTask: { "task-1": AGENT_TAB },
+    } as any);
+
+    await sendToAgent("task-1", "do the thing");
+
+    expect(invokeMock).toHaveBeenCalledWith("acp_prompt", {
+      sessionId: "acp-1",
+      text: "do the thing",
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith("write_session", expect.anything());
   });
 
   it("writes raw text for Mistral Vibe (no bracketed paste)", async () => {

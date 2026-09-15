@@ -14,7 +14,7 @@ const advertisesModels = (s: AgentSpec | undefined) =>
   !!(s?.modelsListArgs && s.modelsListArgs.length > 0);
 
 // An agent takes a model if it can enumerate one (list picker) or merely accepts
-// a `--model` flag (free-text entry). TASK-209: Claude Code is the latter.
+// a `--model` flag (free-text entry). Claude Code is the latter.
 const takesModel = (s: AgentSpec | undefined) => advertisesModels(s) || !!s?.modelArg;
 
 // Advisory quick-pick suggestions for free-text engines, keyed by agent name.
@@ -36,7 +36,7 @@ export function AgentModelPicker({ agent, model, onChange }: Props) {
 
   const current = agents.find((a) => a.name === agent);
   const hoveredSpec = agents.find((a) => a.name === hovered);
-  const { models } = useAgentModels(advertisesModels(hoveredSpec) ? hovered : undefined);
+  const { models, loading: modelsLoading } = useAgentModels(advertisesModels(hoveredSpec) ? hovered : undefined);
   // Free-text draft for engines that take `--model` but can't enumerate models.
   // Seeded from the current model when the hovered agent is the current one.
   const [draft, setDraft] = useState("");
@@ -161,6 +161,11 @@ export function AgentModelPicker({ agent, model, onChange }: Props) {
           {advertisesModels(hoveredSpec) && (
             <ul className="amp__models">
               <li className="amp__models-head">MODEL</li>
+              {modelsLoading && models.length === 0 && (
+                <li className="amp__model-row amp__model-row--loading" aria-busy="true">
+                  Loading models…
+                </li>
+              )}
               {models.map((id) => (
                 <li
                   key={id}
@@ -171,7 +176,7 @@ export function AgentModelPicker({ agent, model, onChange }: Props) {
                   {id === model && <span className="amp__check" aria-hidden>✓</span>}
                 </li>
               ))}
-              {models.length === 0 && (
+              {!modelsLoading && models.length === 0 && (
                 <li
                   className={"amp__model-row" + (hovered === agent && model === null ? " is-selected" : "")}
                   onClick={pickDefault}

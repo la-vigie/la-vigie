@@ -1,4 +1,4 @@
-//! TASK-35: resolve the vendored per-provider La Vigie skill bundle.
+//! Resolve the vendored per-provider La Vigie skill bundle.
 //!
 //! Sibling of `lavigie_plugin` (which resolves the Claude *plugin*). These
 //! bundles are generated at build time by `rulesync` from `.rulesync/skills/`
@@ -44,12 +44,12 @@ fn resolve_bundle_dir(app: &AppHandle, root: &str, provider: &str) -> Option<Pat
     None
 }
 
-/// Resolve the vendored per-provider *skill* bundle (TASK-35).
+/// Resolve the vendored per-provider *skill* bundle.
 pub fn resolve_skills_bundle_dir(app: &AppHandle, provider: &str) -> Option<PathBuf> {
     resolve_bundle_dir(app, "lavigie-skills", provider)
 }
 
-/// Resolve the vendored per-provider *MCP config* bundle (TASK-193).
+/// Resolve the vendored per-provider *MCP config* bundle.
 pub fn resolve_mcp_bundle_dir(app: &AppHandle, provider: &str) -> Option<PathBuf> {
     resolve_bundle_dir(app, "lavigie-mcp", provider)
 }

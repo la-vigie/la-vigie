@@ -2,18 +2,14 @@ import { createContext, useEffect, useRef } from "react";
 import type { RefObject } from "react";
 import type { Terminal } from "@xterm/xterm";
 
-// Deterministic terminal sizing (TASK-227, approach B from the TASK-220 design
-// analysis 396e3ee2).
+// Deterministic terminal sizing.
 //
-// The recurring "narrow terminal on surface switch" bug (TASK-220 and
-// predecessors) came from measuring the per-surface container div right after it
-// flipped `display:none → block`: the WKWebView hasn't laid it out yet, so the
-// read is a collapsed width, which drives a tiny xterm grid and — if propagated —
-// a tiny PTY that hard-wraps the Claude TUI one word wide into permanent
-// scrollback. PR #150/#156 patched this reactively (settle loop + a MIN_PTY_COLS
-// PTY-sync floor).
+// Measuring the per-surface container div right after it flips
+// `display:none → block` reads a collapsed width — the WKWebView hasn't laid
+// it out yet — which drives a tiny xterm grid and, if propagated, a tiny PTY
+// that hard-wraps the Claude TUI one word wide into permanent scrollback.
 //
-// This module removes the transient at its source. `.terminal-pane__body`
+// This module avoids that transient at the source. `.terminal-pane__body`
 // (TaskDetail's `terminalPaneRef`) is the ONE container that is never
 // `display:none` — every surface renders into it via <TerminalHost/>, and only
 // the per-TerminalView outer divs toggle visibility. So its pixel size is always
@@ -48,11 +44,10 @@ export const MINIMUM_ROWS = 1;
  *
  * Returns `null` when either the cell or the pane has no real size yet (a pane
  * that hasn't been laid out reports 0×0). That null is the ONLY guard we keep
- * against pushing a degenerate size to the PTY — it is the never-firing
- * safety net that replaces TASK-220's `MIN_PTY_COLS`/`isSaneFit` floor: instead
- * of rejecting "suspiciously narrow" fits by a magic column count, we simply
- * never compute a grid from an unmeasured pane, because we never measure the
- * collapsing child in the first place.
+ * against pushing a degenerate size to the PTY — a never-firing safety net:
+ * rather than rejecting "suspiciously narrow" fits by a magic column count, we
+ * simply never compute a grid from an unmeasured pane, because we never
+ * measure the collapsing child in the first place.
  */
 export function computeGrid(
   paneWidth: number,
@@ -178,7 +173,7 @@ export function useProvidePaneMetrics(paneRef: RefObject<HTMLElement | null>): P
 
     // Belt-and-suspenders: in some webviews a flex child's ResizeObserver
     // doesn't fire reliably on an OS-window resize, so re-measure on window
-    // resize too (kept from the pre-TASK-227 code for the same reason).
+    // resize too.
     const onWindowResize = () => {
       const r = el.getBoundingClientRect();
       publish(r.width, r.height);

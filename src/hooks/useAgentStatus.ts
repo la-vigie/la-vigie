@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { onAgentStatus, notifyAgentEvent, setNotificationFocusHandler, isMeetingActive } from "../api";
+import { onAgentStatus, onAgentError, notifyAgentEvent, setNotificationFocusHandler, isMeetingActive } from "../api";
 import { useVigieStore } from "../store";
 import { debounce, keyedDebounce } from "../lib/debounce";
 import { SoundPlayer } from "../sound/player";
@@ -20,6 +20,7 @@ export function useAgentStatus() {
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
+    let unlistenError: (() => void) | undefined;
 
     let windowFocused = false;
     let unlistenFocus: (() => void) | undefined;
@@ -36,7 +37,7 @@ export function useAgentStatus() {
     });
 
     const setup = async () => {
-      // TASK-120: coalesce out-of-band refreshes. Snapshot is cheap (list_state);
+      // Coalesce out-of-band refreshes. Snapshot is cheap (list_state);
       // review/pr hit git/gh so they debounce longer and per-task.
       const debouncedSnapshot = debounce(() => {
         void useVigieStore.getState().refreshSnapshot();
@@ -53,6 +54,16 @@ export function useAgentStatus() {
         useVigieStore.getState().setSelectedTask(taskId);
       });
 
+      // Store (or clear) the per-task error text from StopFailure hooks so the
+      // TaskDetail banner can explain the red dot. Emitted by the backend BEFORE
+      // the matching `agent_status` error event, so the message is already in the
+      // store when we build the notification below.
+      const errFn = await onAgentError(({ taskId, message }) => {
+        useVigieStore.getState().setTaskError(taskId, message ?? null);
+      });
+      if (cancelled) errFn();
+      else unlistenError = errFn;
+
       const fn = await onAgentStatus(async ({ agentId, status }) => {
         setSessionActivity(agentId, status);
 
@@ -63,7 +74,7 @@ export function useAgentStatus() {
         )?.[0];
         const task = taskId ? state.tasks.find((t) => t.id === taskId) : undefined;
 
-        // TASK-120: keep sidebar/status live on every transition; refetch the
+        // Keep sidebar/status live on every transition; refetch the
         // Review pane (git/fs + gh) only when the agent finished working.
         debouncedSnapshot();
         if (taskId && (status === "idle" || status === "error")) {
@@ -76,8 +87,8 @@ export function useAgentStatus() {
           const repo = task ? state.repos.find((r) => r.id === task.repoId) : undefined;
           const override = parseRepoOverride(repo?.soundSettings);
 
-          // Automute (TASK-105): only pay the native meeting probe when automute
-          // is actually enabled for this repo/app (off by default → no cost).
+          // Automute: only pay the native meeting probe when automute is
+          // actually enabled for this repo/app (off by default → no cost).
           const automuteOn = override.automute ?? state.soundSettings.automute;
           let inMeeting = false;
           if (automuteOn) {
@@ -102,7 +113,9 @@ export function useAgentStatus() {
               const selected = useVigieStore.getState().selectedTaskId;
               const suppressed = windowFocused && selected === task.id;
               if (!suppressed) {
-                const { title, body } = formatNotification(task, repo, event);
+                const reason =
+                  status === "error" ? useVigieStore.getState().errorByTask[task.id] : undefined;
+                const { title, body } = formatNotification(task, repo, event, reason);
                 notifyAgentEvent({ title, body, taskId: task.id });
               }
             }
@@ -124,6 +137,7 @@ export function useAgentStatus() {
     return () => {
       cancelled = true;
       unlisten?.();
+      unlistenError?.();
       unlistenFocus?.();
     };
   }, [setSessionActivity]);

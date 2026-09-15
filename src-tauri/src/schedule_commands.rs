@@ -1,4 +1,4 @@
-//! Tauri commands for managing recurring schedules (TASK-173). Thin glue over the
+//! Tauri commands for managing recurring schedules. Thin glue over the
 //! store CRUD + the pure cron engine; validation lives in `schedule`.
 
 use tauri::State;
@@ -13,7 +13,7 @@ fn compute_next(cron: &str) -> Result<Option<i64>, String> {
 }
 
 /// Core: list a repo's schedules. Shared by the Tauri command and the remote
-/// axum handler (TASK-196) so both go through one store path.
+/// axum handler so both go through one store path.
 pub fn list_schedules_core(state: &AppState, repo_id: &str) -> Result<Vec<Schedule>, String> {
     let store = state.store.lock().map_err(|e| format!("{e}"))?;
     store.list_schedules(repo_id).map_err(|e| format!("{e:#}"))
@@ -25,7 +25,7 @@ pub fn list_schedules(state: State<'_, AppState>, repo_id: String) -> Result<Vec
 }
 
 /// Core: create a recurring schedule. Validates fields + computes the next fire
-/// via the shared cron engine. Shared by the command and the remote handler (TASK-196).
+/// via the shared cron engine. Shared by the command and the remote handler.
 #[allow(clippy::too_many_arguments)]
 pub fn create_schedule_core(
     state: &AppState,
@@ -36,7 +36,7 @@ pub fn create_schedule_core(
     agent: Option<String>,
     model: Option<String>,
     base_branch: Option<String>,
-    // TASK-181: skip prepending the repo's initial prompt when this schedule fires.
+    // Skip prepending the repo's initial prompt when this schedule fires.
     // Defaults to `true` when the caller omits it (frontend always passes it).
     skip_repo_prompt: Option<bool>,
 ) -> Result<Schedule, String> {
@@ -86,8 +86,8 @@ pub fn create_schedule(
 
 /// Core: create a one-time (non-recurring) schedule that fires once at an absolute
 /// time (`at_unix`) or after a relative delay (`in_seconds`), then retires.
-/// One-shots carry an empty `cron` (never cron-parsed). TASK-179. Shared by the
-/// command and the remote handler (TASK-196).
+/// One-shots carry an empty `cron` (never cron-parsed). Shared by the
+/// command and the remote handler.
 #[allow(clippy::too_many_arguments)]
 pub fn create_one_shot_core(
     state: &AppState,
@@ -99,7 +99,7 @@ pub fn create_one_shot_core(
     agent: Option<String>,
     model: Option<String>,
     base_branch: Option<String>,
-    // TASK-181: skip the repo initial prompt on fire; defaults to `true` when omitted.
+    // Skip the repo initial prompt on fire; defaults to `true` when omitted.
     skip_repo_prompt: Option<bool>,
 ) -> Result<Schedule, String> {
     let name = name.trim().to_string();
@@ -165,7 +165,7 @@ pub fn update_schedule(
     model: Option<String>,
     base_branch: Option<String>,
     enabled: bool,
-    // TASK-181: skip the repo initial prompt on fire; defaults to `true` when omitted.
+    // Skip the repo initial prompt on fire; defaults to `true` when omitted.
     skip_repo_prompt: Option<bool>,
 ) -> Result<Schedule, String> {
     let fields = validate_schedule_fields(&name, &prompt, &cron, agent, model, base_branch)?;
@@ -198,7 +198,7 @@ pub fn set_schedule_enabled(
 
 /// Core: arm/disarm a schedule. Recurring schedules recompute their next fire from
 /// cron; one-shots keep their absolute fire time (the enabled flag alone arms them).
-/// Shared by the command and the remote handler (TASK-196).
+/// Shared by the command and the remote handler.
 pub fn set_schedule_enabled_core(
     state: &AppState,
     id: String,
@@ -235,7 +235,7 @@ pub fn set_schedule_enabled_core(
 }
 
 /// Core: delete a schedule (idempotent at the store level). Shared by the command
-/// and the remote handler (TASK-196).
+/// and the remote handler.
 pub fn delete_schedule_core(state: &AppState, id: &str) -> Result<(), String> {
     let store = state.store.lock().map_err(|e| format!("{e}"))?;
     store.delete_schedule(id).map_err(|e| format!("{e:#}"))

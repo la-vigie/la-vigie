@@ -110,6 +110,25 @@ describe("TerminalHost", () => {
     expect(getByTestId(`terminal-task-1-${shellLocalId}`).dataset.hidden).toBe("false");
   });
 
+  it("renders NO TerminalView for an ACP agent session (no phantom PTY), while shells still render (TASK-244)", () => {
+    const shellLocalId = "shell-1";
+    useVigieStore.setState({
+      sessionsByTask: {
+        "task-1": [
+          { localId: AGENT_TAB, kind: "agent", status: "running", title: "Claude (ACP)", backendId: "acp-1", engine: "acp" },
+          { localId: shellLocalId, kind: "shell", status: "running", title: "shell" },
+        ],
+      },
+      activeTabByTask: { "task-1": AGENT_TAB },
+      selectedTaskId: "task-1",
+    });
+
+    const { queryByTestId, getByTestId } = render(<TerminalHost />);
+
+    expect(queryByTestId(`terminal-task-1-${AGENT_TAB}`)).toBeNull();
+    expect(getByTestId(`terminal-task-1-${shellLocalId}`)).toBeTruthy();
+  });
+
   it("keeps both the task and orchestrator terminals mounted across a task<->orchestrator selection switch", () => {
     const orchSurfaceId = orchestratorSurfaceId("r1");
     useVigieStore.setState({

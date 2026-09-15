@@ -1,14 +1,14 @@
-//! Shared task-teardown core (TASK-139): stop an agent's PTY, remove its
-//! worktree, and delete its DB row — behind a safety gate. Reused by the
-//! HookBridge `/finish/{agentId}` route and (TASK-140) the MCP `finish_task`.
+//! Shared task-teardown core: stop an agent's PTY, remove its worktree, and
+//! delete its DB row — behind a safety gate. Reused by the HookBridge
+//! `/finish/{agentId}` route and the MCP `finish_task`.
 
 use std::path::Path;
 
 use crate::state::AppState;
 
-/// Tauri event payload for `"task_removed"` (TASK-139): the task the backend
-/// tore down. The frontend deselects it (if selected) and refreshes so the
-/// sidebar drops it live, mirroring the GUI's own delete-task flow.
+/// Tauri event payload for `"task_removed"`: the task the backend tore down.
+/// The frontend deselects it (if selected) and refreshes so the sidebar drops
+/// it live, mirroring the GUI's own delete-task flow.
 #[derive(serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct TaskRemovedPayload {
@@ -39,7 +39,7 @@ fn unsafe_reason(dirty: bool, commits_ahead: bool, pr_merged: bool) -> Option<St
 }
 
 /// Whether teardown should physically `git worktree remove` the task's path.
-/// False for in-place tasks (TASK-163) — their `worktree_path` IS the repo's main
+/// False for in-place tasks — their `worktree_path` IS the repo's main
 /// checkout, which must never be removed — and for path-less queued tasks.
 pub fn should_remove_worktree(in_place: bool, worktree_path: &str) -> bool {
     !in_place && !worktree_path.is_empty()
@@ -50,14 +50,14 @@ pub fn should_remove_worktree(in_place: bool, worktree_path: &str) -> bool {
 /// be moved into a detached task. `agent_id` is the task's live agent (whose PTY
 /// must be stopped), or `None` when no agent is currently live — e.g. after an
 /// app restart, where the process is already gone and only the durable task row
-/// (worktree + DB) remains to clean up (TASK-151).
+/// (worktree + DB) remains to clean up.
 pub struct TeardownPlan {
     pub agent_id: Option<String>,
     pub task_id: String,
     pub worktree_path: String,
     pub repo_path: String,
     pub branch: String,
-    /// TASK-163: an in-place task's `worktree_path` is the repo's main checkout;
+    /// An in-place task's `worktree_path` is the repo's main checkout;
     /// `perform_teardown` must skip `remove_worktree` for it.
     pub in_place: bool,
 }
@@ -73,8 +73,8 @@ pub enum TeardownStep {
 /// run the safety gate. Returns `Early` for UnknownTask/Unsafe, or `Ready(plan)`
 /// when it is safe to proceed.
 ///
-/// The task is resolved directly from the DB by its `task_id` — the durable key
-/// (TASK-151) — not through the in-memory agent→task map. So teardown resolves
+/// The task is resolved directly from the DB by its `task_id` — the durable
+/// key — not through the in-memory agent→task map. So teardown resolves
 /// correctly even after an app restart empties that map, and the caller (the
 /// `/finished` skill) proves which task it owns by presenting its `LAVIGIE_TASK_ID`.
 pub async fn prepare_teardown(
@@ -127,7 +127,7 @@ pub async fn prepare_teardown(
     };
 
     // 3. Safety gate. In-place tasks never destroy anything (teardown detaches
-    //    only), so the gate never blocks them (TASK-163).
+    //    only), so the gate never blocks them.
     if !force && !in_place {
         let dirty = crate::git::working_tree_dirty(Path::new(&worktree_path))
             .await
@@ -137,8 +137,8 @@ pub async fn prepare_teardown(
         } else {
             // Compare against freshly-fetched origin/<base> so commits merged in
             // from upstream (rebase/merge for conflict resolution) don't count as
-            // this task's unmerged work (TASK-144). Best-effort: a fetch failure or
-            // absent tracking ref degrades to the local base — never blocks/errors.
+            // this task's unmerged work. Best-effort: a fetch failure or absent
+            // tracking ref degrades to the local base — never blocks/errors.
             if use_remote && has_remote {
                 let _ = crate::git::fetch(Path::new(&worktree_path), "origin", &base_branch).await;
             }
@@ -214,8 +214,8 @@ pub async fn perform_teardown(
 
     // 6. Remove the worktree, then delete the DB row (worktree-first so a git
     //    failure leaves the row intact rather than orphaning a live worktree).
-    // TASK-163: in-place tasks skip this — `worktree_path` is the repo's main
-    // checkout, never a task-owned worktree to remove.
+    // In-place tasks skip this — `worktree_path` is the repo's main checkout,
+    // never a task-owned worktree to remove.
     if should_remove_worktree(plan.in_place, &plan.worktree_path) {
         crate::git::remove_worktree(Path::new(&plan.repo_path), Path::new(&plan.worktree_path), true)
             .await
@@ -231,20 +231,19 @@ pub async fn perform_teardown(
     // teardown has no webview round-trip that would otherwise refresh). Best-effort.
     let _ = app.emit("task_removed", TaskRemovedPayload { task_id: plan.task_id.clone() });
 
-    // TASK-204: drop the torn-down task from the system-tray menu live.
+    // Drop the torn-down task from the system-tray menu live.
     crate::tray::refresh(app);
 
     Ok(())
 }
 
 /// Compose prepare + perform synchronously. Awaited directly by non-self-teardown
-/// callers (e.g. TASK-140 MCP finish_task) that tear down a DIFFERENT task and so
+/// callers (e.g. the MCP `finish_task`) that tear down a DIFFERENT task and so
 /// have no request-cancellation hazard. `perform_teardown` (which deletes the
-/// blocker's DB row) runs BEFORE promoting any dependents queued on this task
-/// (TASK-90); `promote` is the `?promote` bypass (skip the landed check, e.g.
-/// no-PR flows).
+/// blocker's DB row) runs BEFORE promoting any dependents queued on this task;
+/// `promote` is the `?promote` bypass (skip the landed check, e.g. no-PR flows).
 ///
-/// TASK-182: promote AFTER the row is deleted, mirroring the direct `finish_task`
+/// Promote AFTER the row is deleted, mirroring the direct `finish_task`
 /// path. Once the blocker row is gone, a concurrent `launch_task` can no longer
 /// queue a new dependent behind it (`live_blockers` filters the now-dangling
 /// blocker and launches immediately instead), so the queue-vs-finish window that
@@ -305,7 +304,7 @@ mod tests {
         assert!(should_remove_worktree(false, "/worktrees/r1/branch"));
     }
 
-    // ── TASK-151: teardown resolves by task_id, independent of the in-memory map ──
+    // ── Teardown resolves by task_id, independent of the in-memory map ──
 
     use crate::store::{Repo, Task, TaskStatus, TaskStore};
     use std::collections::HashMap;
@@ -334,6 +333,7 @@ mod tests {
                 fetch_remote_base: None,
                 auto_approve: None,
                 in_place_default: false,
+                routing_policy: None,
             })
             .unwrap();
         store
@@ -357,6 +357,8 @@ mod tests {
                 pending_prompt: None,
                 auto_approve: None,
                 in_place: false,
+                routing_reason: None,
+                acp_session_id: None,
             })
             .unwrap();
 
@@ -365,6 +367,7 @@ mod tests {
             worktrees_root: dir.path().to_path_buf(),
             sounds_root: dir.path().to_path_buf(),
             concierge_root: dir.path().to_path_buf(),
+            acp_logs_root: dir.path().to_path_buf(),
             sessions: Mutex::new(HashMap::new()),
             hook_port: 0,
             agent_states: Mutex::new(HashMap::new()),
@@ -375,6 +378,7 @@ mod tests {
             remote: Mutex::new(crate::remote::RemoteState::default()),
             transcripts: Mutex::new(HashMap::new()),
             pending_questions: Mutex::new(HashMap::new()),
+            task_errors: Mutex::new(HashMap::new()),
             concierge_spawn: Mutex::new(()),
             base_fetch_at: Mutex::new(HashMap::new()),
         }

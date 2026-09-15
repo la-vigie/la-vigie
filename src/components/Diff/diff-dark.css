@@ -154,6 +154,16 @@
   min-width: 50px;
 }
 
+/* Make diff code text selectable/copyable (opt out of the app-chrome :root
+   no-select from theme.css). Only the code cell opts in — the gutter stays
+   unselectable so line numbers don't pollute copied code. A drag-select here
+   is reconciled with the inline-comment click in DiffPanel's codeEvents.onClick
+   (it no-ops when the window selection is non-collapsed). TASK-202. */
+.diff-code {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 /* Syntax token colors via refractor/prism classes */
 .token.comment,
 .token.prolog,

@@ -56,7 +56,7 @@ export function shouldActivateLink(e: { metaKey: boolean; ctrlKey: boolean }): b
 
 export function TerminalView({ taskId, localId, kind, hidden }: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  // The invariant pane's size + subscription (TASK-227). Null only when a
+  // The invariant pane's size + subscription. Null only when a
   // TerminalView is rendered outside a provider (bare, e.g. some unit tests);
   // then sizing is simply skipped.
   const paneMetrics = useContext(TerminalPaneMetricsContext);
@@ -184,7 +184,7 @@ export function TerminalView({ taskId, localId, kind, hidden }: TerminalViewProp
       return true;
     });
 
-    // Deterministically size the terminal from the invariant pane (TASK-227),
+    // Deterministically size the terminal from the invariant pane,
     // never from measuring this (possibly just-unhidden, still-collapsed) child.
     // Read the pane's cached pixel box + the shared char-cell size and compute
     // the grid directly; apply to xterm and the PTY. Because the pane is always
@@ -264,7 +264,7 @@ export function TerminalView({ taskId, localId, kind, hidden }: TerminalViewProp
   useEffect(() => {
     if (hidden) return;
     const raf = requestAnimationFrame(() => {
-      // Apply the pane-derived grid (TASK-227). Because sizing comes from the
+      // Apply the pane-derived grid. Because sizing comes from the
       // always-laid-out pane — not from measuring this just-unhidden child —
       // the size is already correct: there is no collapse transient to settle,
       // so this is a single deterministic apply, not a frame-budget loop. It
@@ -274,8 +274,8 @@ export function TerminalView({ taskId, localId, kind, hidden }: TerminalViewProp
       // xterm freezes its renderer while the container is display:none, so on a
       // plain session switch (same size) the buffer is unchanged and the
       // viewport stays stale/blank until an interaction forces a refresh.
-      // Repaint the visible rows explicitly so the output shows immediately
-      // (TASK-84); focus once (no repeated focus-stealing — there's no loop).
+      // Repaint the visible rows explicitly so the output shows immediately;
+      // focus once (no repeated focus-stealing — there's no loop).
       const term = termRef.current;
       term?.refresh(0, term.rows - 1);
       term?.focus();

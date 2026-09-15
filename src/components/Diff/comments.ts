@@ -25,6 +25,18 @@ export function composePrompt(comments: Comment[]): string {
   return `Please address these review comments:\n\n${items.join("\n")}`;
 }
 
+// The diff code cells are text-selectable, so a click that ends a
+// drag-select would otherwise also open the inline comment composer. A real
+// text selection leaves a non-collapsed range; a plain click leaves it
+// collapsed. Only a plain click should open the composer. Pass
+// `window.getSelection()` (null-safe: a missing selection is treated as a plain
+// click, matching the pre-selection behavior).
+export function clickShouldOpenComposer(
+  selection: { isCollapsed: boolean } | null,
+): boolean {
+  return !selection || selection.isCollapsed;
+}
+
 const PASTE_START = "\x1b[200~";
 const PASTE_END = "\x1b[201~";
 

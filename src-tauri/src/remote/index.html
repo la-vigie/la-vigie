@@ -19,6 +19,14 @@
     button, .btn { margin-top: 18px; background: var(--accent); border: none; color: #fff; font-weight: 600;
       display: block; text-align: center; }
     button:disabled { opacity: .5; }
+    /* passkey UI (TASK-240) */
+    .btn-secondary { background: var(--panel); color: var(--fg); border: 1px solid var(--border); }
+    .btn-danger { margin: 0; width: auto; padding: 8px 14px; border-radius: 10px; font-size: 14px;
+      background: #3a1618; color: #f87171; border: 1px solid #5a2226; }
+    .pk-alt { text-align: center; margin: 16px 0 4px; }
+    .pk-add { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+    .pk-add input { margin: 0; } .pk-add button { margin: 0; width: auto; white-space: nowrap; }
+    .pk-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
     .err { color: #f87171; margin-top: 12px; font-size: 14px; }
     .muted { color: var(--muted); }
     .linkbtn { cursor: pointer; }
@@ -41,6 +49,12 @@
     .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; background: var(--muted); }
     .dot.working { background: #f59e0b; } .dot.idle { background: #6b7280; }
     .dot.needs_attention { background: #ef4444; } .dot.done { background: #22c55e; } .dot.error { background: #ef4444; }
+    .dot.live { background: #22c55e; }
+    /* pinned per-repo orchestrator card ("session 0", atop the task list) */
+    .orch { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      border-color: #2b4f7d; background: #16202f; }
+    .orch .otitle { font-weight: 600; }
+    .orch .osub { color: var(--muted); font-size: 13px; margin-top: 3px; }
     .badge { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px;
       background: #14304d; color: #7db4ff; margin-left: 6px; }
     .seam { margin-top: 20px; padding: 24px; text-align: center; color: var(--muted);
@@ -127,6 +141,33 @@
     const setToken = (t) => sessionStorage.setItem(TOKEN_KEY, t);
     const clearToken = () => sessionStorage.removeItem(TOKEN_KEY);
 
+    // ---- durable passkey session (TASK-240) ----
+    // The session cookie is HttpOnly (JS can't read it), so we track a soft flag:
+    // set once a cookie-authed request succeeds, cleared on 401/403. `isAuthed`
+    // gates rendering — the QR token OR a live passkey session both count.
+    let sessionActive = false;
+    const isAuthed = () => !!getToken() || sessionActive;
+    const hasWebauthn = () =>
+      !!(window.PublicKeyCredential && navigator.credentials && navigator.credentials.create);
+
+    // base64url <-> ArrayBuffer (webauthn-rs speaks base64url; the WebAuthn API
+    // speaks ArrayBuffers, so we convert challenge/id fields on the wire).
+    function b64urlToBuf(s) {
+      s = String(s).replace(/-/g, "+").replace(/_/g, "/");
+      const pad = s.length % 4 ? 4 - (s.length % 4) : 0;
+      s += "=".repeat(pad);
+      const bin = atob(s);
+      const buf = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+      return buf.buffer;
+    }
+    function bufToB64url(buf) {
+      const bytes = new Uint8Array(buf);
+      let bin = "";
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    }
+
     const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
       (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
     const app = () => document.getElementById("app");
@@ -139,16 +180,21 @@
       toastTimer = setTimeout(() => t.classList.remove("show"), 2500);
     }
 
-    // ---- authed fetch: Bearer + no-store; 401/403 → drop token, re-pair ----
+    // ---- authed fetch: Bearer (if present) OR session cookie; 401/403 → re-pair ----
     async function apiFetch(path, opts = {}) {
+      const headers = { ...(opts.headers || {}) };
+      const tok = getToken();
+      if (tok) headers.Authorization = "Bearer " + tok; // else rely on the session cookie
       const res = await fetch(path, {
         ...opts,
         cache: "no-store",
-        headers: { ...(opts.headers || {}), Authorization: "Bearer " + getToken() },
+        credentials: "same-origin", // send the HttpOnly session cookie
+        headers,
       });
       if (res.status === 401 || res.status === 403) {
         clearToken();
-        toast("Invalid or expired token");
+        sessionActive = false;
+        toast("Session expired — reconnect");
         if (location.hash) location.hash = ""; else render();
         throw new Error("unauthorized");
       }
@@ -160,19 +206,23 @@
     let pollTimer = null;
 
     async function fetchState() {
-      if (!getToken()) return;
+      if (!isAuthed()) return; // bearer token OR a live passkey session (TASK-240)
       try {
         const res = await apiFetch("/api/state");
         if (!res.ok) return;
+        // A successful authed request confirms the session cookie is live; keep
+        // the soft flag set so a page with no bearer stays on the app (TASK-240).
+        if (!getToken()) sessionActive = true;
         snapshot = await res.json();
         // The task view owns its own (chat) polling; a full re-render here would
         // wipe the chat log, reset the cursor, and clear the reply box — so only
         // patch its live status pill in place. Forms (new) must not be clobbered.
         const rn = parseRoute(location.hash).name;
         if (rn === "task") refreshTaskMeta();
-        // "new" and "schedules" own form state / self-loaded data not in the
-        // snapshot — a state-poll re-render would clobber typed input for no gain.
-        else if (rn !== "new" && rn !== "schedules") render();
+        // "new"/"schedules"/"passkeys"/"orchestrator" own form state / a live chat
+        // not in the snapshot — a state-poll re-render would clobber it (wiping the
+        // chat log / re-ensuring the session) for no gain.
+        else if (rn !== "new" && rn !== "schedules" && rn !== "passkeys" && rn !== "orchestrator") render();
       } catch (e) { /* auth handled in apiFetch; ignore */ }
     }
     function startPolling() {
@@ -302,6 +352,17 @@
       finally { btn.disabled = false; ta.disabled = false; btn.textContent = label; ta.focus(); }
     }
 
+    async function resumeTask(taskId) {
+      const btn = document.getElementById("resume");
+      if (btn) { btn.disabled = true; btn.textContent = "Resuming…"; }
+      try {
+        const res = await apiFetch("/api/tasks/" + encodeURIComponent(taskId) + "/resume", { method: "POST" });
+        if (res.status === 202) { toast("Resume requested"); await fetchState(); }
+        else toast((await res.text()) || "Could not resume task");
+      } catch (e) { toast(String(e)); }
+      finally { if (btn && document.body.contains(btn)) { btn.disabled = false; btn.textContent = "Resume agent"; } }
+    }
+
     // ---- TASK-122: structured question card ----
     let qState = null; // { sig, questions, sel:[Set per q], custom:[str per q] } while a card is shown
     // Poll-driven entry: (re)build the card ONLY when the question set is new or
@@ -390,6 +451,7 @@
       if (document.hidden) return;
       const r = parseRoute(location.hash);
       if (r.name === "task") { if (chatTaskId) pollChat(chatTaskId); fetchState(); } // catch up chat + pill
+      else if (r.name === "orchestrator") { if (chatTaskId) pollChat(chatTaskId); } // catch up chat (no pill/state)
       else if (r.name !== "new") fetchState();
     });
 
@@ -397,24 +459,30 @@
     function parseRoute(hash) {
       const h = (hash || "").replace(/^#/, "") || "/";
       let m;
+      if (h === "/passkeys") return { name: "passkeys" };
       if ((m = /^\/repo\/([^/]+)\/schedules$/.exec(h))) return { name: "schedules", repoId: decodeURIComponent(m[1]) };
       if ((m = /^\/repo\/([^/]+)\/new$/.exec(h))) return { name: "new", repoId: decodeURIComponent(m[1]) };
+      if ((m = /^\/repo\/([^/]+)\/orchestrator$/.exec(h))) return { name: "orchestrator", repoId: decodeURIComponent(m[1]) };
       if ((m = /^\/repo\/([^/]+)$/.exec(h))) return { name: "tasks", repoId: decodeURIComponent(m[1]) };
       if ((m = /^\/task\/([^/]+)$/.exec(h))) return { name: "task", taskId: decodeURIComponent(m[1]) };
       return { name: "repos" };
     }
 
     function render() {
-      if (!getToken()) { stopPolling(); stopChat(); return renderPair(); }
+      if (!isAuthed()) { stopPolling(); stopChat(); return renderPair(); }
       const r = parseRoute(location.hash);
       stopChat();
-      if (r.name === "tasks") renderTasks(r.repoId);
+      if (r.name === "passkeys") renderPasskeys();
+      else if (r.name === "tasks") renderTasks(r.repoId);
       else if (r.name === "schedules") renderSchedules(r.repoId);
       else if (r.name === "new") renderNew(r.repoId);
+      else if (r.name === "orchestrator") renderOrchestrator(r.repoId);
       else if (r.name === "task") renderTask(r.taskId);
       else renderRepos();
       // Poll state on the task screen too, so the status pill stays live (the chat
-      // owns its own faster poll; fetchState only patches the pill there).
+      // owns its own faster poll; fetchState only patches the pill there). The
+      // orchestrator view has no task row / pill, so its chat poll is the only
+      // poll it needs — its /session hits keep the session alive server-side.
       if (r.name === "repos" || r.name === "tasks" || r.name === "task") startPolling();
       else stopPolling();
     }
@@ -428,11 +496,16 @@
 
     // ---- pair screen (manual token entry; QR is the boot fast-path) ----
     function renderPair() {
+      const passkeyBtn = hasWebauthn()
+        ? '<div class="pk-alt"><span class="muted">or</span></div>' +
+          '<button id="usePasskey" class="btn-secondary">Use a passkey</button>'
+        : "";
       app().innerHTML =
         '<h1>La Vigie — Remote</h1>' +
         '<label for="token">Pairing token</label>' +
         '<input id="token" type="password" autocomplete="off" placeholder="paste token from the Mac" />' +
         '<button id="connect">Connect</button>' +
+        passkeyBtn +
         '<div id="perr" class="err"></div>';
       document.getElementById("connect").addEventListener("click", () => {
         const v = document.getElementById("token").value.trim();
@@ -441,6 +514,155 @@
         location.hash = "";
         render(); fetchState();
       });
+      const pk = document.getElementById("usePasskey");
+      if (pk) pk.addEventListener("click", () => authenticatePasskey(document.getElementById("perr")));
+    }
+
+    // ---- passkey ceremonies (TASK-240) ----
+    // Authenticate: assert a registered passkey → server mints the session cookie.
+    async function authenticatePasskey(errEl) {
+      const setErr = (m) => { if (errEl) errEl.textContent = m; };
+      setErr("");
+      if (!hasWebauthn()) { setErr("This browser has no passkey support."); return; }
+      try {
+        const begin = await fetch("/api/auth/authenticate/begin", {
+          method: "POST", cache: "no-store", credentials: "same-origin",
+        });
+        if (begin.status === 409) { setErr("No passkey registered yet — connect with a token, then add one."); return; }
+        if (!begin.ok) { setErr("Could not start passkey sign-in."); return; }
+        const { ceremonyId, options } = await begin.json();
+        const pk = options.publicKey;
+        pk.challenge = b64urlToBuf(pk.challenge);
+        (pk.allowCredentials || []).forEach((c) => { c.id = b64urlToBuf(c.id); });
+        const assertion = await navigator.credentials.get({ publicKey: pk });
+        const body = {
+          ceremonyId,
+          credential: {
+            id: assertion.id,
+            rawId: bufToB64url(assertion.rawId),
+            type: assertion.type,
+            response: {
+              authenticatorData: bufToB64url(assertion.response.authenticatorData),
+              clientDataJSON: bufToB64url(assertion.response.clientDataJSON),
+              signature: bufToB64url(assertion.response.signature),
+              userHandle: assertion.response.userHandle
+                ? bufToB64url(assertion.response.userHandle) : null,
+            },
+          },
+        };
+        const fin = await fetch("/api/auth/authenticate/finish", {
+          method: "POST", cache: "no-store", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        });
+        if (!fin.ok) { setErr("Passkey sign-in failed."); return; }
+        sessionActive = true; // the HttpOnly session cookie is now set
+        location.hash = "";
+        render(); fetchState();
+        toast("Signed in with passkey");
+      } catch (e) {
+        setErr("Passkey sign-in was cancelled or failed.");
+      }
+    }
+
+    // Register: enroll a new passkey from an already-authed session.
+    async function registerPasskey(label, errEl) {
+      const setErr = (m) => { if (errEl) errEl.textContent = m; };
+      setErr("");
+      if (!hasWebauthn()) { setErr("This browser has no passkey support."); return false; }
+      try {
+        const begin = await apiFetch("/api/auth/register/begin", { method: "POST" });
+        if (!begin.ok) { setErr("Could not start passkey registration."); return false; }
+        const { ceremonyId, options } = await begin.json();
+        const pk = options.publicKey;
+        pk.challenge = b64urlToBuf(pk.challenge);
+        pk.user.id = b64urlToBuf(pk.user.id);
+        (pk.excludeCredentials || []).forEach((c) => { c.id = b64urlToBuf(c.id); });
+        const cred = await navigator.credentials.create({ publicKey: pk });
+        const body = {
+          ceremonyId,
+          label: label || "",
+          credential: {
+            id: cred.id,
+            rawId: bufToB64url(cred.rawId),
+            type: cred.type,
+            response: {
+              attestationObject: bufToB64url(cred.response.attestationObject),
+              clientDataJSON: bufToB64url(cred.response.clientDataJSON),
+            },
+          },
+        };
+        const fin = await apiFetch("/api/auth/register/finish", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        });
+        if (!fin.ok) { setErr("Passkey registration failed."); return false; }
+        toast("Passkey registered");
+        return true;
+      } catch (e) {
+        setErr("Passkey registration was cancelled or failed.");
+        return false;
+      }
+    }
+
+    // ---- passkeys management view (TASK-240) ----
+    async function renderPasskeys() {
+      app().innerHTML =
+        '<a class="back" href="#/">‹ Repositories</a>' +
+        '<div class="head"><h1>Passkeys</h1></div>' +
+        (hasWebauthn()
+          ? '<p class="muted">Register this device once (store it in your password manager); ' +
+            'then sign in with the passkey — no token, survives locking your phone.</p>' +
+            '<div class="pk-add"><input id="pkLabel" type="text" maxlength="64" ' +
+            'placeholder="Label (e.g. iPhone)" /><button id="pkAdd">Register a passkey</button></div>'
+          : '<p class="muted">This browser has no passkey support.</p>') +
+        '<div id="pkErr" class="err"></div>' +
+        '<div id="pkList" class="muted">Loading…</div>' +
+        '<div class="head" style="margin-top:24px"><span class="back linkbtn" id="pkSignout">Sign out this device</span></div>';
+      const errEl = document.getElementById("pkErr");
+      const addBtn = document.getElementById("pkAdd");
+      if (addBtn) addBtn.addEventListener("click", async () => {
+        addBtn.disabled = true;
+        const ok = await registerPasskey(document.getElementById("pkLabel").value.trim(), errEl);
+        addBtn.disabled = false;
+        if (ok) { document.getElementById("pkLabel").value = ""; loadPasskeyList(); }
+      });
+      document.getElementById("pkSignout").addEventListener("click", signOut);
+      loadPasskeyList();
+    }
+
+    async function loadPasskeyList() {
+      const el = document.getElementById("pkList");
+      if (!el) return;
+      try {
+        const res = await apiFetch("/api/auth/credentials");
+        if (!res.ok) { el.textContent = "Could not load passkeys."; return; }
+        const { credentials } = await res.json();
+        if (!credentials || !credentials.length) { el.innerHTML = '<p class="muted">No passkeys registered.</p>'; return; }
+        el.classList.remove("muted");
+        el.innerHTML = credentials.map((c) =>
+          '<div class="row pk-row"><div>' + esc(c.label) +
+          '<div class="sub">Added ' + esc(formatWhen(c.createdAt)) + '</div></div>' +
+          '<button class="btn-danger" data-id="' + esc(c.id) + '">Revoke</button></div>'
+        ).join("");
+        el.querySelectorAll("button[data-id]").forEach((b) => {
+          b.addEventListener("click", async () => {
+            b.disabled = true;
+            const res = await apiFetch("/api/auth/credentials/" + encodeURIComponent(b.dataset.id), { method: "DELETE" });
+            if (res.ok) { toast("Passkey revoked"); loadPasskeyList(); }
+            else { b.disabled = false; toast("Could not revoke"); }
+          });
+        });
+      } catch (e) { /* auth handled in apiFetch */ }
+    }
+
+    // Sign out: drop the server session + cookie AND the local bearer token.
+    async function signOut() {
+      try { await fetch("/api/auth/logout", { method: "POST", cache: "no-store", credentials: "same-origin" }); }
+      catch (e) { /* best-effort */ }
+      clearToken();
+      sessionActive = false;
+      stopPolling();
+      location.hash = "";
+      render();
     }
 
     function rollup(tasks) {
@@ -475,11 +697,12 @@
       ).join("");
       app().innerHTML =
         '<div class="head"><h1>Repositories</h1>' +
-        '<span class="back linkbtn" id="disconnect">Disconnect</span></div>' +
+        '<span class="head-actions">' +
+          (hasWebauthn() ? '<a class="btn" href="#/passkeys">Passkeys</a>' : "") +
+          '<span class="back linkbtn" id="disconnect">Disconnect</span>' +
+        '</span></div>' +
         (rows || '<p class="muted">No repositories.</p>');
-      document.getElementById("disconnect").addEventListener("click", () => {
-        clearToken(); stopPolling(); location.hash = ""; render();
-      });
+      document.getElementById("disconnect").addEventListener("click", signOut);
     }
     function renderTasks(repoId) {
       const repo = (snapshot.repos || []).find((r) => r.id === repoId);
@@ -494,6 +717,16 @@
           '<div class="sub">' + esc(s.label) + '</div>' +
         '</a>';
       }).join("");
+      // Pinned "session 0": the per-repo orchestrator chat, above the task rows.
+      // Its live/idle dot rides the same liveTaskIds snapshot as tasks (the
+      // orchestrator registers under the key `orchestrator:{repoId}`).
+      const orchLive = (snapshot.liveTaskIds || []).includes("orchestrator:" + repoId);
+      const orch =
+        '<a class="row orch" href="#/repo/' + encodeURIComponent(repoId) + '/orchestrator">' +
+          '<div><div class="otitle">🎛 Orchestrator</div>' +
+          '<div class="osub">' + (orchLive ? "Running — tap to chat" : "Tap to chat &amp; dispatch work") + '</div></div>' +
+          '<span class="dot ' + (orchLive ? "live" : "idle") + '"></span>' +
+        '</a>';
       app().innerHTML =
         '<a class="back" href="#/">‹ Repositories</a>' +
         '<div class="head"><h1>' + esc(repo ? repo.name : "Tasks") + '</h1>' +
@@ -501,6 +734,7 @@
           '<a class="btn" href="#/repo/' + encodeURIComponent(repoId) + '/schedules">Schedules</a>' +
           '<a class="btn" href="#/repo/' + encodeURIComponent(repoId) + '/new">+ New</a>' +
         '</span></div>' +
+        orch +
         (rows || '<p class="muted">No tasks yet — tap + New.</p>');
     }
 
@@ -751,6 +985,60 @@
         } catch (e) { errEl.textContent = String(e); btn.disabled = false; }
       });
     }
+    // ---- per-repo orchestrator chat ("session 0"): TASK-180 orchestrator over the
+    // TASK-108/109 transcript machinery. Ensures the session, then reuses the exact
+    // task-chat plumbing keyed on `orchestrator:{repoId}` — no bespoke chat stack.
+    async function renderOrchestrator(repoId) {
+      const repo = (snapshot.repos || []).find((r) => r.id === repoId);
+      const key = "orchestrator:" + repoId;
+      app().innerHTML =
+        '<a class="back" href="#/repo/' + encodeURIComponent(repoId) + '">‹ Back</a>' +
+        '<h1>🎛 Orchestrator</h1>' +
+        '<p class="muted" style="margin:2px 0 0">' + esc(repo ? repo.name : "") + ' · session 0</p>' +
+        '<div class="chatwrap">' +
+          '<div id="chatlog" class="chatlog"><p class="muted">Starting orchestrator…</p></div>' +
+          '<button id="jump" class="btn jump">↓ Latest</button>' +
+        '</div>' +
+        '<div id="qcard"></div>' +
+        '<div class="replybar">' +
+          '<textarea id="reply" rows="1" placeholder="Message the orchestrator…"></textarea>' +
+          '<button id="send">Send</button>' +
+        '</div>';
+      const ta = document.getElementById("reply");
+      document.getElementById("send").addEventListener("click", () => sendReply(key));
+      ta.addEventListener("input", () => autogrow(ta));
+      ta.addEventListener("keydown", (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); sendReply(key); }
+      });
+      const log = document.getElementById("chatlog");
+      log.addEventListener("scroll", updateJump);
+      document.getElementById("jump").addEventListener("click", () => {
+        log.scrollTop = log.scrollHeight; updateJump();
+      });
+
+      // Ensure (create/resume) the session BEFORE polling, so the first /session
+      // read has a live agent to attach to. `render()` already called stopChat();
+      // start the chat only after the ensure resolves.
+      const stillHere = () => {
+        const c = parseRoute(location.hash);
+        return c.name === "orchestrator" && c.repoId === repoId;
+      };
+      try {
+        const res = await apiFetch("/api/orchestrator/" + encodeURIComponent(repoId), { method: "POST" });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+      } catch (e) {
+        if (!stillHere()) return; // navigated away mid-flight — don't clobber the next view
+        const l = document.getElementById("chatlog");
+        if (l) l.innerHTML = '<p class="err">Could not start the orchestrator. ' +
+          '<span class="linkbtn" id="oretry" style="color:var(--accent);font-weight:600">Retry</span></p>';
+        const rb = document.getElementById("oretry");
+        if (rb) rb.addEventListener("click", () => renderOrchestrator(repoId));
+        return;
+      }
+      if (!stillHere()) return; // navigated away during the ensure — don't start a stale poll
+      startChat(key);
+    }
+
     function renderTask(taskId) {
       const t = (snapshot.tasks || []).find((x) => x.id === taskId);
       if (!t) {
@@ -765,11 +1053,14 @@
             ? '<a class="badge" href="' + esc(t.prUrl) + '" target="_blank" rel="noopener">PR #' + esc(t.prNumber) + '</a>'
             : '<span class="badge">PR #' + esc(t.prNumber) + '</span>')
         : "";
+      const isLive = (snapshot.liveTaskIds || []).includes(taskId);
+      const canResume = !isLive && t.status !== "done" && t.status !== "pending";
       app().innerHTML =
         '<a class="back" href="#/repo/' + encodeURIComponent(t.repoId) + '">‹ Back</a>' +
         '<h1>' + esc(t.title) + chip + '</h1>' +
         '<div class="meta">' + statusPill(t) + pr +
           '<span class="branch">⎇ ' + esc(t.branch) + '</span></div>' +
+        (canResume ? '<button id="resume" class="btn-secondary">Resume agent</button>' : '') +
         '<div class="chatwrap">' +
           '<div id="chatlog" class="chatlog"><p class="muted">Loading conversation…</p></div>' +
           '<button id="jump" class="btn jump">↓ Latest</button>' +
@@ -780,6 +1071,8 @@
           '<button id="send">Send</button>' +
         '</div>';
       const ta = document.getElementById("reply");
+      const resume = document.getElementById("resume");
+      if (resume) resume.addEventListener("click", () => resumeTask(taskId));
       document.getElementById("send").addEventListener("click", () => sendReply(taskId));
       ta.addEventListener("input", () => autogrow(ta));
       ta.addEventListener("keydown", (e) => {
@@ -794,14 +1087,22 @@
     }
 
     // ---- boot: QR auto-pair (TASK-106) → sessionStorage → repos ----
-    (function boot() {
+    // With no bearer token, probe for a live passkey session (TASK-240): a 200 means
+    // the HttpOnly cookie still authorizes us, so we skip the pair screen entirely.
+    (async function boot() {
       const m = /[#&]token=([^&]+)/.exec(location.hash || "");
       if (m) {
         setToken(decodeURIComponent(m[1]));
         history.replaceState(null, "", location.pathname + location.search); // strip token from URL
       }
+      if (getToken()) { render(); fetchState(); return; }
+      // No token — maybe a passkey session cookie is still valid.
+      try {
+        const res = await fetch("/api/state", { cache: "no-store", credentials: "same-origin" });
+        if (res.ok) { sessionActive = true; snapshot = await res.json(); }
+      } catch (e) { /* offline / no session — fall through to pair */ }
       render();
-      if (getToken()) fetchState();
+      if (sessionActive) startPolling();
     })();
   </script>
 </body>

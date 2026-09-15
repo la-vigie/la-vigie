@@ -9,6 +9,9 @@ const reset = () =>
     consoleByAgentId: {},
     selectedTaskId: null,
     tasks: [],
+    // startAgentSession awaits the catalog before routing unless it's
+    // already loaded; keep these synchronous session-store tests unblocked.
+    agentsLoaded: true,
   });
 
 describe("session store", () => {

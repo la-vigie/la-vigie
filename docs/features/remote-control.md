@@ -25,6 +25,17 @@ disable remote control when you're done.
 If you'd rather not scan a QR code, open the URL manually and paste the pairing token into
 the "Pairing token" field on the client's connect screen.
 
+**Register a passkey (durable sign-in).** The pairing token lives in the phone's
+`sessionStorage`, which iOS Safari discards when the tab is backgrounded, locked, or closed —
+so a token-only session keeps forcing a re-pair. To sign in durably, register a **passkey**
+once: from a paired session, open **Passkeys** (top of the repositories screen), give the
+device a label, and tap **Register a passkey** — store it in your password manager (e.g.
+1Password). Thereafter, the connect screen offers **Use a passkey**: one assertion signs you
+in with no token to hunt for, surviving backgrounding. Register more than one (phone + laptop)
+if you like. The passkey path is additive and opt-in — the QR/token flow stays as first-pair
+and fallback. Revoke a lost device's passkey (or **Sign out this device**) from the same
+Passkeys screen; revoking a credential immediately drops every session it minted.
+
 **Browse and create tasks.** The client opens on a list of your repositories; tapping one
 shows its tasks with a live status dot, ticket chip, and PR badge, mirroring the desktop
 sidebar. A **+ New** button lets you create a task from your phone (title, optional ticket
@@ -81,10 +92,24 @@ automatic TLS on your Mac's MagicDNS name. Enabling refuses to proceed if Tailsc
 (public internet exposure) is active on the machine, so the server is always tailnet-only.
 
 Every request except `GET /` is guarded by two checks: the `Host` header must match the
-tailnet MagicDNS name (an anti DNS-rebinding check), and the `Authorization: Bearer <token>`
-header must match the active pairing token via a constant-time comparison. `GET /` (the
+tailnet MagicDNS name (an anti DNS-rebinding check — enforced on **every** path regardless of
+credential), and the request must carry **either** the `Authorization: Bearer <token>` pairing
+token (constant-time compared) **or** a valid passkey session cookie (TASK-240). `GET /` (the
 static client page) only needs the Host check, since the page itself carries no secret.
-Disabling remote drops the in-memory token, so every subsequent request 401s.
+Disabling remote drops the in-memory token — and the in-memory sessions — so every subsequent
+request 401s.
+
+**Passkey auth (TASK-240).** WebAuthn passkeys are a durable, opt-in alternative to the
+sessionStorage bearer. The relying-party ID is the tailnet MagicDNS hostname and the origin is
+`https://<host>` — the `tailscale serve --https 443` TLS front already satisfies WebAuthn's
+secure-context requirement, so no new HTTPS infrastructure is needed. Registration
+(`/api/auth/register/*`) requires an already-paired session (bootstrap via QR/token first);
+authentication (`/api/auth/authenticate/*`) is the login itself, so it's Host-checked only and,
+on a successful assertion, mints a durable session cookie (`HttpOnly`, `Secure`,
+`SameSite=Strict`, sliding idle TTL). Credentials persist in a `webauthn_credentials` SQLite
+table; the sessions themselves are in-memory (so an app restart re-mints the pairing token and
+drops sessions — after which the phone re-presents its passkey in one tap). Revoking a
+credential deletes it and drops every session it minted.
 
 The server exposes this JSON API, all served under the enabled remote's tailnet URL:
 
@@ -101,6 +126,11 @@ The server exposes this JSON API, all served under the enabled remote's tailnet 
 | `/api/repos/{id}/schedules` | POST | Create a schedule: a `cron` ⇒ recurring, or `inSeconds`/`atUnix` ⇒ one-time (plus `name`, `prompt`) — reuses the same store CRUD + validation as the desktop create form |
 | `/api/schedules/{id}/enabled` | POST | Arm/disarm a schedule (`{"enabled": bool}`); returns the updated schedule |
 | `/api/schedules/{id}` | DELETE | Delete a schedule |
+| `/api/auth/register/{begin,finish}` | POST | Register a passkey (TASK-240); authed — enroll from an already-paired session |
+| `/api/auth/authenticate/{begin,finish}` | POST | Passkey login (Host-checked only); `finish` mints the durable session cookie |
+| `/api/auth/logout` | POST | Drop the caller's session and clear the cookie |
+| `/api/auth/credentials` | GET | List registered passkeys (label, id, created-at — metadata only) |
+| `/api/auth/credentials/{id}` | DELETE | Revoke a passkey and drop every session it minted |
 
 A reply is delivered to the agent's PTY as a bracketed paste followed by a separate `\r`
 keystroke a moment later — sending them as one write can make the agent's TUI swallow the

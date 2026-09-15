@@ -34,11 +34,12 @@ pub fn effective_fetch_remote_base(repo_override: Option<bool>, app_setting: Opt
 }
 
 /// App-level default for "inject La Vigie's bundled default skills into launched
-/// agents" (TASK-153). OFF — the operator opts in.
+/// agents". OFF — the operator opts in.
 pub const DEFAULT_INJECT_LAVIGIE_SKILLS: bool = false;
 
 /// Resolve whether to inject the bundled skill plugin. v1 is app-level only;
-/// repo/task overrides are TASK-154 (this signature will gain them then).
+/// repo/task overrides are not yet supported (tracked as TASK-154; this
+/// signature will gain them then).
 pub fn effective_inject_lavigie_skills(app_setting: Option<bool>) -> bool {
     app_setting.unwrap_or(DEFAULT_INJECT_LAVIGIE_SKILLS)
 }
@@ -53,7 +54,7 @@ pub fn worktree_base_ref(use_remote: bool, fetch_ok: bool, remote: &str, base: &
     }
 }
 
-/// App-level throttle window for the Diff tab's background base fetch (TASK-144):
+/// App-level throttle window for the Diff tab's background base fetch:
 /// the tab re-renders often, so fetch `origin/<base>` at most once per window.
 pub const BASE_FETCH_THROTTLE: std::time::Duration = std::time::Duration::from_secs(15);
 
@@ -170,7 +171,7 @@ pub struct AppSnapshot {
     pub blocked_by: std::collections::HashMap<String, Vec<Blocker>>,
 }
 
-/// One outstanding blocker of a pending task, described for the UI (TASK-177).
+/// One outstanding blocker of a pending task, described for the UI.
 /// `title`/`status` are `None` when the blocker row no longer exists (dangling).
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -423,8 +424,8 @@ pub async fn set_sound_settings(
 }
 
 /// True when the user is in a meeting (mic or camera capturing anywhere on the
-/// system). Used by the frontend to optionally suppress notification sounds
-/// (TASK-105). Native probe on macOS; always `false` on other platforms.
+/// system). Used by the frontend to optionally suppress notification sounds.
+/// Native probe on macOS; always `false` on other platforms.
 #[tauri::command]
 pub fn is_meeting_active() -> bool {
     crate::meeting::is_meeting_active()
@@ -445,7 +446,7 @@ pub async fn set_fetch_remote_base(
 }
 
 /// Persist the app-level "inject La Vigie default skills" flag, stored under the
-/// `inject_lavigie_skills` app_settings key (TASK-153).
+/// `inject_lavigie_skills` app_settings key.
 #[tauri::command]
 pub async fn set_inject_lavigie_skills(
     state: State<'_, AppState>,
@@ -542,7 +543,7 @@ pub async fn remove_repo(state: State<'_, AppState>, repo_id: String) -> Result<
         store.delete_repo(&repo_id).map_err(|e| format!("{e:#}"))?;
     }
 
-    // TASK-180: revoke this repo's orchestrator — stop its live session (dropping
+    // Revoke this repo's orchestrator — stop its live session (dropping
     // the MCP token) and delete its resume marker so a deleted repo can't
     // resurrect an orchestrator. Synchronous; no guard held across the await below.
     crate::concierge::revoke_orchestrator_for_repo(state.inner(), &repo_id);
@@ -568,7 +569,7 @@ pub async fn list_repo_branches(
 }
 
 /// Core for `list_repo_branches`, taking `&AppState` so the remote server's
-/// `GET /api/repos/{id}/branches` reuses the exact same path (TASK-199). Locks the
+/// `GET /api/repos/{id}/branches` reuses the exact same path. Locks the
 /// store only to resolve the repo path, dropping the guard before the async git
 /// call (locking invariant).
 pub async fn repo_branches(state: &AppState, repo_id: &str) -> Result<Vec<String>, String> {
@@ -585,36 +586,97 @@ pub async fn repo_branches(state: &AppState, repo_id: &str) -> Result<Vec<String
         .map_err(|e| format!("{e:#}"))
 }
 
-/// Shared launch path: run the TASK-88 launch core, then kick off the repo's
-/// background setup job (TASK-96). Used by both the `create_task` command and the
+/// Shared launch path: run the launch core, then kick off the repo's
+/// background setup job. Used by both the `create_task` command and the
 /// MCP `start_task` tool so worktree/row creation and setup stay one path.
 ///
 /// Locking: each store lock is captured-then-dropped before the next `.await`.
 pub async fn launch_and_kickoff_setup(
     state: &AppState,
     app: &tauri::AppHandle,
-    args: crate::launch::LaunchArgs,
+    mut args: crate::launch::LaunchArgs,
 ) -> Result<Task, String> {
+    // When no explicit engine was chosen, let the repo's routing policy
+    // pick one from a quick classification of the task. Returns the reason to
+    // record for observability; sets args.agent/args.model in place.
+    let routing_reason = maybe_route(state, &mut args).await;
+
     let task = crate::launch::launch_task(state, args).await?.task;
+
+    // Persist the routing decision on the created row (best-effort; a failure
+    // here — including a poisoned Mutex — must NOT fail task creation, since the
+    // row already exists. Swallow the lock error instead of `?`-propagating it).
+    if let Some(reason) = routing_reason {
+        if let Ok(store) = state.store.lock() {
+            let _ = store.set_task_routing_reason(&task.id, Some(&reason));
+        }
+    }
 
     // A queued (Pending) task has no worktree yet — setup runs at promote-time.
     if task.status == TaskStatus::Pending {
         // Pending tasks aren't shown in the tray, but refresh anyway so a later
-        // promote/status change starts from an accurate menu (TASK-204). Cheap.
+        // promote/status change starts from an accurate menu. Cheap.
         crate::tray::refresh(app);
         return Ok(task);
     }
 
     kickoff_setup(state, app, &task)?;
-    // TASK-204: the desktop create path emits no event of its own — refresh the
+    // The desktop create path emits no event of its own — refresh the
     // tray here so a newly-created task appears in the menu live.
     crate::tray::refresh(app);
     Ok(task)
 }
 
-/// Kick off the repo's background setup job for a freshly-created/promoted task
-/// (TASK-96). No-op when the worktree has no setup to run. Shared by the create
-/// path and the TASK-90 promote path.
+/// Auto-route a launch to an engine when the caller left `agent`
+/// unspecified and the task's repo has an enabled routing policy.
+///
+/// Returns `Some(reason)` when an engine was auto-selected, else `None`. When it
+/// fires it OWNS the `(agent, model)` pair — it sets both from the decision,
+/// discarding any caller-supplied `model` (which, absent an explicit agent, has
+/// no engine to belong to and could otherwise pair a routed engine with a
+/// foreign model). Runs the (async, network) classifier only when a rule
+/// actually references a classifier signal. Every failure path is silent — an
+/// unroutable or errored classification leaves `args` untouched so
+/// `resolve_for_task` keeps today's static default. A manual per-task agent pick
+/// short-circuits this entirely.
+async fn maybe_route(state: &AppState, args: &mut crate::launch::LaunchArgs) -> Option<String> {
+    // Manual override wins: an explicit, non-blank agent skips routing.
+    if args.agent.as_deref().map(|a| !a.trim().is_empty()).unwrap_or(false) {
+        return None;
+    }
+
+    // Load the repo's policy + custom agents under a brief lock (dropped before
+    // the classifier await, per the repo's never-hold-lock-across-await rule).
+    let (policy, custom) = {
+        let store = state.store.lock().ok()?;
+        let repo = store.get_repo(&args.repo_id).ok().flatten()?;
+        let policy = crate::agent::routing::RoutingPolicy::from_json(repo.routing_policy.as_deref())?;
+        if !policy.enabled {
+            return None;
+        }
+        let custom = store.list_custom_agents().unwrap_or_default();
+        (policy, custom)
+    };
+
+    let class = if policy.needs_classification() {
+        crate::agent::classifier::classify_task(&args.title, args.prompt.as_deref()).await
+    } else {
+        None
+    };
+
+    let signals = crate::agent::routing::RouteSignals { title: &args.title };
+    let decision = crate::agent::routing::route(&policy, class.as_ref(), &signals, &custom)?;
+
+    // Routing owns the (agent, model) pair: set both from the decision so a
+    // routed engine is never paired with the caller's foreign model.
+    args.agent = Some(decision.agent);
+    args.model = decision.model;
+    Some(decision.reason)
+}
+
+/// Kick off the repo's background setup job for a freshly-created/promoted task.
+/// No-op when the worktree has no setup to run. Shared by the create
+/// path and the promote path.
 ///
 /// Locking: each store lock is captured-then-dropped; this fn does not `.await`.
 pub(crate) fn kickoff_setup(
@@ -657,9 +719,8 @@ pub(crate) fn kickoff_setup(
 }
 
 /// Request payload for the `create_task` command. Bundling the fields into one
-/// struct keeps the command signature under clippy's `too_many_arguments` bound
-/// (TASK-100). The frontend passes these camelCase-keyed under `args`; the field
-/// names/values are byte-identical to the former flat params.
+/// struct keeps the command signature under clippy's `too_many_arguments` bound.
+/// The frontend passes these camelCase-keyed under `args`.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateTaskArgs {
@@ -690,7 +751,7 @@ pub async fn create_task(
         agent: args.agent,
         model: args.model,
         auto_approve: args.auto_approve,
-        // The frontend create path never queues on another task (TASK-90).
+        // The frontend create path never queues on another task.
         after_merge_of: Vec::new(),
         prompt: None,
         in_place: args.in_place,
@@ -701,7 +762,7 @@ pub async fn create_task(
 }
 
 /// Preview of what creating a task at the derived worktree path would do, for the
-/// New Task modal warning (TASK-125). `state` is `"vacant"` (path free), `"adopt"`
+/// New Task modal warning. `state` is `"vacant"` (path free), `"adopt"`
 /// (an existing worktree on the intended branch will be reused), or `"conflict"`
 /// (the path is occupied by something that doesn't match — creation would fail).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -713,7 +774,7 @@ pub struct WorktreePreview {
 }
 
 /// Check whether the worktree path derived from the given task inputs already
-/// exists on disk, so the New Task modal can warn before submit (TASK-125). Never
+/// exists on disk, so the New Task modal can warn before submit. Never
 /// errors on incomplete input — an unresolvable request (e.g. no title yet)
 /// returns a `vacant` preview with no message so the UI simply shows nothing.
 #[tauri::command]
@@ -742,7 +803,7 @@ pub async fn check_worktree_path(
         after_merge_of: Vec::new(),
         prompt: None,
         auto_approve: None,
-        // TASK-163: placeholder default — this preview path doesn't model in-place yet.
+        // Placeholder default — this preview path doesn't model in-place tasks.
         in_place: false,
         branch_name: None,
     };
@@ -773,7 +834,7 @@ pub async fn check_worktree_path(
     let preview = match adoption {
         git::WorktreeAdoption::Vacant => {
             // The path is free, but the branch may already exist (a leftover from a
-            // deleted task): note that its commits will be reused (TASK-125).
+            // deleted task): note that its commits will be reused.
             let branch_exists =
                 git::ref_exists(repo_path, &format!("refs/heads/{}", resolved.branch)).await;
             if branch_exists {
@@ -843,10 +904,10 @@ pub async fn delete_task(
         }
     }
 
-    // A queued (Pending, TASK-90) task has no worktree/branch on disk — skip the
+    // A queued (Pending) task has no worktree/branch on disk — skip the
     // git teardown; the DB row delete above already cascaded its dependency
     // edges away. An in-place task's `worktree_path` is the repo's main
-    // checkout — never removed (TASK-163).
+    // checkout — never removed.
     if crate::teardown::should_remove_worktree(task.in_place, &task.worktree_path) {
         git::remove_worktree(
             Path::new(&repo.path),
@@ -935,7 +996,7 @@ pub async fn finish_task(
     }
 
     // Remove worktree — propagate error; DB row not yet deleted. In-place tasks
-    // skip this: `worktree_path` is the repo's main checkout (TASK-163).
+    // skip this: `worktree_path` is the repo's main checkout.
     if crate::teardown::should_remove_worktree(in_place, &worktree_path) {
         git::remove_worktree(
             Path::new(&repo_path),
@@ -953,12 +1014,12 @@ pub async fn finish_task(
     }
 
     // discard/merge mode — best-effort branch deletion (ignore error). Never
-    // for in-place tasks — the branch is the checkout's current branch (TASK-163).
+    // for in-place tasks — the branch is the checkout's current branch.
     if !in_place && (mode == "discard" || mode == "merge") {
         let _ = git::delete_branch(Path::new(&repo_path), &branch, true).await;
     }
 
-    // TASK-90 (revised): promote dependents when this task's work has landed
+    // Promote dependents when this task's work has landed
     // (PR MERGED auto-detected). Merge mode already squash-merged the PR above,
     // so the landed check is redundant — bypass it. Keep/discard still verify
     // via `gh pr view`. Cheap early-out when there are no dependents.
@@ -969,7 +1030,7 @@ pub async fn finish_task(
 
 /// Promote one queued (Pending) task now that its dependency has merged: create
 /// the worktree off the up-to-date base, flip it live, kick off setup, and emit
-/// `task_launched` so the frontend starts the agent (TASK-90). Store-Mutex is
+/// `task_launched` so the frontend starts the agent. Store-Mutex is
 /// captured-then-dropped before each await.
 async fn promote_pending_task(
     state: &AppState,
@@ -991,7 +1052,7 @@ async fn promote_pending_task(
     };
 
     // Idempotency: if this row is no longer Pending, another finish surface (or
-    // the TASK-91 poller) already promoted it — do nothing, so we never re-create
+    // the poller) already promoted it — do nothing, so we never re-create
     // a worktree or double-start an agent for an already-live task.
     if task.status != crate::store::TaskStatus::Pending {
         return Ok(());
@@ -1010,8 +1071,8 @@ async fn promote_pending_task(
         after_merge_of: Vec::new(),
         prompt: None,
         auto_approve: None,
-        // TASK-163: placeholder default — a pending task's promote path always
-        // created a worktree; in-place pending tasks are out of this task's scope.
+        // Placeholder default — a pending task's promote path always
+        // creates a worktree; in-place pending tasks are out of scope here.
         in_place: false,
         branch_name: None,
     };
@@ -1053,13 +1114,13 @@ async fn promote_pending_task(
     };
     kickoff_setup(state, app, &live_task)?;
 
-    // 5. Tell the frontend to start the agent (reuses TASK-89 useTaskLaunch).
-    // TASK-181: promote path keeps the repo-prompt combine (skip = false).
+    // 5. Tell the frontend to start the agent (reuses useTaskLaunch).
+    // Promote path keeps the repo-prompt combine (skip = false).
     crate::mcp::emit_task_launched(app, dep_id.to_string(), initial_prompt, false);
     Ok(())
 }
 
-/// TASK-90 (revised): promote every dependent queued on `task_id` when its work
+/// Promote every dependent queued on `task_id` when its work
 /// has LANDED. Dependents-first early-out — the gh landed-check runs ONLY when a
 /// dependent is actually waiting (the common case exits after one indexed SELECT).
 /// `landed = bypass || (this task's PR state == MERGED)`. Infallible + error-
@@ -1075,7 +1136,7 @@ pub(crate) async fn promote_dependents_of(
 ) {
     // 1. Cheap indexed peek. No dependents ⇒ exit with no gh call, no work.
     //    This is ONLY an early-exit optimisation — the authoritative promotion set
-    //    is re-read atomically with edge removal at step 3 (TASK-182), so an edge
+    //    is re-read atomically with edge removal at step 3, so an edge
     //    inserted during the landed-check await below is still seen there.
     let has_dependents = {
         let store = match state.store.lock() { Ok(s) => s, Err(e) => { eprintln!("TASK-90: store lock: {e}"); return; } };
@@ -1097,7 +1158,7 @@ pub(crate) async fn promote_dependents_of(
         return; // dependents stay queued; edges left intact
     }
     // 3. Satisfied ⇒ atomically capture the promotion set AND clear this
-    //    dependency's edges (TASK-182). A dependent edge queued concurrently during
+    //    dependency's edges. A dependent edge queued concurrently during
     //    the await window is included here (or not yet inserted) — never removed
     //    without being promoted. Then promote each 0-unmet dependent.
     let dependents = {
@@ -1250,7 +1311,7 @@ async fn resolve_base_ref(state: &AppState, ctx: &DiffBaseCtx) -> String {
 
 /// Return the unified diff of the task's worktree for the given review scope
 /// (`uncommitted` vs `base`). Defaults to `base`. For the `base` scope the diff
-/// is taken against the freshly-fetched `origin/<base>` when available (TASK-144),
+/// is taken against the freshly-fetched `origin/<base>` when available,
 /// else the local base; the `uncommitted` scope is unaffected (always vs `HEAD`).
 #[tauri::command]
 pub async fn get_diff(
@@ -1285,7 +1346,7 @@ pub async fn get_diff(
 
 /// Return the list of files changed in the task's worktree for the given review
 /// scope (`uncommitted` vs `base`). Defaults to `base`. Base scope compares
-/// against the freshly-fetched `origin/<base>` when available (TASK-144).
+/// against the freshly-fetched `origin/<base>` when available.
 #[tauri::command]
 pub async fn get_changed_files(
     state: State<'_, AppState>,
@@ -1699,6 +1760,7 @@ mod tests {
                 setup_command: None, default_agent: None, auto_start_agent: false,
                 initial_prompt: None, default_model: None, sound_settings: None,
                 fetch_remote_base: None, auto_approve: None, in_place_default: false,
+                routing_policy: None,
             })
             .unwrap();
         let mk = |id: &str, status: TaskStatus| Task {
@@ -1707,6 +1769,7 @@ mod tests {
             status, created_at: 0, updated_at: 0, pr_number: None, pr_url: None,
             ticket_key: None, agent: None, model: None, setup_status: None, hidden: false,
             pending_prompt: None, auto_approve: None, in_place: false,
+            routing_reason: None, acp_session_id: None,
         };
         store.insert_task(&mk("b1", TaskStatus::Idle)).unwrap();
         store.insert_task(&mk("waiter", TaskStatus::Pending)).unwrap();

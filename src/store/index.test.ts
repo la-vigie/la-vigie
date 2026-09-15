@@ -77,11 +77,11 @@ describe("useVigieStore", () => {
     expect(useVigieStore.getState().tasks).toEqual([{ ...sampleTask, blockedBy: [] }]);
   });
 
-  // TASK-189: components fire refresh() fire-and-forget (Sidebar/SettingsModal/DiffPanel/
+  // Components fire refresh() fire-and-forget (Sidebar/SettingsModal/DiffPanel/
   // useTaskCreated). If refresh() rejected, that un-awaited rejection would surface as a
   // global unhandled rejection that vitest misattributes to whatever test is running
-  // concurrently under file-parallel/shuffled ordering — the source of the PrPanel flake.
-  // refresh() must swallow+log like its refreshPrompts/refreshCustomSounds siblings.
+  // concurrently under file-parallel/shuffled ordering. refresh() must swallow+log
+  // like its refreshPrompts/refreshCustomSounds siblings.
   it("refresh() does not reject or leak when list_state fails", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     invokeMock.mockRejectedValueOnce(new Error("list_state boom"));
@@ -173,7 +173,9 @@ describe("useVigieStore", () => {
     });
 
     it("drops sessions for the removed repo's tasks", async () => {
-      useVigieStore.setState({ repos: [sampleRepo], tasks: [sampleTask] });
+      // agentsLoaded: startAgentSession routes synchronously instead
+      // of awaiting the catalog, so the session exists before removeRepo runs.
+      useVigieStore.setState({ repos: [sampleRepo], tasks: [sampleTask], agentsLoaded: true });
       useVigieStore.getState().startAgentSession("task-1", false);
       invokeMock
         .mockResolvedValueOnce(undefined)
@@ -350,10 +352,10 @@ describe("useVigieStore", () => {
 
   });
 
-  // TASK-53: exercise the module-load initializer directly (the tests above
-  // only cover the setter). Set localStorage, reset the module registry, then
-  // re-import the store so its initial-state factory re-runs against the
-  // freshly stored values.
+  // Exercise the module-load initializer directly (the tests above only cover
+  // the setter). Set localStorage, reset the module registry, then re-import
+  // the store so its initial-state factory re-runs against the freshly stored
+  // values.
   describe("sidebar init from localStorage at module load (TASK-53)", () => {
     beforeEach(() => {
       localStorage.clear();

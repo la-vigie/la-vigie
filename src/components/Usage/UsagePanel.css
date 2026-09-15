@@ -1,0 +1,144 @@
+/* ── ACP usage & cost panel ─────────────────────────────────────────────── */
+
+.usage__backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.usage {
+  width: 720px;
+  max-width: 92vw;
+  max-height: 88vh;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-pop);
+  overflow: hidden;
+}
+
+.usage__header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-faint);
+  flex-shrink: 0;
+}
+
+.usage__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  flex: none;
+}
+
+.usage__windows {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.usage__window {
+  background: none;
+  border: 1px solid var(--border-faint);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.usage__window--active {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.usage__close {
+  flex: none;
+}
+
+.usage__body {
+  padding: 16px 20px 20px;
+  overflow: auto;
+}
+
+.usage__summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.usage__total {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.usage__muted {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.usage__empty {
+  margin-top: 16px;
+  line-height: 1.5;
+}
+
+.usage__error {
+  color: var(--danger, #e5484d);
+  font-size: 13px;
+}
+
+.usage__section {
+  margin: 20px 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.usage__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.usage__table th,
+.usage__table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-faint);
+}
+
+.usage__table th {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.usage__num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage__rate {
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+}
+
+.usage__rate--ok {
+  color: var(--success, #30a46c);
+}
+
+.usage__rate--warn {
+  color: var(--danger, #e5484d);
+  font-weight: 600;
+}

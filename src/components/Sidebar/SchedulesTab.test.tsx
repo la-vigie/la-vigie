@@ -47,7 +47,7 @@ describe("SchedulesTab", () => {
       expect(api.createSchedule).toHaveBeenCalledWith(
         expect.objectContaining({
           repoId: "r1", name: "Nightly", prompt: "/nightly", cron: "0 2 * * *",
-          // TASK-181: the form defaults to skip = true.
+          // The form defaults to skip = true.
           skipRepoPrompt: true,
         }),
       ),
@@ -85,7 +85,7 @@ describe("SchedulesTab", () => {
 
     const nameInput = screen.getByLabelText("Schedule name") as HTMLInputElement;
     expect(nameInput.value).toBe("Weekly scan");
-    // TASK-181: the checkbox reflects the stored value (sample has skip = false).
+    // The checkbox reflects the stored value (sample has skip = false).
     const skipBox = screen.getByLabelText("Skip repository prompt") as HTMLInputElement;
     expect(skipBox.checked).toBe(false);
 

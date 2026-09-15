@@ -1,4 +1,4 @@
-//! TASK-35: materialize a vendored per-provider skill bundle into a worktree.
+//! Materialize a vendored per-provider skill bundle into a worktree.
 //!
 //! Engines other than Claude discover project-local skills from directories in
 //! the working tree (`.agents/skills/`, `.opencode/skills/`, `.vibe/skills/`).
@@ -23,10 +23,10 @@ pub const BUNDLE_IGNORE: &str = "*\n";
 /// Relative paths (to `worktree`) of every git-tracked file in `worktree`.
 ///
 /// Best-effort: if `worktree` is not a git repo, `git` is missing, or the call
-/// otherwise fails, this returns an empty set — so a non-git worktree behaves
-/// exactly as before (nothing is treated as tracked, everything is copied).
-/// TASK-201: used to never overwrite a file a repo genuinely commits under one of
-/// the injected dotdirs (`.agents/`, `.opencode/`, `.vibe/`).
+/// otherwise fails, this returns an empty set, so a non-git worktree copies
+/// everything (nothing is treated as tracked). The returned set lets the caller
+/// avoid overwriting a file a repo genuinely commits under one of the injected
+/// dotdirs (`.agents/`, `.opencode/`, `.vibe/`).
 pub(crate) fn tracked_paths(worktree: &Path) -> HashSet<PathBuf> {
     // `-z` → NUL-separated, so any filename (spaces, newlines) round-trips.
     let output = match Command::new("git")
@@ -48,7 +48,7 @@ pub(crate) fn tracked_paths(worktree: &Path) -> HashSet<PathBuf> {
 
 /// Recursively copy `src` into `dst`, creating directories as needed. `rel` is
 /// the path of `dst` relative to the worktree root; any file whose relative path
-/// is in `tracked` is skipped rather than overwritten (TASK-201), so a repo that
+/// is in `tracked` is skipped rather than overwritten, so a repo that
 /// commits one of the injected dotdirs is never mutated.
 fn copy_tree(
     src: &Path,
@@ -82,9 +82,9 @@ pub fn materialize(bundle_root: &Path, worktree: &Path) -> io::Result<Vec<String
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    // TASK-201: never mutate a file the repo genuinely commits under an injected
+    // Never mutate a file the repo genuinely commits under an injected
     // dotdir. Collect the tracked set once, up front (best-effort: empty for a
-    // non-git worktree → prior copy-everything behavior).
+    // non-git worktree, which then copies everything).
     let tracked = tracked_paths(worktree);
     let mut injected: Vec<String> = Vec::new();
     for entry in read {
@@ -99,7 +99,7 @@ pub fn materialize(bundle_root: &Path, worktree: &Path) -> io::Result<Vec<String
         // copy (if copy_tree errors midway) stays out of the worktree's
         // Diff/status. Don't clobber a .gitignore the repo may legitimately
         // commit for this dotdir — a tracked one exists on disk, so the
-        // exists() check preserves it (TASK-201).
+        // exists() check preserves it.
         let gitignore = dst.join(".gitignore");
         if !gitignore.exists() {
             fs::write(&gitignore, BUNDLE_IGNORE)?;
@@ -191,7 +191,7 @@ mod tests {
         out
     }
 
-    // TASK-201: a repo that genuinely COMMITS one of the injected dotdirs must not
+    // A repo that genuinely COMMITS one of the injected dotdirs must not
     // have any tracked file modified/overwritten, and the injected bundle content
     // must stay out of `git status` (i.e. out of La Vigie's Diff tab).
     #[test]
@@ -233,7 +233,7 @@ mod tests {
         );
     }
 
-    // TASK-201: a tracked `.gitignore` inside a committed dotdir is preserved even
+    // A tracked `.gitignore` inside a committed dotdir is preserved even
     // in a real git worktree (the exists() guard sees the checked-out file).
     #[test]
     fn preserves_tracked_gitignore_in_committed_dotdir() {

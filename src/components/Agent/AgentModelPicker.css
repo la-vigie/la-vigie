@@ -142,6 +142,17 @@
   color: var(--accent);
 }
 
+/* Transient placeholder while the (off-thread) model enumeration is in flight. */
+.amp__model-row--loading {
+  color: var(--text-muted);
+  font-style: italic;
+  cursor: default;
+}
+
+.amp__model-row--loading:hover {
+  background: none;
+}
+
 .amp__model-empty {
   padding: 6px 12px;
   color: var(--text-faint);

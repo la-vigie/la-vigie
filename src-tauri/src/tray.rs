@@ -1,4 +1,4 @@
-//! System-tray menu (TASK-204): a macOS menu-bar item whose dropdown lists the
+//! System-tray menu: a macOS menu-bar item whose dropdown lists the
 //! in-progress tasks grouped by repo, so the user can jump back to any active
 //! task even when the window is hidden. Clicking a task focuses the main window
 //! and selects that task in the frontend.
@@ -207,7 +207,7 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
             let task_id = id[TASK_PREFIX.len()..].to_string();
             focus_main_window(app);
             // The frontend selects the task; `setSelectedTask` also clears its
-            // attention cue (mirrors how `task_launched` is bridged, TASK-89).
+            // attention cue (mirrors how `task_launched` is bridged).
             let _ = app.emit("tray_select_task", TraySelectPayload { task_id });
         }
         // Disabled headers / empty-state item: no-op.
@@ -216,7 +216,9 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
 }
 
 /// Bring the main window to the foreground: show (if hidden), unminimize, focus.
-fn focus_main_window(app: &AppHandle) {
+/// Reused by the single-instance guard to raise the primary window
+/// when a second launch is redirected here.
+pub(crate) fn focus_main_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
         let _ = win.unminimize();
@@ -255,6 +257,7 @@ mod tests {
             fetch_remote_base: None,
             auto_approve: None,
             in_place_default: false,
+            routing_policy: None,
         }
     }
 
@@ -279,6 +282,8 @@ mod tests {
             pending_prompt: None,
             auto_approve: None,
             in_place: false,
+            routing_reason: None,
+            acp_session_id: None,
         }
     }
 

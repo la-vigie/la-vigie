@@ -14,7 +14,7 @@ fn mint_token() -> String {
 }
 
 /// Acquire a system-sleep-preventing power assertion for the lifetime of the
-/// enabled remote server (TASK-104). On macOS this is an IOPMAssertion
+/// enabled remote server. On macOS this is an IOPMAssertion
 /// (`PreventUserIdleSystemSleep`) released deterministically when the returned
 /// handle is dropped. `idle` only — display sleep is left untouched.
 ///
@@ -96,11 +96,20 @@ pub async fn enable_remote(
         return Ok(status_of(&remote));
     }
     // Hold a system-sleep assertion so the tailnet host stays reachable while
-    // remote is on (TASK-104). Best-effort: acquire failure leaves it `None` and
+    // remote is on. Best-effort: acquire failure leaves it `None` and
     // does not block enable. Acquired before the lock — `keepawake` is synchronous.
     let keep_awake = acquire_keep_awake();
     let mut remote = state.remote.lock().map_err(|e| format!("{e:#}"))?;
-    remote.active = Some(ActiveRemote { token, magic_dns, port, shutdown, keep_awake });
+    remote.active = Some(ActiveRemote {
+        token,
+        magic_dns,
+        port,
+        shutdown,
+        keep_awake,
+        sessions: Default::default(),
+        reg_states: Default::default(),
+        auth_states: Default::default(),
+    });
     Ok(status_of(&remote))
 }
 
@@ -114,7 +123,7 @@ pub async fn disable_remote(state: State<'_, AppState>) -> Result<RemoteStatus, 
     }; // guard dropped here — no MutexGuard is live across any await below
     if let Some(a) = active {
         let _ = a.shutdown.send(());
-        // Dropping `a` releases the held power assertion (TASK-104).
+        // Dropping `a` releases the held power assertion.
         drop(a.keep_awake);
         let _ = tailscale::serve_reset().await;
     }

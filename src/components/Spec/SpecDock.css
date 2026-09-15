@@ -79,7 +79,16 @@
 .spec-dock__empty { color: var(--text-muted, #9aa); padding: 12px 0; }
 
 /* Read-only markdown rendering. */
-.spec-dock__md { color: var(--text, #ddd); line-height: 1.55; font-size: 14px; }
+.spec-dock__md {
+  color: var(--text, #ddd);
+  line-height: 1.55;
+  font-size: 14px;
+  /* Rendered spec/doc markdown is read-only reference text — opt out of the
+     app-chrome :root no-select so it can be selected and copied. `text` allows
+     normal partial selection. -webkit- prefix required for WKWebView. TASK-202. */
+  -webkit-user-select: text;
+  user-select: text;
+}
 .spec-dock__md h1,
 .spec-dock__md h2,
 .spec-dock__md h3 { margin: 1em 0 0.4em; line-height: 1.25; }

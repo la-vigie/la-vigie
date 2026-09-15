@@ -32,6 +32,91 @@ export type PtyEvent =
   | { type: "data"; data: string }
   | { type: "exit"; code: number };
 
+// ── ACP (Agent Client Protocol) backend engine event contract ────────────────
+// Mirrors `src-tauri/src/acp/events.rs::AcpEvent` exactly (tag = "type",
+// camelCase variant + field names). Payloads that carry open-ended ACP schema
+// data (`modes`/`models`/`content`/`rawInput`/`toolCall`) stay `unknown` on
+// purpose — the Rust side deliberately keeps them as raw `serde_json::Value`
+// rather than re-typing the ACP schema, so this contract doesn't silently
+// shift when the ACP crate does.
+
+export type MessageRole = "user" | "assistant";
+
+export interface PlanEntryEvent {
+  content: string;
+  priority: string;
+  status: string;
+}
+
+export interface CostEvent {
+  amount: number;
+  currency: string;
+}
+
+/** Best-effort rate-limit snapshot parsed from `UsageUpdate._meta`. Absent
+ *  unless the agent reports it (only Claude does today). */
+export interface RateLimitEvent {
+  status: string;
+  resetAt: number | null;
+  limitType: string | null;
+  usingOverage: boolean | null;
+}
+
+export interface PermissionOptionEvent {
+  optionId: string;
+  name: string;
+  kind: string;
+}
+
+export type AcpEvent =
+  | { type: "sessionStarted"; sessionId: string; modes: unknown | null; models: unknown | null }
+  | {
+      type: "messageChunk";
+      role: MessageRole;
+      text: string;
+      messageId: string | null;
+      /** Omitted (falsy) for a live chunk; `true` only for resumed-session replay. */
+      replay?: boolean;
+    }
+  | {
+      type: "thoughtChunk";
+      text: string;
+      messageId: string | null;
+      replay?: boolean;
+    }
+  | {
+      type: "toolCall";
+      id: string;
+      kind: string;
+      title: string;
+      status: string;
+      content: unknown[];
+      rawInput: unknown | null;
+    }
+  | {
+      type: "toolCallUpdate";
+      id: string;
+      kind: string | null;
+      title: string | null;
+      status: string | null;
+      content: unknown[] | null;
+    }
+  | { type: "plan"; entries: PlanEntryEvent[] }
+  | { type: "permissionRequest"; requestId: string; options: PermissionOptionEvent[]; toolCall: unknown }
+  | { type: "modeChanged"; modeId: string }
+  | { type: "modelSelected"; modelId: string }
+  | {
+      type: "usage";
+      used: number;
+      size: number;
+      cost: CostEvent | null;
+      /** Omitted unless the agent reports rate-limit info in `_meta`. */
+      rateLimit?: RateLimitEvent | null;
+    }
+  | { type: "turnEnded"; stopReason: string }
+  | { type: "error"; message: string }
+  | { type: "exit"; code: number | null };
+
 export interface AppSnapshot {
   repos: Repo[];
   tasks: Task[];
@@ -46,7 +131,7 @@ export type RemoteStatus = {
   active: boolean;
   token?: string | null;
   url?: string | null;
-  // Whether a system-sleep-preventing power assertion is currently held (TASK-104).
+  // Whether a system-sleep-preventing power assertion is currently held.
   sleepInhibited: boolean;
 };
 
@@ -64,8 +149,8 @@ export type RemoteSession = {
   id: string;
   kind: string;
   idleSecs: number;
-  // Repo the session is scoped to (TASK-180 orchestrator). Absent for the legacy
-  // global concierge session.
+  // Repo the session is scoped to (orchestrator). Absent for the legacy global
+  // concierge session.
   repoId?: string;
 };
 
@@ -73,15 +158,15 @@ export function listRemoteSessions(): Promise<RemoteSession[]> {
   return invoke("list_remote_sessions");
 }
 
-/** Spawn (or reveal) the per-repo orchestrator session for `repoId` (TASK-180). */
+/** Spawn (or reveal) the per-repo orchestrator session for `repoId`. */
 export function openOrchestrator(repoId: string): Promise<void> {
   return invoke("open_orchestrator", { repoId });
 }
 
 /**
  * Open (or resume) the per-repo orchestrator session bound to a frontend
- * terminal channel, so the desktop can render + drive it (TASK-126). Returns the
- * backend agent id for write/resize/stop. Distinct from `openOrchestrator`,
+ * terminal channel, so the desktop can render + drive it. Returns the backend
+ * agent id for write/resize/stop. Distinct from `openOrchestrator`,
  * which spawns the session sink-drained for the mobile/remote path.
  */
 export function openOrchestratorTerminal(
@@ -192,7 +277,7 @@ export function createTask(
   });
 }
 
-/** Preview of what creating a task at the derived worktree path would do (TASK-125). */
+/** Preview of what creating a task at the derived worktree path would do. */
 export interface WorktreePreview {
   /**
    * - "vacant"       — path free, create normally (no message).
@@ -207,7 +292,7 @@ export interface WorktreePreview {
 }
 
 /** Check whether the worktree path derived from these inputs already exists, so
- *  the New Task modal can warn before submit (TASK-125). */
+ *  the New Task modal can warn before submit. */
 export function checkWorktreePath(
   repoId: string,
   title: string,
@@ -240,6 +325,15 @@ export function setTaskAgent(taskId: string, agent: string | null): Promise<void
 
 export function setRepoDefaultModel(repoId: string, model: string | null): Promise<void> {
   return invoke("set_repo_default_model", { repoId, model });
+}
+
+/**
+ * Persist (or clear) a repo's auto-routing policy. `policy` is the raw JSON
+ * string, or null to clear. The backend rejects invalid JSON with an Err so
+ * the caller can surface it.
+ */
+export function setRepoRoutingPolicy(repoId: string, policy: string | null): Promise<void> {
+  return invoke("set_repo_routing_policy", { repoId, policy });
 }
 
 export function listAgentModels(agentName: string): Promise<string[]> {
@@ -294,6 +388,57 @@ export function stopSession(sessionId: string): Promise<void> {
   return invoke("stop_session", { sessionId });
 }
 
+// ── ACP (Agent Client Protocol) backend engine commands ──────────────────────
+// Counterparts of the PTY commands above, for tasks whose resolved agent spec
+// has `execution: "acp"` (`claude-acp`/`mistral-acp`). The frontend chooses
+// `startAcpAgent` vs `startAgent` by `spec.execution` — no other UI change.
+
+/**
+ * Start an ACP agent session for `taskId`, streaming structured `AcpEvent`s
+ * over `onEvent`. Returns the new session's
+ * agent id, used to address it in `acpPrompt`/`acpCancel`/
+ * `acpRespondPermission`/`acpSetMode`/`stopSession`. Errors if the task's
+ * resolved agent is a PTY engine — use `startAgent` for those instead.
+ *
+ * `resume` is accepted for IPC-contract symmetry with `startAgent` but is
+ * **ignored in v1**: every call starts a fresh session (`session/new`).
+ */
+export function startAcpAgent(
+  taskId: string,
+  resume: boolean,
+  onEvent: Channel<AcpEvent>,
+  initialPrompt?: string,
+): Promise<string> {
+  return invoke("start_acp_agent", { taskId, resume, initialPrompt: initialPrompt ?? null, onEvent });
+}
+
+/** Send a new user prompt on a running ACP session. */
+export function acpPrompt(sessionId: string, text: string): Promise<void> {
+  return invoke("acp_prompt", { sessionId, text });
+}
+
+/** Cancel the in-flight turn on a running ACP session. */
+export function acpCancel(sessionId: string): Promise<void> {
+  return invoke("acp_cancel", { sessionId });
+}
+
+/**
+ * Answer a pending `permissionRequest` event: `optionId` selects that option,
+ * omitted cancels the request.
+ */
+export function acpRespondPermission(
+  sessionId: string,
+  requestId: string,
+  optionId?: string,
+): Promise<void> {
+  return invoke("acp_respond_permission", { sessionId, requestId, optionId: optionId ?? null });
+}
+
+/** Switch a running ACP session's active mode. */
+export function acpSetMode(sessionId: string, modeId: string): Promise<void> {
+  return invoke("acp_set_mode", { sessionId, modeId });
+}
+
 export function onAgentStatus(
   cb: (e: { agentId: string; status: AgentActivity }) => void,
 ): Promise<UnlistenFn> {
@@ -312,6 +457,18 @@ export interface AgentConsole {
 
 export function onAgentConsole(cb: (e: AgentConsole) => void): Promise<UnlistenFn> {
   return listen<AgentConsole>("agent_console", (event) => cb(event.payload));
+}
+
+export interface AgentError {
+  agentId: string;
+  taskId: string;
+  /** The error reason; absent/null means "clear the stored error for this task". */
+  message?: string | null;
+}
+
+/** Subscribe to per-task agent error updates (StopFailure reason, or clear). */
+export function onAgentError(cb: (e: AgentError) => void): Promise<UnlistenFn> {
+  return listen<AgentError>("agent_error", (event) => cb(event.payload));
 }
 
 export function onTaskRenamed(
@@ -357,18 +514,20 @@ export function onTaskLaunched(
   cb: (e: {
     taskId: string;
     initialPrompt?: string | null;
-    // TASK-181: scheduler sets this to skip prepending the repo prompt at fire time.
+    // The scheduler sets this to skip prepending the repo prompt at fire time.
     skipRepoPrompt?: boolean;
+    // Remote can ask the desktop-owned terminal path to resume an existing task.
+    resume?: boolean;
   }) => void,
 ): Promise<UnlistenFn> {
-  return listen<{ taskId: string; initialPrompt?: string | null; skipRepoPrompt?: boolean }>(
+  return listen<{ taskId: string; initialPrompt?: string | null; skipRepoPrompt?: boolean; resume?: boolean }>(
     "task_launched",
     (event) => cb(event.payload),
   );
 }
 
-// TASK-204: the user picked a task from the system-tray menu. Rust has already
-// brought the window to the front; the payload names which task to select.
+// The user picked a task from the system-tray menu. Rust has already brought
+// the window to the front; the payload names which task to select.
 export function onTraySelectTask(
   cb: (e: { taskId: string }) => void,
 ): Promise<UnlistenFn> {
@@ -584,7 +743,7 @@ export function readTaskDoc(taskId: string, id: string): Promise<string> {
   return invoke("read_task_doc", { taskId, id });
 }
 
-// ── Schedule API wrappers (TASK-173) ──────────────────────────────────────────
+// ── Schedule API wrappers ────────────────────────────────────────────────────
 
 export interface Schedule {
   id: string;
@@ -597,7 +756,7 @@ export interface Schedule {
   baseBranch: string | null;
   enabled: boolean;
   oneShot: boolean;
-  /// TASK-181: skip prepending the repo's initial prompt when this schedule fires.
+  /// Skip prepending the repo's initial prompt when this schedule fires.
   skipRepoPrompt: boolean;
   nextRunAt: number | null;
   lastRunAt: number | null;
@@ -679,4 +838,41 @@ export function deleteSchedule(id: string): Promise<void> {
 
 export function previewNextRun(cron: string): Promise<number> {
   return invoke("preview_next_run", { cron });
+}
+
+// ── ACP per-model usage / cost / rate-limit summary ─────────────────────────
+
+/** Per-(provider, model) spend rollup over the window. `cost` is the summed
+ *  cumulative session cost; `contextPeak`/`contextSize` are a context-window
+ *  gauge (not cumulative tokens); `rateStatus` is the latest best-effort quota
+ *  status seen. */
+export interface ModelUsage {
+  provider: string;
+  model: string | null;
+  cost: number;
+  currency: string | null;
+  contextPeak: number;
+  contextSize: number;
+  sessions: number;
+  rateStatus: string | null;
+}
+
+export interface TaskUsage {
+  taskId: string;
+  cost: number;
+  currency: string | null;
+}
+
+export interface AcpUsageSummary {
+  totalCost: number;
+  currency: string | null;
+  sessions: number;
+  byModel: ModelUsage[];
+  byTask: TaskUsage[];
+}
+
+/** Per-model usage/cost/rate-limit summary over the last `windowDays` (default
+ *  7 on the backend). */
+export function getAcpUsageSummary(windowDays?: number): Promise<AcpUsageSummary> {
+  return invoke("get_acp_usage_summary", { windowDays });
 }

@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { finishTask, getPrStatus, openUrl, setTaskAgent, setTaskAutoApprove, setTaskModel, stopSession } from "../../api";
-import type { PrStatus } from "../../api";
+import { openUrl, setTaskAgent, setTaskAutoApprove, setTaskModel, stopSession } from "../../api";
+import { FinishTaskModal } from "./FinishTaskModal";
 import { taskName } from "../../lib/taskName";
 import { useVigieStore, AGENT_TAB, orchestratorSurfaceId } from "../../store";
 import type { TaskStatus, TerminalSession } from "../../store";
 import { useAgents } from "../../hooks/useAgents";
+import { AcpSurface } from "../Acp/AcpSurface";
 import { AgentModelPicker } from "../Agent/AgentModelPicker";
 import { ReviewPanel } from "../Review/ReviewPanel";
 import { SetupPanel } from "./SetupPanel";
 import { StatusBanner } from "../StatusBanner/StatusBanner";
+import { TaskErrorBanner } from "./TaskErrorBanner";
 import { TerminalHost } from "../Terminal/TerminalHost";
 import { TerminalPaneMetricsContext, useProvidePaneMetrics } from "../Terminal/TerminalPaneMetrics";
 import { RunStatePill } from "../Terminal/RunStatePill";
@@ -48,7 +50,6 @@ export function TaskDetail() {
   const tasks = useVigieStore((state) => state.tasks);
   const repos = useVigieStore((state) => state.repos);
   const refresh = useVigieStore((state) => state.refresh);
-  const setSelectedTask = useVigieStore((state) => state.setSelectedTask);
   const sessionsByTask = useVigieStore((state) => state.sessionsByTask);
   const activeTabByTask = useVigieStore((state) => state.activeTabByTask);
   const startAgentSession = useVigieStore((state) => state.startAgentSession);
@@ -56,11 +57,11 @@ export function TaskDetail() {
   const addShellSession = useVigieStore((state) => state.addShellSession);
   const removeShellSession = useVigieStore((state) => state.removeShellSession);
   const setActiveTab = useVigieStore((state) => state.setActiveTab);
-  const clearTaskSessions = useVigieStore((state) => state.clearTaskSessions);
   const openSettings = useVigieStore((s) => s.openSettings);
   const selectedOrchestratorRepoId = useVigieStore((state) => state.selectedOrchestratorRepoId);
   const startOrchestratorSession = useVigieStore((state) => state.startOrchestratorSession);
   const removeOrchestratorSession = useVigieStore((state) => state.removeOrchestratorSession);
+  const setTaskError = useVigieStore((state) => state.setTaskError);
 
   const [showDiff, setShowDiff] = useState(true);
   // When true the Spec/Docs dock fills the whole review/side area and the
@@ -76,9 +77,7 @@ export function TaskDetail() {
   const [diffHeight, setDiffHeight] = useState<number>(
     () => Number(localStorage.getItem("vigie.diffHeight")) || 240
   );
-  const [showFinishConfirm, setShowFinishConfirm] = useState(false);
-  const [finishError, setFinishError] = useState<string | null>(null);
-  const [pr, setPr] = useState<PrStatus | null>(null);
+  const [showFinishModal, setShowFinishModal] = useState(false);
 
   // Agent picker state: available agents come from the shared useAgents() hook
   // (also consumed by AgentModelPicker, so a single list_agents IPC per mount).
@@ -92,7 +91,7 @@ export function TaskDetail() {
   const terminalPaneRef = useRef<HTMLDivElement>(null);
   const isDropActive = useTerminalFileDrop(terminalPaneRef);
   // The invariant `.terminal-pane__body` (terminalPaneRef, never display:none)
-  // is the single source of truth for every terminal's pixel size (TASK-227).
+  // is the single source of truth for every terminal's pixel size.
   // One ResizeObserver here feeds all surfaces via context.
   const paneMetrics = useProvidePaneMetrics(terminalPaneRef);
 
@@ -113,20 +112,6 @@ export function TaskDetail() {
     setAgentOverride(null);
     setModelOverride(undefined);
   }, [selectedTaskId]);
-
-  useEffect(() => {
-    if (!showFinishConfirm || !selectedTaskId) {
-      setPr(null);
-      return;
-    }
-    let cancelled = false;
-    getPrStatus(selectedTaskId).then((result) => {
-      if (!cancelled) setPr(result);
-    }).catch(() => {
-      if (!cancelled) setPr(null);
-    });
-    return () => { cancelled = true; };
-  }, [showFinishConfirm, selectedTaskId]);
 
   const task = tasks.find((t) => t.id === selectedTaskId);
   // A queued task (status "pending") has no worktree and no agent yet — it's
@@ -149,7 +134,19 @@ export function TaskDetail() {
       )
     : undefined;
   const handleStopOrchestrator = async () => {
-    if (orchestratorSession?.backendId) await stopSession(orchestratorSession.backendId).catch(() => {});
+    if (orchestratorSession?.backendId) {
+      try {
+        await stopSession(orchestratorSession.backendId);
+      } catch (err) {
+        if (selectedOrchestratorRepoId) {
+          setTaskError(
+            orchestratorSurfaceId(selectedOrchestratorRepoId),
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+        return;
+      }
+    }
     if (selectedOrchestratorRepoId) removeOrchestratorSession(selectedOrchestratorRepoId);
   };
 
@@ -158,6 +155,14 @@ export function TaskDetail() {
   const selectedAgentName = agentOverride ?? task?.agent ?? repoForTask?.defaultAgent ?? "claude";
   const selectedAgent = agents.find((a) => a.name === selectedAgentName);
   const selectedModel = modelOverride !== undefined ? modelOverride : (task?.model ?? null);
+  // Whether the Resume affordance is available. PTY engines resume
+  // via `resumeArgs`; ACP engines have none — they reconnect via the stored
+  // `acpSessionId` (session/load|resume), so gate on that instead.
+  const canResumeAgent =
+    !!selectedAgent &&
+    (selectedAgent.execution === "acp"
+      ? !!task?.acpSessionId
+      : selectedAgent.resumeArgs.length > 0);
 
   // Tab strip session data (derived per task)
   const sessions = task ? (sessionsByTask[task.id] ?? []) : [];
@@ -169,7 +174,14 @@ export function TaskDetail() {
     "terminal-tab__dot" + (s && s.status !== "exited" ? " terminal-tab__dot--live" : "");
 
   const handleCloseShell = async (s: TerminalSession) => {
-    if (s.backendId) await stopSession(s.backendId).catch(() => {});
+    if (s.backendId) {
+      try {
+        await stopSession(s.backendId);
+      } catch (err) {
+        if (task) setTaskError(task.id, err instanceof Error ? err.message : String(err));
+        return;
+      }
+    }
     if (task) removeShellSession(task.id, s.localId);
   };
 
@@ -183,27 +195,15 @@ export function TaskDetail() {
 
   const handleStop = async () => {
     if (agentInfo?.backendId) {
-      await stopSession(agentInfo.backendId);
+      try {
+        await stopSession(agentInfo.backendId);
+      } catch (err) {
+        if (task) setTaskError(task.id, err instanceof Error ? err.message : String(err));
+        return;
+      }
     }
+    // removeAgentSession already drops any stale errorByTask entry for this task.
     if (task) removeAgentSession(task.id);
-  };
-
-  const handleFinish = async (mode: "keep" | "discard" | "merge") => {
-    if (!task) return;
-    setFinishError(null);
-    try {
-      const sessions = sessionsByTask[task.id] ?? [];
-      await Promise.all(
-        sessions.filter((s) => s.backendId).map((s) => stopSession(s.backendId!).catch(() => {})),
-      );
-      clearTaskSessions(task.id);
-      await finishTask(task.id, mode);
-      setShowFinishConfirm(false);
-      setSelectedTask(null);
-      await refresh();
-    } catch (err) {
-      setFinishError(err instanceof Error ? err.message : String(err));
-    }
   };
 
   const handleDividerMouseDown = () => {
@@ -265,55 +265,26 @@ export function TaskDetail() {
               >
                 {STATUS_LABEL[displayStatus]}
               </span>
+              {task.routingReason && (
+                <span
+                  className="task-detail__routing"
+                  title={task.routingReason}
+                  data-testid="routing-reason"
+                >
+                  ⤳ {task.routingReason}
+                </span>
+              )}
             </div>
 
             {!isPending && (
               <div className="task-detail__actions" data-testid="task-actions">
-                {showFinishConfirm ? (
-                  <div className="task-detail__finish-confirm">
-                    {pr?.state === "OPEN" && (
-                      <button
-                        type="button"
-                        className="btn"
-                        onClick={() => handleFinish("merge")}
-                      >
-                        Merge PR &amp; finish
-                      </button>
-                    )}
-                    <button type="button" className="btn" onClick={() => handleFinish("keep")}>
-                      Keep branch
-                    </button>
-                    {/* In-place tasks work in the repo's own checkout — teardown never
-                        removes the branch, so "Discard branch" would be a no-op. TASK-163. */}
-                    {!task.inPlace && (
-                      <button
-                        type="button"
-                        className="btn btn--danger"
-                        onClick={() => handleFinish("discard")}
-                      >
-                        Discard branch
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      className="btn btn--ghost"
-                      onClick={() => {
-                        setShowFinishConfirm(false);
-                        setFinishError(null);
-                      }}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                ) : (
-                  <button
-                    type="button"
-                    className="btn"
-                    onClick={() => setShowFinishConfirm(true)}
-                  >
-                    Finish task
-                  </button>
-                )}
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => setShowFinishModal(true)}
+                >
+                  Finish task
+                </button>
 
                 <button
                   type="button"
@@ -334,13 +305,11 @@ export function TaskDetail() {
             {task.worktreePath}
           </div>
 
-          {task && <SetupPanel taskId={task.id} />}
+          {/* Error banner: a KEEP-ALIVE-safe sibling INSIDE the header (never
+              wrapping/preceding the body div), so a failed turn is explicable. */}
+          <TaskErrorBanner taskId={task.id} />
 
-          {finishError && (
-            <p className="task-detail__finish-error" role="alert">
-              {finishError}
-            </p>
-          )}
+          {task && <SetupPanel taskId={task.id} />}
         </header>
       ) : orchestratorRepo ? (
         <header className="task-detail__header task-detail__header--orchestrator">
@@ -359,6 +328,10 @@ export function TaskDetail() {
             Worktree-less chat to orchestrate <strong>{orchestratorRepo.name}</strong> — create/queue
             tasks and read status without touching an active task agent's context.
           </p>
+
+          {/* Same KEEP-ALIVE-safe banner as the task header, keyed by the
+              orchestrator's synthetic surface id (see orchestratorSurfaceId). */}
+          <TaskErrorBanner taskId={orchestratorSurfaceId(orchestratorRepo.id)} />
         </header>
       ) : (
         <div className="task-detail__empty">
@@ -441,6 +414,7 @@ export function TaskDetail() {
           )}
           <div
             ref={terminalPaneRef}
+            data-tour="terminal"
             className={"terminal-pane__body" + (isDropActive ? " terminal-pane__body--drop-active" : "")}
           >
             {task && activeTab === AGENT_TAB && !isAgentActive && (
@@ -504,6 +478,7 @@ export function TaskDetail() {
                     <button
                       type="button"
                       className="btn btn--primary"
+                      data-tour="start-agent"
                       onClick={() =>
                         startAgentSession(task.id, false, selectedAgent
                           ? { label: selectedAgent.displayName, lifecycle: selectedAgent.status === "lifecycle" }
@@ -515,7 +490,7 @@ export function TaskDetail() {
                     <button
                       type="button"
                       className="btn btn--ghost"
-                      disabled={!selectedAgent || selectedAgent.resumeArgs.length === 0}
+                      disabled={!canResumeAgent}
                       onClick={() =>
                         startAgentSession(task.id, true, selectedAgent
                           ? { label: selectedAgent.displayName, lifecycle: selectedAgent.status === "lifecycle" }
@@ -530,6 +505,12 @@ export function TaskDetail() {
             )}
             {task && activeTab === AGENT_TAB && isAgentActive && agentInfo && (
               <RunStatePill status={agentInfo.status} activity={agentInfo.activity} lifecycle={agentInfo.lifecycle} onStop={handleStop} />
+            )}
+            {/* The ACP bubbles surface: a SIBLING of <TerminalHost/>,
+                swapped around it like the placeholder/pill — never wrapping it.
+                Safe to mount/unmount: the live ACP Channel is store-owned. */}
+            {task && activeTab === AGENT_TAB && isAgentActive && agentInfo?.engine === "acp" && (
+              <AcpSurface taskId={task.id} />
             )}
             {orchestratorRepo && !orchestratorSession && (
               <div className="terminal-pane__placeholder">
@@ -587,6 +568,13 @@ export function TaskDetail() {
           </button>
         ) : null}
       </div>
+
+      {/* Finish modal — a fixed-overlay sibling of the body, NEVER wrapping
+          <TerminalHost/> (KEEP-ALIVE). Its teardown goes through the store
+          finishTask action, which stops sessions before clearing selection. */}
+      {task && showFinishModal && (
+        <FinishTaskModal task={task} onClose={() => setShowFinishModal(false)} />
+      )}
     </main>
   );
 }

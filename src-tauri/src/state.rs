@@ -27,13 +27,12 @@ pub struct AgentLaunchContext {
     pub repo_id: String,
 }
 
-/// An issued MCP bearer token's scope tier (TASK-111). `Agent` is the per-agent,
-/// repo-scoped token minted at agent spawn (TASK-89). `Concierge` is the
-/// broad-scope, cross-repo *read* token for the mobile concierge — minted by
-/// TASK-112; this ticket only defines and enforces the tier.
+/// An issued MCP bearer token's scope tier. `Agent` is the per-agent,
+/// repo-scoped token minted at agent spawn. `Concierge` is the
+/// broad-scope, cross-repo *read* token for the mobile concierge.
 pub enum McpToken {
     Agent(AgentLaunchContext),
-    /// Per-repo orchestrator (TASK-180): broad MCP powers scoped to one repo.
+    /// Per-repo orchestrator: broad MCP powers scoped to one repo.
     Orchestrator { repo_id: String },
     Concierge,
 }
@@ -43,9 +42,12 @@ pub struct AppState {
     pub worktrees_root: PathBuf,
     /// Directory holding imported custom notification sound files.
     pub sounds_root: PathBuf,
-    /// Neutral working directory for the rootless concierge session (TASK-112).
+    /// Neutral working directory for the rootless concierge session.
     /// A stable dir so `claude --continue`'s cwd-scoped history persists.
     pub concierge_root: PathBuf,
+    /// Directory for the ACP backend's raw JSONL event log (`acp::log`) —
+    /// one `{agent_id}.jsonl` file per ACP session.
+    pub acp_logs_root: PathBuf,
     pub sessions: Mutex<HashMap<String, SessionHandle>>,
     /// Port of the local HookBridge HTTP server (bound at startup, ephemeral).
     pub hook_port: u16,
@@ -63,22 +65,27 @@ pub struct AppState {
     /// tier) → its scope. Agent tokens are inserted at agent spawn and removed
     /// at stop; the token is the auth + context carrier.
     pub mcp_tokens: Mutex<HashMap<String, McpToken>>,
-    /// Tailnet remote-control server state (TASK-86). `None` active ⇒ off.
+    /// Tailnet remote-control server state. `None` active ⇒ off.
     pub remote: crate::remote::RemoteSlot,
-    /// task_id → filesystem path of that task's Claude transcript (TASK-108),
+    /// task_id → filesystem path of that task's Claude transcript,
     /// captured from hook payloads. Keyed by task so the latest hook reflects the
     /// current file (resume overwrites); retained after the agent stops so the
     /// conversation stays readable post-stop.
     pub transcripts: Mutex<HashMap<String, String>>,
-    /// task_id → the questions an agent is currently blocked on (TASK-122),
+    /// task_id → the questions an agent is currently blocked on,
     /// captured from the `AskUserQuestion` `PreToolUse` hook. Present ⇒ the
     /// mobile card shows; cleared when answered or the agent moves on.
     pub pending_questions: Mutex<HashMap<String, crate::session::question::PendingQuestion>>,
-    /// Serializes the concierge create path (TASK-112) so concurrent
+    /// task_id → the last error text for a task whose agent turn ended in
+    /// `StopFailure`, derived out-of-band from the hook payload. Present ⇒ the
+    /// TaskDetail error banner shows; cleared when the agent moves back to
+    /// Working/Idle (mirrors `pending_questions`).
+    pub task_errors: Mutex<HashMap<String, String>>,
+    /// Serializes the concierge create path so concurrent
     /// `POST /api/concierge` calls cannot both pass the liveness check and
     /// stack processes. Synchronous critical section — never held across `.await`.
     pub concierge_spawn: std::sync::Mutex<()>,
-    /// TASK-144: last time we fetched `origin/<base>` for a task's Diff tab,
+    /// Last time we fetched `origin/<base>` for a task's Diff tab,
     /// keyed by `"<repo_id>:<base_branch>"`. Throttles the background base fetch
     /// so frequent re-renders don't spawn a fetch each time. Never held across `.await`.
     pub base_fetch_at: Mutex<HashMap<String, std::time::Instant>>,

@@ -1,9 +1,8 @@
-//! Pure authorization core for the MCP surface (TASK-180). Every mutating MCP
+//! Pure authorization core for the MCP surface. Every mutating MCP
 //! tool routes through `decide()`; the choke-point resolves the target repo
 //! from storage and returns an `AuthorizedContext`, never raw token claims.
 //!
-//! NOTE: these value types are consumed by the policy fn + choke-point wiring
-//! landed in the following tasks (A2/A3); until then they are dead by design,
+//! NOTE: some of these value types aren't reachable from every build target,
 //! so the module carries a scoped `dead_code` allowance to stay warning-free
 //! under CI's `-D warnings`.
 #![allow(dead_code)]
@@ -101,11 +100,11 @@ pub fn decide(principal: &Principal, cap: Capability, target_repo: &str) -> Resu
 /// to its capability and how the dispatch layer must resolve the target repo.
 /// `list_repos` is intentionally absent — it is the only ungated tool. Any new
 /// act tool that fails to appear here is caught by the exhaustiveness test
-/// (`every_mutating_tool_is_registered`), preserving deny-by-default (TASK-180).
+/// (`every_mutating_tool_is_registered`), preserving deny-by-default.
 pub fn registry() -> &'static [(&'static str, Capability, ResolutionStrategy)] {
     &[
         ("start_task", Capability::StartTask, ResolutionStrategy::RepoArg),
-        // queue_dependency (TASK-164) is start_task with a required dependency
+        // queue_dependency is start_task with a required dependency
         // list — same capability + repo resolution, own-repo only.
         ("queue_dependency", Capability::StartTask, ResolutionStrategy::RepoArg),
         ("finish_task", Capability::FinishTask, ResolutionStrategy::FromTaskId),
@@ -203,8 +202,8 @@ mod tests {
     }
 
     /// Every mutating/read-gated MCP tool MUST appear in the registry. This
-    /// guards against a new act tool silently bypassing the boundary (TASK-180
-    /// deny-by-default). `list_repos` is the only ungated tool.
+    /// guards against a new act tool silently bypassing the deny-by-default
+    /// boundary. `list_repos` is the only ungated tool.
     #[test]
     fn every_mutating_tool_is_registered() {
         // The full advertised tool set (keep in sync with tools_list_result).

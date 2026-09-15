@@ -1,14 +1,14 @@
-//! Shared launch-task core (TASK-88). One place that turns a launch request into
-//! a worktree-backed task, so every entry point (the `create_task` Tauri command
-//! today; a future MCP server (TASK-89) and REST endpoint (TASK-70)) shares exactly
-//! one launch path.
+//! Shared launch-task core. One place that turns a launch request into
+//! a worktree-backed task, so every entry point — the `create_task` Tauri
+//! command and the MCP server's `start_task` today, a REST endpoint later —
+//! shares exactly one launch path.
 //!
 //! Two layers:
 //!   * pure (`resolve_launch`, `LaunchDecision`): arg normalization + the
 //!     immediate-vs-pending decision — unit-tested here.
 //!   * async glue (`launch_task`): git/store side effects — verified via
-//!     the app, not unit-tested (Task 2). Setup is NOT run here: it's a
-//!     non-blocking background job the caller kicks off after launch (TASK-96).
+//!     the app, not unit-tested. Setup is NOT run here: it's a
+//!     non-blocking background job the caller kicks off after launch.
 //!
 //! Shape A: this core never spawns the agent/PTY. It returns the created task and
 //! the decision; the caller starts the agent (the frontend via `start_agent`).
@@ -35,12 +35,12 @@ pub struct LaunchArgs {
     pub after_merge_of: Vec<String>,
     /// Seed prompt for a queued task; stored as `pending_prompt` and emitted at
     /// promote-time. Ignored for immediate launches (the caller emits the
-    /// prompt via the task_launched event). TASK-90.
+    /// prompt via the task_launched event).
     pub prompt: Option<String>,
     pub auto_approve: Option<bool>,
-    /// TASK-163: run in the repo's existing checkout (no worktree).
+    /// Run in the repo's existing checkout (no worktree).
     pub in_place: bool,
-    /// TASK-163: optional new branch to `checkout -b` in the checkout. `None`/empty
+    /// Optional new branch to `checkout -b` in the checkout. `None`/empty
     /// ⇒ adopt the checkout's current branch. Ignored when `in_place` is false.
     pub branch_name: Option<String>,
 }
@@ -87,12 +87,11 @@ pub struct ResolvedLaunch {
     pub auto_approve: Option<bool>,
     pub decision: LaunchDecision,
     /// Normalized seed prompt for a queued (pending) launch. Not read by
-    /// `launch_task`'s `Immediate` path; consumed by the pending-insert path
-    /// (TASK-90).
+    /// `launch_task`'s `Immediate` path; consumed by the pending-insert path.
     pub pending_prompt: Option<String>,
-    /// TASK-163: whether this launch targets the repo's checkout in place.
+    /// Whether this launch targets the repo's checkout in place.
     pub in_place: bool,
-    /// TASK-163: the trimmed new-branch name, or `None` to adopt the current
+    /// The trimmed new-branch name, or `None` to adopt the current
     /// branch.
     pub branch_name: Option<String>,
 }
@@ -140,7 +139,7 @@ pub fn resolve_launch(
         .map(|b| b.trim().to_string())
         .filter(|b| !b.is_empty());
 
-    // TASK-163: an in-place task lives in the repo's own checkout — no worktree
+    // An in-place task lives in the repo's own checkout — no worktree
     // path is derived, and its branch is either the requested new branch
     // (created at launch) or empty, signalling launch_task to adopt the
     // checkout's current branch (that read needs git I/O, so it can't happen
@@ -174,7 +173,7 @@ pub fn resolve_launch(
 /// The subset of `blockers` that currently exists (per `exists`), order
 /// preserved. An empty result means every requested blocker is dangling
 /// (missing / already-merged-and-deleted) — nothing would ever promote the
-/// task, so the caller launches immediately instead of queuing (TASK-177).
+/// task, so the caller launches immediately instead of queuing.
 pub fn live_blockers<'a>(blockers: &'a [String], exists: impl Fn(&str) -> bool) -> Vec<&'a str> {
     blockers
         .iter()
@@ -184,7 +183,7 @@ pub fn live_blockers<'a>(blockers: &'a [String], exists: impl Fn(&str) -> bool) 
 }
 
 /// True when `tasks` already contains a live (non-Done) in-place task. A repo's
-/// single checkout can host only one in-place agent at a time (TASK-163), so
+/// single checkout can host only one in-place agent at a time, so
 /// `launch_task` rejects a second one.
 pub fn has_active_in_place(tasks: &[Task]) -> bool {
     tasks.iter().any(|t| t.in_place && t.status != TaskStatus::Done)
@@ -200,8 +199,8 @@ fn now_secs() -> i64 {
 /// The result of a launch: the created task and the decision that produced it.
 pub struct LaunchOutcome {
     pub task: Task,
-    /// The decision that produced this launch. Not read by `create_task` today
-    /// but will be consumed by the MCP (TASK-89) and REST (TASK-70) callers.
+    /// The decision that produced this launch. Currently unread — retained for
+    /// callers that surface the immediate-vs-pending decision.
     #[allow(dead_code)]
     pub decision: LaunchDecision,
 }
@@ -209,7 +208,7 @@ pub struct LaunchOutcome {
 /// Create `worktree_path` for `branch`, based on the up-to-date remote base when
 /// the effective fetch-remote-base setting is on and the repo has a remote
 /// (falling back to the local base so creation never blocks on the network).
-/// Shared by the immediate launch and the TASK-90 start-on-merge promote path.
+/// Shared by the immediate launch and the start-on-merge promote path.
 pub(crate) async fn prepare_worktree(
     state: &AppState,
     repo: &Repo,
@@ -247,7 +246,7 @@ pub(crate) async fn prepare_worktree(
 /// a `task_dependencies` edge instead, and returns early. Returns the created
 /// task plus its decision.
 ///
-/// Setup is intentionally NOT run here: TASK-96 made it a non-blocking background
+/// Setup is intentionally NOT run here: it's a non-blocking background
 /// job the caller kicks off after the task exists (the task is inserted first so
 /// it's immediately navigable). This keeps the core UI-agnostic.
 ///
@@ -273,7 +272,7 @@ pub async fn launch_task(
     // 2. Pure resolution (normalization, identity, branch/base/path, decision).
     let resolved = resolve_launch(args, &repo, &state.worktrees_root)?;
 
-    // TASK-163: in-place task — run in the repo's own checkout, no worktree.
+    // In-place task — run in the repo's own checkout, no worktree.
     // Immediate-only for v1 (ignores after_merge_of queuing).
     if resolved.in_place {
         // Guard: a single checkout can host only one live in-place task.
@@ -325,6 +324,8 @@ pub async fn launch_task(
             pending_prompt: None,
             auto_approve: resolved.auto_approve,
             in_place: true,
+            routing_reason: None,
+            acp_session_id: None,
         };
         let insert_result = {
             let store = state.store.lock().map_err(|e| e.to_string())?;
@@ -334,7 +335,7 @@ pub async fn launch_task(
         return Ok(LaunchOutcome { task, decision: resolved.decision });
     }
 
-    // 3. Pending launch (TASK-90/TASK-177): queue the task behind one or more
+    // 3. Pending launch: queue the task behind one or more
     //    other tasks' merges. Only the LIVE blockers get an edge; if every
     //    requested blocker is dangling, nothing would ever promote us, so we
     //    fall through to the immediate path below.
@@ -360,6 +361,8 @@ pub async fn launch_task(
             pending_prompt: resolved.pending_prompt.clone(),
             auto_approve: resolved.auto_approve,
             in_place: false,
+            routing_reason: None,
+            acp_session_id: None,
         };
         // Defensive: a fresh uuid can never equal an existing id, so a
         // self-cycle is unreachable — assert it anyway.
@@ -368,7 +371,7 @@ pub async fn launch_task(
         // self-atomic: a Pending row and all its dependency edges appear
         // together or not at all (the rollback below deletes the row on any
         // edge failure), and we only queue behind blockers that still exist at
-        // lock time. (No `.await` inside the guard.) TASK-182: the queue-vs-finish
+        // lock time. (No `.await` inside the guard.) The queue-vs-finish
         // window is closed — both finish surfaces delete the blocker's row BEFORE
         // promoting, and `promote_dependents_of` captures its promotion set
         // atomically with removing the edges (`take_dependents_on`). So an edge we
@@ -402,7 +405,7 @@ pub async fn launch_task(
 
     let repo_path = Path::new(&repo.path);
 
-    // 4. Adopt-or-create (TASK-125). If the target worktree path is already a
+    // 4. Adopt-or-create. If the target worktree path is already a
     //    registered worktree on the intended branch, reuse it instead of failing
     //    on `git worktree add`. If it's occupied by something that doesn't match
     //    (bare dir, different branch, already owned by another task), return a
@@ -433,7 +436,7 @@ pub async fn launch_task(
         git::WorktreeAdoption::Vacant | git::WorktreeAdoption::Reclaim { .. } => {
             if needs_reclaim {
                 // Removes the orphaned directory + prunes any stale admin entry
-                // (TASK-118 teardown handles the deregistered case). `{:#}` keeps
+                // (teardown handles the deregistered case). `{:#}` keeps
                 // git's stderr on the error path.
                 git::remove_worktree(repo_path, &resolved.worktree_path, true)
                     .await
@@ -441,7 +444,7 @@ pub async fn launch_task(
             }
 
             // Create the worktree via the shared helper (fetch-remote-base decision
-            // + create_worktree), also used by the TASK-90 promote path. The stored
+            // + create_worktree), also used by the promote path. The stored
             // `base_branch` stays the logical local base; only the start ref changes.
             prepare_worktree(
                 state,
@@ -456,7 +459,7 @@ pub async fn launch_task(
     };
 
     // 5. Build and insert the task row. (Setup runs as a background job the
-    //    caller starts after this returns — see TASK-96.) This runs for both a
+    //    caller starts after this returns.) This runs for both a
     //    genuine `Immediate` decision and a dangling `Pending` fall-through.
     let now = now_secs();
     let worktree_path = resolved
@@ -484,6 +487,8 @@ pub async fn launch_task(
         pending_prompt: None,
         auto_approve: resolved.auto_approve,
         in_place: false,
+        routing_reason: None,
+        acp_session_id: None,
     };
 
     let insert_result = {
@@ -525,6 +530,7 @@ mod tests {
             fetch_remote_base: None,
             auto_approve: None,
             in_place_default: false,
+            routing_policy: None,
         }
     }
 
@@ -561,6 +567,7 @@ mod tests {
             fetch_remote_base: None,
             auto_approve: None,
             in_place_default: false,
+            routing_policy: None,
         }
     }
 
@@ -620,6 +627,8 @@ mod tests {
             pr_number: None, pr_url: None, ticket_key: None, agent: None, model: None,
             setup_status: None, hidden: false, pending_prompt: None, auto_approve: None,
             in_place,
+            routing_reason: None,
+            acp_session_id: None,
         };
         assert!(!has_active_in_place(&[mk(false, TaskStatus::Idle)]));
         assert!(!has_active_in_place(&[mk(true, TaskStatus::Done)]));

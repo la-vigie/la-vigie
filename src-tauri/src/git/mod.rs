@@ -122,12 +122,13 @@ pub async fn add_repo(path: &Path) -> anyhow::Result<Repo> {
         fetch_remote_base: None,
         auto_approve: None,
         in_place_default: false,
+        routing_policy: None,
     })
 }
 
 /// The branch currently checked out in `repo_path`, via
 /// `git -C <repo_path> rev-parse --abbrev-ref HEAD`. Returns the branch name
-/// (or `"HEAD"` when detached). Used by in-place tasks (TASK-163) that adopt the
+/// (or `"HEAD"` when detached). Used by in-place tasks that adopt the
 /// checkout's current branch rather than creating one.
 pub async fn current_branch(repo_path: &Path) -> anyhow::Result<String> {
     let path_str = repo_path
@@ -137,7 +138,7 @@ pub async fn current_branch(repo_path: &Path) -> anyhow::Result<String> {
 }
 
 /// Create and check out a new branch `branch` in the repo's existing checkout:
-/// `git -C <repo_path> checkout -b <branch>`. Used by in-place tasks (TASK-163);
+/// `git -C <repo_path> checkout -b <branch>`. Used by in-place tasks;
 /// unlike `create_worktree` this mutates the shared checkout's HEAD. Surfaces
 /// git's stderr on failure (e.g. the branch already exists).
 pub async fn create_branch_in_place(repo_path: &Path, branch: &str) -> anyhow::Result<()> {
@@ -163,7 +164,7 @@ pub async fn create_worktree(
         .to_str()
         .ok_or_else(|| anyhow!("worktree_path is not valid UTF-8: {:?}", worktree_path))?;
 
-    // Branch-safe (TASK-125): if the branch already exists (a leftover from a
+    // Branch-safe: if the branch already exists (a leftover from a
     // deleted task, or the branch of a worktree we're reclaiming), check it out
     // into the new worktree instead of `-b` (which would fail "already exists").
     // Reusing preserves the branch's commits; `base_branch` is only the start
@@ -207,7 +208,7 @@ fn looks_like_orphaned_worktree(path: &Path) -> bool {
     }
 }
 
-/// Classify a task's target worktree path (TASK-125): is it free to create, an
+/// Classify a task's target worktree path: is it free to create, an
 /// existing worktree we can adopt, or a conflict to warn about? Runs
 /// `git worktree list --porcelain`, canonicalizes both the target and each
 /// registered path (macOS `/var` vs `/private/var`), checks disk existence, and
@@ -258,7 +259,7 @@ pub async fn worktree_state(
 /// `git -C <repo_path> fetch <remote> <base>:refs/remotes/<remote>/<base>`.
 /// The explicit refspec forces the remote-tracking ref (`refs/remotes/<remote>/<base>`)
 /// to update. A plain `git fetch <remote> <base>` can leave that ref stale on
-/// clones without a configured fetch refspec for the branch (TASK-144). Returns
+/// clones without a configured fetch refspec for the branch. Returns
 /// the error (including git's stderr) on failure — callers decide whether to fall
 /// back to the local base.
 pub async fn fetch(repo_path: &Path, remote: &str, base: &str) -> anyhow::Result<()> {
@@ -716,7 +717,7 @@ mod tests {
         assert!(err.is_err(), "duplicate branch must surface an error");
     }
 
-    // ── worktree_state (TASK-125): async glue over the pure classifier ───────────
+    // ── worktree_state: async glue over the pure classifier ───────────
     // These exercise the real `git worktree list` + macOS /var→/private/var
     // canonicalization that the pure unit tests in `worktree_state` can't.
 
@@ -1474,7 +1475,7 @@ mod tests {
 
     #[tokio::test]
     async fn diff_and_ahead_exclude_merged_in_origin_commits() {
-        // Scenario (TASK-144): task branch forks from origin/main@C0, upstream advances
+        // Scenario: task branch forks from origin/main@C0, upstream advances
         // origin/main to C1, the branch does its own work (C2) then merges origin/main
         // (C1) in to resolve conflicts. Comparing against a stale base (C0) would show
         // the merged-in upstream file as "ours"; comparing against fresh origin/main
@@ -1532,7 +1533,7 @@ mod tests {
         assert!(!diff_fresh.contains("upstream.txt"), "fresh diff must not mention upstream.txt");
 
         // Contrast: the stale base (C0) wrongly includes the merged-in upstream file —
-        // this is exactly the bug TASK-144 fixes by resolving to origin/main.
+        // resolving to a fresh origin/main is what avoids this.
         let files_stale = changed_files(p, &c0).await.unwrap();
         let paths_stale: Vec<&str> = files_stale.iter().map(|f| f.path.as_str()).collect();
         assert!(paths_stale.contains(&"upstream.txt"), "stale base reproduces the bug (upstream shown as ours); got {paths_stale:?}");

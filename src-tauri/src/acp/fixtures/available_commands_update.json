@@ -1,0 +1,23 @@
+{
+  "sessionId": "ea603afd-d858-423b-ac83-8940cf0e279c",
+  "update": {
+    "sessionUpdate": "available_commands_update",
+    "availableCommands": [
+      {
+        "name": "example-command",
+        "description": "A slash command with no argument.",
+        "input": null
+      },
+      {
+        "name": "example-with-hint",
+        "description": "A slash command that takes a free-text argument.",
+        "input": { "hint": "<argument>" }
+      },
+      {
+        "name": "another-example",
+        "description": "A second no-argument command, so the list has more than one entry.",
+        "input": null
+      }
+    ]
+  }
+}

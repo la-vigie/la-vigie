@@ -1,0 +1,99 @@
+/* First-run product tour overlay. Portaled to document.body, so it must own its
+   own stacking context and sit above the app AND the modals (Settings /
+   RepoSettings backdrops). z-index is deliberately very high. */
+
+.tour {
+  position: fixed;
+  inset: 0;
+  z-index: 4000;
+  /* The layer itself is click-through; only the bubble captures pointer events,
+     so the tour stays "in place" — the user can still use the real UI. */
+  pointer-events: none;
+}
+
+/* Full-screen dim for anchorless (centered) steps. */
+.tour__backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+/* The spotlight cutout: a transparent box whose massive box-shadow paints the
+   dim everywhere EXCEPT the highlighted element. */
+.tour__spotlight {
+  position: fixed;
+  border-radius: var(--radius-sm, 6px);
+  box-shadow:
+    0 0 0 9999px rgba(0, 0, 0, 0.55),
+    0 0 0 2px var(--accent);
+  transition: top 0.15s ease, left 0.15s ease, width 0.15s ease, height 0.15s ease;
+}
+
+.tour__bubble {
+  position: fixed;
+  pointer-events: auto;
+  width: min(340px, calc(100vw - 24px));
+  box-sizing: border-box;
+  background: var(--bg-elevated);
+  color: var(--text);
+  border: 1px solid var(--border-strong, var(--border));
+  border-radius: var(--radius-lg, 12px);
+  box-shadow: var(--shadow-pop, 0 12px 32px rgba(0, 0, 0, 0.4));
+  padding: 16px;
+  transition: top 0.15s ease, left 0.15s ease;
+}
+
+.tour__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.tour__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.tour__skip {
+  flex: none;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm, 6px);
+}
+.tour__skip:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.tour__body {
+  margin: 0 0 14px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.tour__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tour__progress {
+  font-size: 12px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.tour__nav {
+  display: flex;
+  gap: 8px;
+}

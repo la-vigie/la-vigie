@@ -112,6 +112,7 @@ describe("useAgentStatus", () => {
         "task-1": [{ localId: AGENT_TAB, kind: "agent", status: "running", title: "Claude", backendId: "agent-1" }],
       },
       activeTabByTask: { "task-1": AGENT_TAB },
+      errorByTask: {},
     });
     listenHandlers.length = 0;
     listenMock.mockClear();
@@ -128,10 +129,12 @@ describe("useAgentStatus", () => {
     await act(async () => {});
 
     expect(listenMock).toHaveBeenCalledWith("agent_status", expect.any(Function));
-    expect(listenHandlers).toHaveLength(1);
+    // Also subscribes to agent_error to store per-task error text for the banner.
+    expect(listenMock).toHaveBeenCalledWith("agent_error", expect.any(Function));
+    expect(listenHandlers).toHaveLength(2);
 
     unmount();
-    // After unmount, handler removed
+    // After unmount, both handlers removed
     await act(async () => {});
     expect(listenHandlers).toHaveLength(0);
   });
@@ -293,6 +296,49 @@ describe("useAgentStatus", () => {
     });
   });
 
+  it("stores the agent_error reason and includes it in the failure notification", async () => {
+    seedStoreWithAgent({ agentId: "agent-1", repoSoundSettings: null });
+    renderHook(() => useAgentStatus());
+    await act(async () => {});
+
+    // The backend emits agent_error (taskId + message) before the matching
+    // agent_status error event. The mock fans one push to all handlers; the
+    // agent_error handler (subscribed first) runs first, storing the reason,
+    // so the agent_status handler can read it for the notification body.
+    await act(async () => {
+      pushAgentStatusEvent({
+        agentId: "agent-1",
+        status: "error",
+        taskId: "t1",
+        message: "Rate limited by the model API.",
+      } as unknown as { agentId: string; status: string });
+    });
+    await act(async () => {});
+
+    expect(useVigieStore.getState().errorByTask["t1"]).toBe("Rate limited by the model API.");
+    expect(sendNotificationMock).toHaveBeenCalledWith({
+      id: expect.any(Number),
+      title: "Test Task",
+      body: "Failed — Test Repo/test-task: Rate limited by the model API.",
+    });
+  });
+
+  it("clears the stored error when a later agent_error carries no message", async () => {
+    seedStoreWithAgent({ agentId: "agent-1", repoSoundSettings: null });
+    useVigieStore.setState({ errorByTask: { t1: "old error" } });
+    renderHook(() => useAgentStatus());
+    await act(async () => {});
+
+    await act(async () => {
+      pushAgentStatusEvent({ agentId: "agent-1", taskId: "t1" } as unknown as {
+        agentId: string;
+        status: string;
+      });
+    });
+
+    expect(useVigieStore.getState().errorByTask["t1"]).toBeUndefined();
+  });
+
   it("does not notify for 'working' status", async () => {
     seedStoreWithAgent({ agentId: "agent-1", repoSoundSettings: null });
     renderHook(() => useAgentStatus());
@@ -337,7 +383,7 @@ describe("useAgentStatus", () => {
     expect(playSoundSpy).toHaveBeenCalledWith("jobs-done", []);
   });
 
-  // ---- Automute (TASK-105) ----
+  // ---- Automute ----
 
   it("with automute on and in a meeting, suppresses the sound but still notifies", async () => {
     seedStoreWithAgent({ agentId: "agent-1", repoSoundSettings: null });
@@ -404,7 +450,7 @@ describe("useAgentStatus", () => {
     expect(sendNotificationMock).toHaveBeenCalled();
   });
 
-  // ---- Out-of-band refresh (TASK-120) ----
+  // ---- Out-of-band refresh ----
 
   it("on idle: refreshes the snapshot and bumps review + pr for the owning task", async () => {
     vi.useFakeTimers();

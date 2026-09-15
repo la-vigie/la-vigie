@@ -10,16 +10,20 @@
 //! commands below) because it needs a running Tauri app to construct a
 //! `Channel`.
 
+pub mod classifier;
 pub mod mcp_bundle;
 pub mod models;
+pub mod routing;
 pub mod skill_bundle;
 pub mod spec;
 pub mod status;
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use futures::channel::{mpsc, oneshot};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use tauri::ipc::Channel;
 use tauri::State;
@@ -58,15 +62,15 @@ fn apply_lavigie_env(cmd: &mut CommandBuilder) {
     // detection (e.g. Claude Code's `supports-hyperlinks` check). Our embedded
     // xterm.js genuinely supports OSC 8 (see TerminalView's linkHandler), but it
     // sets no recognized TERM_PROGRAM, so tools would otherwise fall back to
-    // plain text — leaving footer badges like the "PR #123" link unclickable
-    // (TASK-170). FORCE_HYPERLINK=1 is the documented opt-in override.
+    // plain text — leaving footer badges like the "PR #123" link unclickable.
+    // FORCE_HYPERLINK=1 is the documented opt-in override.
     cmd.env("FORCE_HYPERLINK", "1");
 }
 
 /// Spawn `program` with `args` in a new PTY, optionally with working
 /// directory `cwd`, sized `cols` x `rows`. `extra_env` sets additional
 /// environment variables on the child (on top of `LAVIGIE=1`) — used to hand
-/// an agent its HookBridge coordinates so a skill can call back (TASK-40).
+/// an agent its HookBridge coordinates so a skill can call back.
 pub fn spawn_pty(
     program: impl AsRef<std::ffi::OsStr>,
     args: &[String],
@@ -116,39 +120,71 @@ pub enum SessionKind {
     Task,
     /// A plain interactive shell.
     Shell,
-    /// The worktree-less mobile concierge (TASK-112).
+    /// The worktree-less mobile concierge.
     Concierge,
-    /// A worktree-less, repo-scoped orchestrator session (TASK-180). Like the
-    /// concierge but bound to one repo via its MCP token; the repo id lives on
+    /// A worktree-less, repo-scoped orchestrator session. Like the concierge
+    /// but bound to one repo via its MCP token; the repo id lives on
     /// `SessionHandle.repo_id`.
     Orchestrator,
 }
 
-/// A registered, running PTY session: everything needed to write input,
-/// resize, and stop it. The output-streaming thread holds its own clone of
-/// `child` (for wait/exit-code) and the `reader` taken from the `PtySession`
-/// at spawn time; neither is stored here.
+/// The transport-specific half of a registered session, split out of
+/// `SessionHandle` so the metadata fields (`kind`/`repo_id`/`last_activity`/…)
+/// stay backend-agnostic and the ~10 call sites that read only metadata need
+/// no `match`. Only the three functions that actually drive a session's
+/// transport — `write_to_session`, `resize_session`, `stop_session_inner` —
+/// match on this; exhaustiveness forces any new variant to be handled in
+/// exactly those three.
+pub enum SessionBackend {
+    /// A PTY-backed session.
+    Pty {
+        master: Box<dyn MasterPty + Send>,
+        writer: Box<dyn Write + Send>,
+        child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+    },
+    /// An ACP (Agent Client Protocol) session (`crate::acp`): the connection
+    /// driver runs as one spawned `Send` future
+    /// (`tauri::async_runtime::spawn`), not a PTY. This variant holds what the
+    /// three transport-driving functions below and the `acp_*` commands need.
+    Acp {
+        /// The spawned agent process. Killed via `start_kill()` (sync, no
+        /// `.await`) rather than PTY teardown.
+        child: Arc<Mutex<tokio::process::Child>>,
+        /// Send a `DriverCommand` into the driver's `select!` loop.
+        cmd_tx: mpsc::UnboundedSender<crate::acp::DriverCommand>,
+        /// Aborts the driver's spawned connection task on stop.
+        abort: tokio::task::AbortHandle,
+        /// requestId -> the oneshot that resolves a pending
+        /// `session/request_permission`; resolved by `acp_respond_permission`
+        /// (`Some(option_id)` selects an option, `None` cancels).
+        pending_permissions: Arc<Mutex<HashMap<String, oneshot::Sender<Option<String>>>>>,
+    },
+}
+
+/// A registered, running session: everything needed to write input, resize,
+/// and stop it, for either backend. For a PTY session, the output-streaming
+/// thread holds its own clone of `child` (for wait/exit-code) and the
+/// `reader` taken from the `PtySession` at spawn time; neither is stored here.
 pub struct SessionHandle {
-    pub master: Box<dyn MasterPty + Send>,
-    pub writer: Box<dyn Write + Send>,
-    pub child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+    /// The transport: PTY or ACP (see `SessionBackend`).
+    pub backend: SessionBackend,
     /// The agent's MCP bearer token, if any (None for shells / non-Claude
     /// agents). Removed from `AppState.mcp_tokens` when the session stops.
     pub mcp_token: Option<String>,
     /// What this session is (task agent / shell / concierge / orchestrator).
     pub kind: SessionKind,
-    /// The repo this rootless session is scoped to, when applicable. `Some` for
-    /// a per-repo `Orchestrator` (TASK-180); `None` for tasks, shells, and the
+    /// The repo this rootless session is scoped to, when applicable. `Some`
+    /// for a per-repo `Orchestrator`; `None` for tasks, shells, and the
     /// legacy global concierge.
     pub repo_id: Option<String>,
     /// Last client activity (poll/reply). Updated via `bump_activity`; read by
     /// the idle reaper and the desktop "Remote sessions" list.
     pub last_activity: std::time::Instant,
     /// True when a live frontend `Channel` is attached — a directly-attached
-    /// desktop terminal, exempt from the idle reaper (TASK-126). Task/Shell
-    /// sessions also pass a channel, but they're already exempt by `kind`; this
-    /// field only changes reaper behavior for rootless (`Concierge`/
-    /// `Orchestrator`) sessions.
+    /// desktop terminal, exempt from the idle reaper. Task/Shell sessions also
+    /// pass a channel, but they're already exempt by `kind`; this field only
+    /// changes reaper behavior for rootless (`Concierge`/`Orchestrator`)
+    /// sessions.
     pub has_frontend_channel: bool,
 }
 
@@ -199,9 +235,11 @@ pub(crate) fn register_streaming_session(
     });
     let has_frontend_channel = on_event.is_some();
     let handle = SessionHandle {
-        master: session.master,
-        writer: session.writer,
-        child: session.child,
+        backend: SessionBackend::Pty {
+            master: session.master,
+            writer: session.writer,
+            child: session.child,
+        },
         mcp_token,
         kind,
         repo_id,
@@ -253,6 +291,20 @@ pub fn build_hook_settings(port: u16, agent_id: &str) -> String {
     settings.to_string()
 }
 
+/// The loopback URL of La Vigie's in-process MCP server. Shared by the PTY
+/// path's `--mcp-config` (`build_mcp_config`) and the ACP path's
+/// `McpServer::Http` entry (`crate::acp::lavigie_mcp_server`) so the mount
+/// path can only ever change in one place.
+pub fn mcp_loopback_url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/mcp")
+}
+
+/// The `Authorization` header value carrying a per-agent MCP bearer token.
+/// Shared by the PTY and ACP MCP-injection paths (see `mcp_loopback_url`).
+pub fn mcp_bearer_value(token: &str) -> String {
+    format!("Bearer {token}")
+}
+
 /// Build the inline `--mcp-config` JSON registering La Vigie's loopback MCP
 /// server for a specific agent. The per-agent bearer token both authenticates
 /// the call and (server-side) resolves the originating task/repo context.
@@ -264,16 +316,16 @@ pub fn build_mcp_config(port: u16, token: &str) -> String {
         "mcpServers": {
             "lavigie": {
                 "type": "http",
-                "url": format!("http://127.0.0.1:{port}/mcp"),
-                "headers": { "Authorization": format!("Bearer {token}") }
+                "url": mcp_loopback_url(port),
+                "headers": { "Authorization": mcp_bearer_value(token) }
             }
         }
     })
     .to_string()
 }
 
-/// TASK-174: the optional `LAVIGIE_TASK_REF` env entry for a launched agent —
-/// the provider ticket ref (e.g. `TASK-174`, `#123`, `owner/repo#123`) passed
+/// The optional `LAVIGIE_TASK_REF` env entry for a launched agent — the
+/// provider ticket ref (e.g. `TASK-174`, `#123`, `owner/repo#123`) passed
 /// through verbatim so a `task-provider` adapter skill can route/act on it.
 /// `None` when the task has no ticket key (the adapter then degrades to reading
 /// the launch prompt). The ref is handed over rather than recovered from the
@@ -352,9 +404,21 @@ pub fn start_agent(
         .map_err(|e| e.to_string())?
         .insert(agent_id.clone(), task_id.clone());
 
-    use crate::agent::spec::{build_agent_command, resolve_for_task, StatusMechanism};
+    use crate::agent::spec::{build_agent_command, resolve_for_task, ExecutionMode, StatusMechanism};
 
     let spec = resolve_for_task(task_agent.as_deref(), repo_default.as_deref(), &custom_agents);
+    // Symmetric with `acp::start_acp_agent`'s reverse guard: an ACP-execution
+    // engine (`claude-acp`/`mistral-acp`) must NOT be launched down the PTY
+    // path — spawning its stdio JSON-RPC agent in a pseudo-terminal would just
+    // dump raw protocol frames into the terminal. The frontend routes by
+    // `spec.execution` to the right command, but this guard rejects the
+    // mismatch loudly regardless, as defense-in-depth.
+    if spec.execution == ExecutionMode::Acp {
+        return Err(format!(
+            "'{}' is an ACP agent; use start_acp_agent, not start_agent",
+            spec.name
+        ));
+    }
     let auto_approve = crate::agent::spec::effective_auto_approve(task_auto_approve, repo_auto_approve);
 
     // Hooks (and the HookBridge status pipeline) are Claude-Code-specific; only
@@ -367,8 +431,8 @@ pub fn start_agent(
 
     use crate::agent::spec::SkillInjection;
 
-    // TASK-89 / TASK-193: mint a per-agent Agent-tier MCP token (auth + originating
-    // task/repo carrier). Claude consumes it via an inline `--mcp-config`; the four
+    // Mint a per-agent Agent-tier MCP token (auth + originating task/repo
+    // carrier). Claude consumes it via an inline `--mcp-config`; the four
     // WorktreeBundle engines consume it via a materialized project-local MCP config
     // (below). Mint for either path; the token's lifecycle is owned by
     // register_streaming_session/stop_session_inner regardless of engine.
@@ -398,7 +462,7 @@ pub fn start_agent(
         None
     };
 
-    // TASK-153: Claude gets La Vigie's bundled skills out-of-tree via `--plugin-dir`.
+    // Claude gets La Vigie's bundled skills out-of-tree via `--plugin-dir`.
     // Unresolvable/invalid bundle → omit the flag; launch never breaks.
     let plugin_dir: Option<String> = if app_inject_skills
         && spec.skill_injection == SkillInjection::PluginDir
@@ -408,7 +472,7 @@ pub fn start_agent(
         None
     };
 
-    // TASK-35: providers that discover project-local skills from the worktree get
+    // Providers that discover project-local skills from the worktree get
     // their vendored per-provider bundle materialized into the worktree
     // (git-excluded, so it never shows in the Diff). Best-effort: any failure
     // logs and the agent still launches, skill-free. Runs before spawn_pty so it
@@ -432,7 +496,7 @@ pub fn start_agent(
         }
     }
 
-    // TASK-193: the same WorktreeBundle engines get La Vigie's loopback MCP server
+    // The same WorktreeBundle engines get La Vigie's loopback MCP server
     // registered via a project-local config materialized into the worktree, with
     // the ephemeral port + this agent's bearer token substituted in. Git-excluded
     // like the skills, never overwriting a repo-tracked config. Best-effort: any
@@ -475,23 +539,26 @@ pub fn start_agent(
     );
     let resolved = crate::claude_path::find_binary(&program);
 
-    // Deliver an optional initial prompt using the resolved agent's prompt_mode
-    // (TASK-49 delivery + TASK-21 resolution). A prompt is only seeded on a fresh
-    // start, never on resume.
+    // Deliver an optional initial prompt using the resolved agent's prompt_mode.
+    // A prompt is only seeded on a fresh start, never on resume. antigravity's
+    // `agy` needs `-i` immediately before the prompt to treat it as one (see
+    // `initial_prompt_delivery`'s doc).
+    let arg_flag = if spec.name == "antigravity" { Some("-i") } else { None };
     let delivery = crate::agent::spec::initial_prompt_delivery(
         spec.prompt_mode,
         if resume { None } else { initial_prompt.as_deref() },
+        arg_flag,
     );
     args.extend(delivery.args);
 
     // Hand the agent its HookBridge coordinates so a skill it runs can call back.
     // LAVIGIE_TASK_ID is the durable key for task-scoped callbacks — POST
-    // /rename/{task_id} and /finish/{task_id} (TASK-40/TASK-139/TASK-151) — so they
-    // resolve even after an app restart empties the in-memory agent→task map.
-    // LAVIGIE_AGENT_ID stays for the per-agent hook URLs (status/transcript).
-    // TASK-174: also hand over LAVIGIE_TASK_REF — the provider ticket ref
-    // verbatim — so a task-provider adapter skill can route/act on it. Only
-    // present when the task carries a ticket key.
+    // /rename/{task_id} and /finish/{task_id} — so they resolve even after an
+    // app restart empties the in-memory agent→task map. LAVIGIE_AGENT_ID stays
+    // for the per-agent hook URLs (status/transcript). Also hand over
+    // LAVIGIE_TASK_REF — the provider ticket ref verbatim — so a task-provider
+    // adapter skill can route/act on it. Only present when the task carries a
+    // ticket key.
     let mut agent_env: Vec<(&str, String)> = vec![
         ("LAVIGIE_HOOK_PORT", state.hook_port.to_string()),
         ("LAVIGIE_AGENT_ID", agent_id.clone()),
@@ -500,9 +567,9 @@ pub fn start_agent(
     if let Some(entry) = lavigie_task_ref_env(task_ticket_key.as_deref()) {
         agent_env.push(entry);
     }
-    // TASK-193: Codex reads its MCP bearer token from an env var (it has no
-    // static-header auth for HTTP MCP; its vendored config names LAVIGIE_MCP_TOKEN
-    // via `bearer_token_env_var`), so hand it the minted token when we injected an
+    // Codex reads its MCP bearer token from an env var (it has no static-header
+    // auth for HTTP MCP; its vendored config names LAVIGIE_MCP_TOKEN via
+    // `bearer_token_env_var`), so hand it the minted token when we injected an
     // MCP config. Harmless for the other engines, which read the token from the
     // static `Authorization` header in their own materialized config.
     if wants_mcp_injection {
@@ -515,7 +582,7 @@ pub fn start_agent(
     // register_streaming_session (which owns the token's lifecycle on success)
     // ever runs — so revoke the just-minted MCP token here, or a failed launch
     // orphans a live credential (for a WorktreeBundle engine it was also just
-    // written into a worktree config file on disk). TASK-193 review.
+    // written into a worktree config file on disk).
     let mut session = match spawn_pty(&resolved, &args, Some(Path::new(&worktree_path)), 80, 24, &agent_env) {
         Ok(s) => s,
         Err(e) => {
@@ -526,8 +593,9 @@ pub fn start_agent(
         }
     };
 
-    // PromptMode::Stdin path (not exercised by the claude-only live route, but
-    // wired so the TASK-21 thread inherits a complete delivery).
+    // PromptMode::Stdin path: not exercised by the claude-only live route
+    // (which uses Arg mode), but implemented so any future Stdin-mode engine
+    // gets a complete delivery.
     if let Some(stdin) = delivery.stdin {
         if let Err(e) = session
             .writer
@@ -544,7 +612,7 @@ pub fn start_agent(
     register_streaming_session(&state, &agent_id, session, Some(on_event), mcp_token, SessionKind::Task, None)?;
 
     // Emit initial console status with permission mode for agents whose auto-approve
-    // is resolved on. Lifecycle agents (e.g. Mistral Vibe) don't use hooks. (TASK-135)
+    // is resolved on. Lifecycle agents (e.g. Mistral Vibe) don't use hooks.
     if auto_approve && !spec.auto_approve_args.is_empty() {
         use tauri::Emitter as _;
         let _ = app.emit(
@@ -593,16 +661,23 @@ pub fn start_shell(
 }
 
 /// Write raw bytes to a registered session's PTY. Shared by the `write_session`
-/// command and the remote reply handler (TASK-108). Errors if the id is unknown.
+/// command and the remote reply handler. Errors if the id is unknown.
 pub fn write_to_session(state: &AppState, session_id: &str, data: &str) -> Result<(), String> {
     let mut sessions = state.sessions.lock().map_err(|e| e.to_string())?;
     let handle = sessions
         .get_mut(session_id)
         .ok_or_else(|| format!("session not found: {session_id}"))?;
 
-    handle.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
-    handle.writer.flush().map_err(|e| e.to_string())?;
-    Ok(())
+    match &mut handle.backend {
+        SessionBackend::Pty { writer, .. } => {
+            writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+            writer.flush().map_err(|e| e.to_string())?;
+            Ok(())
+        }
+        SessionBackend::Acp { .. } => {
+            Err("ACP sessions take prompts via acp_prompt, not raw bytes".to_string())
+        }
+    }
 }
 
 /// Write raw input bytes (a UTF-8 string of keystrokes from xterm) to the
@@ -636,15 +711,19 @@ pub fn resize_session(
         .get(&session_id)
         .ok_or_else(|| format!("session not found: {session_id}"))?;
 
-    handle
-        .master
-        .resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| e.to_string())
+    match &handle.backend {
+        SessionBackend::Pty { master, .. } => master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| e.to_string()),
+        // No PTY to resize — the frontend renders ACP turns structurally, not
+        // as a fixed-grid terminal.
+        SessionBackend::Acp { .. } => Ok(()),
+    }
 }
 
 /// Stop a session by id: kill its process, drop its PTY handles, and clear all
@@ -659,8 +738,19 @@ pub fn stop_session_inner(state: &AppState, session_id: &str) -> Result<(), Stri
             .ok_or_else(|| format!("session not found: {session_id}"))?
     };
 
-    // Ignore kill errors: the process may have already exited on its own.
-    let _ = handle.child.lock().map_err(|e| e.to_string())?.kill();
+    match &handle.backend {
+        SessionBackend::Pty { child, .. } => {
+            // Ignore kill errors: the process may have already exited on its own.
+            let _ = child.lock().map_err(|e| e.to_string())?.kill();
+        }
+        SessionBackend::Acp { child, abort, .. } => {
+            // Best-effort kill (the process may have already exited); ignore
+            // lock poisoning too. `abort` always runs, tearing down the
+            // driver's connection task regardless of the child's own state.
+            let _ = child.lock().map(|mut c| c.start_kill());
+            abort.abort();
+        }
+    }
 
     // Drop status-machine bookkeeping (no-op for shells/concierge).
     let _ = state.agent_states.lock().map(|mut m| m.remove(session_id));
@@ -711,7 +801,7 @@ mod tests {
         apply_lavigie_env(&mut cmd);
         assert_eq!(cmd.get_env("LAVIGIE"), Some(std::ffi::OsStr::new("1")));
         // FORCE_HYPERLINK=1 makes hyperlink-gating CLIs (e.g. Claude Code) emit
-        // OSC 8 links our xterm.js terminal can render clickably (TASK-170).
+        // OSC 8 links our xterm.js terminal can render clickably.
         assert_eq!(
             cmd.get_env("FORCE_HYPERLINK"),
             Some(std::ffi::OsStr::new("1"))
@@ -750,7 +840,7 @@ mod tests {
     fn spawn_pty_propagates_force_hyperlink_to_child() {
         // Runtime check that FORCE_HYPERLINK=1 actually reaches the spawned
         // process (not just the CommandBuilder) — this is what makes Claude Code
-        // emit OSC 8 footer links our terminal can render clickably (TASK-170).
+        // emit OSC 8 footer links our terminal can render clickably.
         let mut session = spawn_pty(
             "/bin/sh",
             &["-c".to_string(), "printf %s \"$FORCE_HYPERLINK\"".to_string()],
@@ -847,7 +937,7 @@ mod tests {
         );
     }
 
-    // ── lavigie_task_ref_env (TASK-174) ────────────────────────────────────────
+    // ── lavigie_task_ref_env ───────────────────────────────────────────────────
 
     #[test]
     fn lavigie_task_ref_env_present_when_keyed_absent_when_not() {
@@ -874,7 +964,7 @@ mod tests {
             serde_json::from_str(&json_str).expect("must be valid JSON");
 
         let hooks = v["hooks"].as_object().expect("hooks must be an object");
-        // TASK-85 adds SubagentStart/SubagentStop to the existing five.
+        // Includes SubagentStart/SubagentStop alongside the other five events.
         for key in &[
             "UserPromptSubmit",
             "Notification",

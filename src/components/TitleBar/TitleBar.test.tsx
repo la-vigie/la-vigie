@@ -59,7 +59,7 @@ describe("TitleBar", () => {
     const { container } = render(<TitleBar />);
 
     // The bar fills its full width with these wrappers; each must be a drag
-    // region or the window can't be dragged from them (TASK-74 regression).
+    // region or the window can't be dragged from them.
     const header = container.querySelector("header.titlebar")!;
     const brand = container.querySelector(".titlebar__brand")!;
     const logo = container.querySelector("img.titlebar__logo")!;

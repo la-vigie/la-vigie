@@ -1,0 +1,12 @@
+{
+  "sessionId": "ea603afd-d858-423b-ac83-8940cf0e279c",
+  "update": {
+    "sessionUpdate": "usage_update",
+    "used": 23956,
+    "size": 1000000,
+    "cost": {
+      "amount": 0.095058,
+      "currency": "USD"
+    }
+  }
+}

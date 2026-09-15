@@ -2,9 +2,9 @@ import { render, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Capture the registered task_launched callback so the test can fire it.
-let launchedCb: ((e: { taskId: string; initialPrompt?: string | null; skipRepoPrompt?: boolean }) => void) | undefined;
+let launchedCb: ((e: { taskId: string; initialPrompt?: string | null; skipRepoPrompt?: boolean; resume?: boolean }) => void) | undefined;
 vi.mock("../api", () => ({
-  onTaskLaunched: (cb: (e: { taskId: string; initialPrompt?: string | null; skipRepoPrompt?: boolean }) => void) => {
+  onTaskLaunched: (cb: (e: { taskId: string; initialPrompt?: string | null; skipRepoPrompt?: boolean; resume?: boolean }) => void) => {
     launchedCb = cb;
     return Promise.resolve(() => {});
   },
@@ -13,6 +13,8 @@ vi.mock("../api", () => ({
 const refresh = vi.fn().mockResolvedValue(undefined);
 const setSelectedTask = vi.fn();
 const startAgentSession = vi.fn();
+// The handler awaits loadAgents() so engine routing sees the catalog.
+const loadAgents = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("../store", () => ({
   useVigieStore: Object.assign(
@@ -21,6 +23,7 @@ vi.mock("../store", () => ({
         refresh,
         setSelectedTask,
         startAgentSession,
+        loadAgents,
         tasks: [{ id: "task-b", repoId: "repo-1" }],
         repos: [{ id: "repo-1", initialPrompt: "/worktree-init" }],
       }),
@@ -29,6 +32,7 @@ vi.mock("../store", () => ({
         refresh,
         setSelectedTask,
         startAgentSession,
+        loadAgents,
         tasks: [{ id: "task-b", repoId: "repo-1" }],
         repos: [{ id: "repo-1", initialPrompt: "/worktree-init" }],
       }),
@@ -91,5 +95,15 @@ describe("useTaskLaunch", () => {
     await waitFor(() => expect(startAgentSession).toHaveBeenCalled());
     // Repo prompt "/worktree-init" is dropped; only the schedule prompt survives.
     expect(startAgentSession).toHaveBeenCalledWith("task-b", false, undefined, "do the thing");
+  });
+
+  it("resumes an existing task when requested by the launch event", async () => {
+    render(<Harness />);
+    await waitFor(() => expect(launchedCb).toBeDefined());
+
+    await launchedCb!({ taskId: "task-b", resume: true });
+
+    await waitFor(() => expect(startAgentSession).toHaveBeenCalled());
+    expect(startAgentSession).toHaveBeenCalledWith("task-b", true, undefined, undefined);
   });
 });

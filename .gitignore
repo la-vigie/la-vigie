@@ -23,6 +23,12 @@ dist-ssr
 *.sln
 *.sw?
 
+# Codex's repo skills dir. Codex Desktop's Claude Code import writes a rewritten
+# copy of `.claude/skills` here; it is machine-local, never consumed by the build,
+# and would leave every checkout dirty (teardown refuses dirty worktrees).
+# Root-anchored: the vendored `src-tauri/resources/**/.agents/` bundles are tracked.
+/.agents/
+
 # SDD scratch (progress ledger, briefs)
 .superpowers/
 

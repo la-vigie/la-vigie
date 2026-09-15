@@ -7,12 +7,14 @@ import { taskName } from "../../lib/taskName";
 import { combineInitialPrompts } from "../../lib/combineInitialPrompts";
 import { useAgents } from "../../hooks/useAgents";
 import { AgentModelPicker } from "../Agent/AgentModelPicker";
+import { routingPolicyEnabled } from "../../routing/validatePolicy";
 import { PromptPicker } from "../Prompts/PromptPicker";
 import { insertAtCursor } from "../Prompts/insertAtCursor";
 import { StatusDot } from "../StatusDot/StatusDot";
 import { RepoSettingsModal } from "./RepoSettingsModal";
 import { ContextMenu, type ContextMenuItem } from "../ContextMenu/ContextMenu";
 import { DeleteTaskModal } from "./DeleteTaskModal";
+import { FinishTaskModal } from "../TaskDetail/FinishTaskModal";
 import "./Sidebar.css";
 
 interface NewTaskFormProps {
@@ -30,25 +32,31 @@ export function NewTaskForm({ repo, onClose }: NewTaskFormProps) {
   const [ticketId, setTicketId] = useState("");
   const [baseBranch, setBaseBranch] = useState("");
   const [taskPrompt, setTaskPrompt] = useState("");
-  // TASK-160: launch-time-only opt-out of the repo-level prompt for this task.
+  // Launch-time-only opt-out of the repo-level prompt for this task.
   // Only meaningful when the repo actually has a non-empty initialPrompt.
   const [skipRepoPrompt, setSkipRepoPrompt] = useState(false);
   const hasRepoPrompt = (repo.initialPrompt ?? "").trim().length > 0;
   // Per-task launch toggle; defaults from the repo's auto-start setting and can
   // be overridden per task. This (not the repo setting directly) gates launch.
   const [startImmediately, setStartImmediately] = useState(repo.autoStartAgent ?? false);
-  // TASK-179: launch-time deferred one-shot — mutually exclusive with "start immediately".
+  // Launch-time deferred one-shot — mutually exclusive with "start immediately".
   const [startLater, setStartLater] = useState(false);
   const [startLaterHours, setStartLaterHours] = useState("3");
   const [agentName, setAgentName] = useState(repo.defaultAgent ?? "claude");
   const [modelName, setModelName] = useState<string | null>(repo.defaultModel ?? null);
+  // When the repo has an enabled routing policy, default to auto-routing —
+  // the form then sends NO explicit agent so the backend router picks the engine
+  // (and model). Turning it off reveals the manual picker (an explicit choice
+  // always overrides routing).
+  const routingEnabled = routingPolicyEnabled(repo.routingPolicy);
+  const [autoRoute, setAutoRoute] = useState(routingEnabled);
   const [autoApprove, setAutoApprove] = useState<boolean | null>(null);
   const { agents } = useAgents();
   const [phase, setPhase] = useState<"form" | "running">("form");
   const [error, setError] = useState<string | null>(null);
-  // TASK-125: warn when the derived worktree path already exists on disk.
+  // Warn when the derived worktree path already exists on disk.
   const [worktreePreview, setWorktreePreview] = useState<WorktreePreview | null>(null);
-  // TASK-163: run this task in the repo's existing checkout (no worktree).
+  // Run this task in the repo's existing checkout (no worktree).
   const [inPlace, setInPlace] = useState(repo.inPlaceDefault ?? false);
   const [inPlaceBranch, setInPlaceBranch] = useState("");
 
@@ -60,7 +68,7 @@ export function NewTaskForm({ repo, onClose }: NewTaskFormProps) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // Debounced worktree-path check (TASK-125): as the title/ticket/base change,
+  // Debounced worktree-path check: as the title/ticket/base change,
   // ask the backend whether the derived worktree path already exists. Only a
   // non-vacant preview (adopt/conflict) is surfaced; a stale in-flight request
   // is discarded via the `cancelled` guard.
@@ -117,18 +125,20 @@ export function NewTaskForm({ repo, onClose }: NewTaskFormProps) {
         if (!Number.isFinite(hours) || hours <= 0) {
           throw new Error("Enter a positive number of hours.");
         }
-        // Deferred: create a one-shot schedule instead of a task now. We store
+        // Deferred: create a one-shot schedule instead of a task. We store
         // the RAW task prompt (matching MCP start_task / recurring); the fire-time
         // launch combines repo.initialPrompt via useTaskLaunch unless skipped.
-        // TASK-181: thread the TASK-160 skip checkbox so the deferred run honors the
-        // same include/skip choice as the immediate path (Sidebar create below).
+        // Thread the skip checkbox so the deferred run honors the same
+        // include/skip choice as the immediate path (Sidebar create below).
         await createOneShotSchedule({
           repoId: repo.id,
           name: title.trim() || ticketId.trim(),
           prompt: taskPrompt,
           inSeconds: Math.round(hours * 3600),
-          agent: agentName,
-          model: modelName,
+          // Auto-route ⇒ send no explicit agent/model so the router fires
+          // when the deferred one-shot launches.
+          agent: autoRoute ? null : agentName,
+          model: autoRoute ? null : modelName,
           baseBranch: baseBranch.trim() || null,
           skipRepoPrompt: hasRepoPrompt ? skipRepoPrompt : false,
         });
@@ -140,8 +150,9 @@ export function NewTaskForm({ repo, onClose }: NewTaskFormProps) {
         title.trim(),
         baseBranch.trim() || undefined,
         ticketId.trim() || undefined,
-        agentName,
-        modelName,
+        // Omit the agent when auto-routing so the backend router selects it.
+        autoRoute ? undefined : agentName,
+        autoRoute ? null : modelName,
         autoApprove,
         inPlace,
         inPlace ? inPlaceBranch.trim() || null : null,
@@ -149,11 +160,15 @@ export function NewTaskForm({ repo, onClose }: NewTaskFormProps) {
       await refresh();
       setSelectedTask(task.id);
       if (startImmediately) {
+        // When auto-routing, the engine was chosen by the backend — derive
+        // its display info from the returned task's resolved agent, not the form.
+        const launchedAgent =
+          (autoRoute ? agents.find((a) => a.name === task.agent) : selectedAgent) ?? undefined;
         startAgentSession(
           task.id,
           false,
-          selectedAgent
-            ? { label: selectedAgent.displayName, lifecycle: selectedAgent.status === "lifecycle" }
+          launchedAgent
+            ? { label: launchedAgent.displayName, lifecycle: launchedAgent.status === "lifecycle" }
             : undefined,
           combineInitialPrompts(skipRepoPrompt ? null : repo.initialPrompt, taskPrompt),
         );
@@ -317,13 +332,33 @@ export function NewTaskForm({ repo, onClose }: NewTaskFormProps) {
               </label>
             )}
 
-            <div className="new-task-form__group">
-              <AgentModelPicker
-                agent={agentName}
-                model={modelName}
-                onChange={(a, m) => { setAgentName(a); setModelName(m); }}
-              />
-            </div>
+            {routingEnabled && (
+              <label className="new-task-form__checkbox">
+                <input
+                  type="checkbox"
+                  checked={autoRoute}
+                  onChange={(e) => setAutoRoute(e.target.checked)}
+                  aria-label="Auto-route to an agent by policy"
+                />
+                <span>
+                  Auto-route agent by policy
+                  <span className="new-task-form__hint">
+                    {" "}— the repo's routing policy picks the engine (and model) from the
+                    task. Uncheck to choose manually.
+                  </span>
+                </span>
+              </label>
+            )}
+
+            {!autoRoute && (
+              <div className="new-task-form__group">
+                <AgentModelPicker
+                  agent={agentName}
+                  model={modelName}
+                  onChange={(a, m) => { setAgentName(a); setModelName(m); }}
+                />
+              </div>
+            )}
 
             <label className="new-task-form__group">
               <span className="new-task-form__label">Auto-approve</span>
@@ -465,6 +500,7 @@ export function RepoSection({ repo, search }: RepoSectionProps) {
   const [menu, setMenu] = useState<{ taskId: string; x: number; y: number } | null>(null);
   const [hiddenMenu, setHiddenMenu] = useState<{ taskId: string; x: number; y: number } | null>(null);
   const [confirmTaskId, setConfirmTaskId] = useState<string | null>(null);
+  const [finishTaskId, setFinishTaskId] = useState<string | null>(null);
 
   const query = search.trim().toLowerCase();
   
@@ -510,6 +546,7 @@ export function RepoSection({ repo, search }: RepoSectionProps) {
         <button
           type="button"
           className="sidebar__new-task-button"
+          data-tour="new-task"
           onClick={() => setShowNewTaskForm((v) => !v)}
         >
           New task
@@ -517,6 +554,7 @@ export function RepoSection({ repo, search }: RepoSectionProps) {
         <button
           type="button"
           className="sidebar__repo-settings-button"
+          data-tour="schedules"
           aria-label={`Settings for ${repo.name}`}
           onClick={() => setShowSettings(true)}
         >
@@ -690,6 +728,17 @@ export function RepoSection({ repo, search }: RepoSectionProps) {
           position={{ x: menu.x, y: menu.y }}
           onClose={() => setMenu(null)}
           items={[
+            // "Finish…" opens the same guarded FinishTaskModal as the TaskDetail
+            // header button. Gated out for a pending (queued) task —
+            // it has no worktree/agent yet, so there's nothing to finish.
+            ...(activeTasks.find((t) => t.id === menu.taskId)?.status === "pending"
+              ? []
+              : [
+                  {
+                    label: "Finish…",
+                    onSelect: () => setFinishTaskId(menu.taskId),
+                  } satisfies ContextMenuItem,
+                ]),
             {
               label: "Hide",
               onSelect: () => hideTask(menu.taskId),
@@ -733,6 +782,12 @@ export function RepoSection({ repo, search }: RepoSectionProps) {
               }}
             />
           );
+        })()}
+      {finishTaskId &&
+        (() => {
+          const t = allRepoTasks.find((task) => task.id === finishTaskId);
+          if (!t) return null;
+          return <FinishTaskModal task={t} onClose={() => setFinishTaskId(null)} />;
         })()}
     </li>
   );
@@ -786,6 +841,7 @@ export function Sidebar() {
           <button
             type="button"
             className="icon-btn"
+            data-tour="add-repo"
             aria-label="Add repository"
             title="Add repository"
             onClick={handleAddRepository}

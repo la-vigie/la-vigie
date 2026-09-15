@@ -31,10 +31,10 @@ the app, and La Vigie picks up that session.
    for inline comments — the `file:line` it was left on. This view is read-only;
    there's no reply box.
 6. **Merge.** Merging happens from the task's **Finish** flow, not the PR tab:
-   open the finish confirmation and, if the PR is open, a **Merge PR & finish**
-   button appears alongside the usual **Keep branch** / **Discard** options.
-   Clicking it squash-merges the PR (`gh pr merge --squash`) and then removes
-   the task's worktree.
+   open the finish dialog and, if the PR is open, a **Merge PR & finish** button
+   is the primary action, alongside **Keep branch** (Discard sits separately in a
+   guarded danger zone). Clicking it squash-merges the PR (`gh pr merge --squash`)
+   and then removes the task's worktree.
 
 ## How it works
 

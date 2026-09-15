@@ -57,6 +57,12 @@ vi.mock("../Terminal/TerminalHost", () => ({
   TerminalHost: () => <div data-testid="terminal-host" />,
 }));
 
+vi.mock("../Acp/AcpSurface", () => ({
+  AcpSurface: ({ taskId }: { taskId: string }) => (
+    <div data-testid="acp-surface" data-task-id={taskId} />
+  ),
+}));
+
 vi.mock("../Terminal/RunStatePill", () => ({
   RunStatePill: ({ onStop }: { onStop: () => void }) => (
     <button type="button" aria-label="Stop agent" onClick={onStop}>
@@ -131,6 +137,11 @@ describe("TaskDetail", () => {
       selectedTaskId: null,
       sessionsByTask: {},
       activeTabByTask: {},
+      errorByTask: {},
+      // startAgentSession awaits the catalog before routing unless
+      // it's already loaded; mark it loaded so button-click flows stay
+      // synchronous (the catalog is realistically loaded by click time).
+      agentsLoaded: true,
     });
   });
 
@@ -160,7 +171,7 @@ describe("TaskDetail", () => {
 
     render(<TaskDetail />);
 
-    // Start agent + Resume live in the in-pane placeholder now.
+    // Start agent + Resume live in the in-pane placeholder.
     expect(screen.getByText("Start agent")).toBeInTheDocument();
     expect(screen.getByText("Resume")).toBeInTheDocument();
     expect(screen.queryByText("Stop")).not.toBeInTheDocument();
@@ -206,7 +217,7 @@ describe("TaskDetail", () => {
     useVigieStore.setState({ tasks: [task], selectedTaskId: "task-1" });
 
     render(<TaskDetail />);
-    // Start agent now lives only in the in-pane placeholder.
+    // Start agent lives only in the in-pane placeholder.
     fireEvent.click(screen.getByRole("button", { name: "Start agent" }));
 
     const sessions = useVigieStore.getState().sessionsByTask["task-1"];
@@ -231,7 +242,7 @@ describe("TaskDetail", () => {
     useVigieStore.setState({ tasks: [task], selectedTaskId: "task-1" });
 
     render(<TaskDetail />);
-    // Resume is enabled now that the claude spec (with resumeArgs) is available.
+    // Resume is enabled because the claude spec (with resumeArgs) is available.
     await waitFor(() => expect(screen.getByRole("button", { name: /resume/i })).not.toBeDisabled());
     fireEvent.click(screen.getByText("Resume"));
 
@@ -243,6 +254,53 @@ describe("TaskDetail", () => {
       status: "starting",
       resume: true,
     });
+  });
+
+  // ACP engines have no `resumeArgs` (that's a PTY concept); their
+  // Resume affordance is gated on the task's stored `acpSessionId` instead.
+  const acpAgent = {
+    name: "claude-acp",
+    displayName: "Claude (ACP)",
+    binary: "npx",
+    baseArgs: [],
+    resumeArgs: [],
+    extraArgs: [],
+    promptMode: "none" as const,
+    status: "claudeHooks" as const,
+    builtin: true,
+    execution: "acp" as const,
+  };
+
+  it("disables Resume for an ACP engine when the task has no stored acpSessionId", () => {
+    (agentHooks.useAgents as ReturnType<typeof vi.fn>).mockReturnValue({
+      agents: [acpAgent],
+      loading: false,
+      error: null,
+    });
+    useVigieStore.setState({
+      tasks: [{ ...task, agent: "claude-acp", acpSessionId: null }],
+      selectedTaskId: "task-1",
+    });
+
+    render(<TaskDetail />);
+    expect(screen.getByRole("button", { name: /resume/i })).toBeDisabled();
+  });
+
+  it("enables Resume for an ACP engine once the task has a stored acpSessionId", async () => {
+    (agentHooks.useAgents as ReturnType<typeof vi.fn>).mockReturnValue({
+      agents: [acpAgent],
+      loading: false,
+      error: null,
+    });
+    useVigieStore.setState({
+      tasks: [{ ...task, agent: "claude-acp", acpSessionId: "sess-abc" }],
+      selectedTaskId: "task-1",
+    });
+
+    render(<TaskDetail />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /resume/i })).not.toBeDisabled(),
+    );
   });
 
   it("renders the run-state pill (not header Start/Resume/Stop) when the agent is running", () => {
@@ -282,6 +340,28 @@ describe("TaskDetail", () => {
     // removeAgentSession clears agent from sessions
     const sessions = useVigieStore.getState().sessionsByTask["task-1"];
     expect(sessions).toEqual([]);
+  });
+
+  it("a failed Stop surfaces the error and does NOT remove the agent session", async () => {
+    useVigieStore.setState({
+      tasks: [task],
+      selectedTaskId: "task-1",
+      sessionsByTask: {
+        "task-1": [{ localId: AGENT_TAB, kind: "agent", status: "running", title: "Claude", backendId: "a1" }],
+      },
+      activeTabByTask: { "task-1": AGENT_TAB },
+    });
+    stopSession.mockRejectedValueOnce(new Error("no such process"));
+
+    render(<TaskDetail />);
+    fireEvent.click(screen.getByRole("button", { name: /stop agent/i }));
+
+    await waitFor(() => {
+      expect(useVigieStore.getState().errorByTask["task-1"]).toBe("no such process");
+    });
+    // the session is left in place so the user can see it and retry
+    const sessions = useVigieStore.getState().sessionsByTask["task-1"];
+    expect(sessions.some((s) => s.kind === "agent")).toBe(true);
   });
 
   it("renders TerminalHost so terminals persist regardless of selection", () => {
@@ -343,6 +423,61 @@ describe("TaskDetail", () => {
     render(<TaskDetail />);
 
     expect(screen.getByTestId("review-panel")).toBeInTheDocument();
+  });
+
+  // ── Error banner (surface agent error detail) ──────────────────────────────
+
+  it("shows the error banner with the reason when the task has a stored error", () => {
+    useVigieStore.setState({
+      tasks: [task],
+      selectedTaskId: "task-1",
+      errorByTask: { "task-1": "Rate limited by the model API." },
+    });
+
+    render(<TaskDetail />);
+
+    const banner = screen.getByTestId("task-error-banner");
+    expect(banner).toHaveTextContent("Rate limited by the model API.");
+  });
+
+  it("does not show the error banner when the task has no stored error", () => {
+    useVigieStore.setState({ tasks: [task], selectedTaskId: "task-1", errorByTask: {} });
+
+    render(<TaskDetail />);
+
+    expect(screen.queryByTestId("task-error-banner")).not.toBeInTheDocument();
+  });
+
+  it("dismisses the error banner on click", async () => {
+    useVigieStore.setState({
+      tasks: [task],
+      selectedTaskId: "task-1",
+      errorByTask: { "task-1": "Billing error." },
+    });
+
+    render(<TaskDetail />);
+    expect(screen.getByTestId("task-error-banner")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /dismiss error/i }));
+
+    expect(screen.queryByTestId("task-error-banner")).not.toBeInTheDocument();
+  });
+
+  it("TerminalHost DOM node is NOT remounted when the error banner appears (keep-alive)", () => {
+    useVigieStore.setState({ tasks: [task], selectedTaskId: "task-1", errorByTask: {} });
+
+    render(<TaskDetail />);
+    const hostBefore = screen.getByTestId("terminal-host");
+    expect(screen.queryByTestId("task-error-banner")).not.toBeInTheDocument();
+
+    // A StopFailure arrives and the banner mounts — the always-mounted
+    // <TerminalHost/> (which holds the live PTY) must keep its DOM identity.
+    act(() => {
+      useVigieStore.getState().setTaskError("task-1", "The model API is overloaded.");
+    });
+
+    expect(screen.getByTestId("task-error-banner")).toBeInTheDocument();
+    expect(screen.getByTestId("terminal-host")).toBe(hostBefore);
   });
 
   it("toggling Hide diff (via … menu) removes ReviewPanel but keeps TerminalHost mounted", async () => {
@@ -550,6 +685,7 @@ describe("TaskDetail — ticket key display (TASK-16)", () => {
       selectedTaskId: null,
       sessionsByTask: {},
       activeTabByTask: {},
+      errorByTask: {},
     });
   });
 
@@ -702,10 +838,10 @@ describe("TaskDetail — resizable terminal/diff split (TASK-17)", () => {
   });
 });
 
-describe("TaskDetail — Finish flow", () => {
+describe("TaskDetail — Finish flow (TASK-39: opens shared modal)", () => {
   beforeEach(() => {
     invokeMock.mockReset();
-    // Default: no PR for this task (T5 adds a get_pr_status call when confirm opens)
+    // Modal mounts fetch get_pr_status + get_changed_files; default them to safe values.
     invokeMock.mockResolvedValue(undefined);
     localStorage.clear();
     useVigieStore.setState({
@@ -717,91 +853,65 @@ describe("TaskDetail — Finish flow", () => {
     });
   });
 
-  it("clicking 'Finish task' reveals Keep branch, Discard branch, and Cancel", () => {
+  it("clicking 'Finish task' opens the FinishTaskModal with context (no inline strip)", () => {
     render(<TaskDetail />);
-
-    expect(screen.queryByText("Keep branch")).not.toBeInTheDocument();
-    expect(screen.queryByText("Discard branch")).not.toBeInTheDocument();
-    expect(screen.queryByText("Cancel")).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: /finish/i })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /finish task/i }));
 
+    const dialog = screen.getByRole("dialog", { name: /finish/i });
+    expect(dialog).toBeInTheDocument();
+    // Context is surfaced as text (branch also shows in the header, so scope to
+    // the dialog), and the safe primary action is present.
+    expect(within(dialog).getByText("fix-login-bug")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /keep branch/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /discard branch/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /cancel/i })).toBeInTheDocument();
+    // The old inline Discard-on-single-click affordance is gone (guarded in the modal).
+    expect(screen.queryByRole("button", { name: /^discard branch$/i })).not.toBeInTheDocument();
   });
 
-  it("in-place task: finish confirm shows Keep branch but hides Discard branch", () => {
+  it("in-place task: the modal opens but hides the Discard danger zone", () => {
     useVigieStore.setState({
       tasks: [{ ...task, inPlace: true }],
       selectedTaskId: "task-1",
       sessionsByTask: {},
       activeTabByTask: {},
     });
-
     render(<TaskDetail />);
     fireEvent.click(screen.getByRole("button", { name: /finish task/i }));
 
     expect(screen.getByRole("button", { name: /keep branch/i })).toBeInTheDocument();
     // "Discard branch" would be a no-op for in-place (branch is always preserved).
-    expect(screen.queryByRole("button", { name: /discard branch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /discard branch instead/i })).not.toBeInTheDocument();
   });
 
-  it("clicking Cancel hides the confirmation without calling finish_task", () => {
+  it("Cancel closes the modal without calling finish_task", () => {
     render(<TaskDetail />);
-
     fireEvent.click(screen.getByRole("button", { name: /finish task/i }));
-    expect(screen.getByRole("button", { name: /cancel/i })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: /finish/i })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
 
-    expect(screen.queryByText("Keep branch")).not.toBeInTheDocument();
-    expect(screen.queryByText("Discard branch")).not.toBeInTheDocument();
-    expect(screen.queryByText("Cancel")).not.toBeInTheDocument();
-    // Opening finish confirm now fetches PR status (T5) — only assert finish_task was not called
-    const finishCalls = invokeMock.mock.calls.filter((c) => c[0] === "finish_task");
-    expect(finishCalls).toHaveLength(0);
+    expect(screen.queryByRole("dialog", { name: /finish/i })).not.toBeInTheDocument();
+    expect(invokeMock.mock.calls.filter((c) => c[0] === "finish_task")).toHaveLength(0);
   });
 
-  it("with a running agent, clicking 'Discard branch' stops the agent then calls finish_task discard, clears selection", async () => {
+  it("opening the finish modal does NOT remount the TerminalHost (KEEP-ALIVE)", () => {
     useVigieStore.setState({
       tasks: [task],
       selectedTaskId: "task-1",
       sessionsByTask: {
-        "task-1": [{ localId: AGENT_TAB, kind: "agent", status: "running", title: "Claude", backendId: "agent-99" }],
+        "task-1": [{ localId: AGENT_TAB, kind: "agent", status: "running", title: "Claude", backendId: "a1" }],
       },
       activeTabByTask: { "task-1": AGENT_TAB },
     });
-    invokeMock.mockResolvedValue(undefined);
-
     render(<TaskDetail />);
+    const hostBefore = screen.getByTestId("terminal-host");
+
     fireEvent.click(screen.getByRole("button", { name: /finish task/i }));
-    fireEvent.click(screen.getByRole("button", { name: /discard branch/i }));
 
-    await waitFor(() => {
-      expect(useVigieStore.getState().selectedTaskId).toBeNull();
-      expect(invokeMock).toHaveBeenCalledWith("stop_session", { sessionId: "agent-99" });
-      expect(invokeMock).toHaveBeenCalledWith("finish_task", { taskId: "task-1", mode: "discard" });
-      // stop_session must be called before finish_task
-      const calls = invokeMock.mock.calls.map((c) => c[0]);
-      expect(calls.indexOf("stop_session")).toBeLessThan(calls.indexOf("finish_task"));
-    });
-  });
-
-  it("with no agent, clicking 'Keep branch' calls finish_task keep and does NOT call stop_session", async () => {
-    invokeMock.mockResolvedValue(undefined);
-
-    render(<TaskDetail />);
-    fireEvent.click(screen.getByRole("button", { name: /finish task/i }));
-    fireEvent.click(screen.getByRole("button", { name: /keep branch/i }));
-
-    await waitFor(() => {
-      expect(useVigieStore.getState().selectedTaskId).toBeNull();
-    });
-
-    expect(invokeMock).toHaveBeenCalledWith("finish_task", { taskId: "task-1", mode: "keep" });
-    const stopCalls = invokeMock.mock.calls.filter((c) => c[0] === "stop_session");
-    expect(stopCalls).toHaveLength(0);
+    expect(screen.getByRole("dialog", { name: /finish/i })).toBeInTheDocument();
+    // The modal is a fixed-overlay sibling — the host node must be identical.
+    expect(screen.getByTestId("terminal-host")).toBe(hostBefore);
   });
 });
 
@@ -863,6 +973,29 @@ describe("TaskDetail — tab strip (TASK-24)", () => {
     expect(useVigieStore.getState().sessionsByTask["task-1"].some((s) => s.kind === "shell")).toBe(false);
   });
 
+  it("a failed shell close surfaces an error and keeps the shell tab", async () => {
+    useVigieStore.setState({
+      tasks: [task],
+      selectedTaskId: "task-1",
+      sessionsByTask: {
+        "task-1": [
+          { localId: AGENT_TAB, kind: "agent", status: "running", title: "Claude", backendId: "a1" },
+          { localId: "shell-1", kind: "shell", status: "running", title: "shell", backendId: "b9" },
+        ],
+      },
+      activeTabByTask: { "task-1": "shell-1" },
+    });
+    stopSession.mockRejectedValueOnce(new Error("no such process"));
+
+    render(<TaskDetail />);
+    await userEvent.click(screen.getByRole("button", { name: /close shell/i }));
+
+    await waitFor(() => {
+      expect(useVigieStore.getState().errorByTask["task-1"]).toBe("no such process");
+    });
+    expect(useVigieStore.getState().sessionsByTask["task-1"].some((s) => s.kind === "shell")).toBe(true);
+  });
+
   it("the Claude tab has no close button", () => {
     render(<TaskDetail />);
     const claudeTab = screen.getByRole("tab", { name: /claude/i });
@@ -878,200 +1011,6 @@ describe("TaskDetail — tab strip (TASK-24)", () => {
     });
     render(<TaskDetail />);
     expect(screen.getByText(/agent not running/i)).toBeInTheDocument();
-  });
-});
-
-describe("TaskDetail — Merge PR & finish (T5)", () => {
-  const openPrStatus = {
-    number: 7,
-    url: "https://github.com/foo/bar/pull/7",
-    title: "Fix login bug",
-    state: "OPEN",
-    isDraft: false,
-    mergeable: "MERGEABLE",
-    reviewDecision: null,
-    checks: [],
-  };
-
-  beforeEach(() => {
-    invokeMock.mockReset();
-    localStorage.clear();
-    useVigieStore.setState({
-      repos: [],
-      tasks: [task],
-      selectedTaskId: "task-1",
-      sessionsByTask: {},
-      activeTabByTask: {},
-    });
-  });
-
-  it("with an OPEN PR, opening finish confirm shows 'Merge PR & finish' button", async () => {
-    // get_pr_status called when confirm opens
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "get_pr_status") return Promise.resolve(openPrStatus);
-      return Promise.resolve(undefined);
-    });
-
-    render(<TaskDetail />);
-    fireEvent.click(screen.getByRole("button", { name: /finish task/i }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: /merge pr & finish/i })).toBeInTheDocument();
-    });
-  });
-
-  it("with no PR (null), finish confirm does NOT show 'Merge PR & finish'", async () => {
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "get_pr_status") return Promise.resolve(null);
-      return Promise.resolve(undefined);
-    });
-
-    render(<TaskDetail />);
-    fireEvent.click(screen.getByRole("button", { name: /finish task/i }));
-
-    // Wait for PR fetch to settle (get_pr_status returns null)
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("get_pr_status", { taskId: "task-1" });
-    });
-
-    expect(screen.queryByRole("button", { name: /merge pr & finish/i })).not.toBeInTheDocument();
-    // Keep/Discard/Cancel are still present
-    expect(screen.getByRole("button", { name: /keep branch/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /discard branch/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /cancel/i })).toBeInTheDocument();
-  });
-
-  it("with OPEN PR and no running agent, clicking 'Merge PR & finish' calls finish_task with mode merge and clears selection", async () => {
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "get_pr_status") return Promise.resolve(openPrStatus);
-      return Promise.resolve(undefined);
-    });
-
-    render(<TaskDetail />);
-    fireEvent.click(screen.getByRole("button", { name: /finish task/i }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: /merge pr & finish/i })).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: /merge pr & finish/i }));
-
-    await waitFor(() => {
-      expect(useVigieStore.getState().selectedTaskId).toBeNull();
-      expect(invokeMock).toHaveBeenCalledWith("finish_task", { taskId: "task-1", mode: "merge" });
-    });
-
-    const stopCalls = invokeMock.mock.calls.filter((c) => c[0] === "stop_session");
-    expect(stopCalls).toHaveLength(0);
-  });
-
-  it("with OPEN PR and a running agent, clicking 'Merge PR & finish' stops the agent first then calls finish_task merge", async () => {
-    useVigieStore.setState({
-      tasks: [task],
-      selectedTaskId: "task-1",
-      sessionsByTask: {
-        "task-1": [{ localId: AGENT_TAB, kind: "agent", status: "running", title: "Claude", backendId: "agent-42" }],
-      },
-      activeTabByTask: { "task-1": AGENT_TAB },
-    });
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "get_pr_status") return Promise.resolve(openPrStatus);
-      return Promise.resolve(undefined);
-    });
-
-    render(<TaskDetail />);
-    fireEvent.click(screen.getByRole("button", { name: /finish task/i }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: /merge pr & finish/i })).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: /merge pr & finish/i }));
-
-    await waitFor(() => {
-      expect(useVigieStore.getState().selectedTaskId).toBeNull();
-      expect(invokeMock).toHaveBeenCalledWith("stop_session", { sessionId: "agent-42" });
-      expect(invokeMock).toHaveBeenCalledWith("finish_task", { taskId: "task-1", mode: "merge" });
-      const calls = invokeMock.mock.calls.map((c) => c[0]).filter((c) => c !== "get_pr_status");
-      expect(calls.indexOf("stop_session")).toBeLessThan(calls.indexOf("finish_task"));
-    });
-  });
-
-  it("if finish_task rejects on merge, shows error and does NOT clear selection", async () => {
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "get_pr_status") return Promise.resolve(openPrStatus);
-      if (cmd === "finish_task") return Promise.reject(new Error("merge conflict"));
-      return Promise.resolve(undefined);
-    });
-
-    render(<TaskDetail />);
-    fireEvent.click(screen.getByRole("button", { name: /finish task/i }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: /merge pr & finish/i })).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: /merge pr & finish/i }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("alert")).toBeInTheDocument();
-      expect(screen.getByRole("alert")).toHaveTextContent("merge conflict");
-    });
-
-    // Task not dropped
-    expect(useVigieStore.getState().selectedTaskId).toBe("task-1");
-  });
-});
-
-describe("TaskDetail — Finish stops ALL sessions (Fix: shell PTY leak)", () => {
-  beforeEach(() => {
-    invokeMock.mockReset();
-    stopSession.mockReset();
-    localStorage.clear();
-    useVigieStore.setState({
-      repos: [],
-      tasks: [task],
-      selectedTaskId: "task-1",
-      sessionsByTask: {},
-      activeTabByTask: {},
-    });
-  });
-
-  it("on 'Keep branch', stops both agent and shell backend sessions before finishing", async () => {
-    useVigieStore.setState({
-      tasks: [task],
-      selectedTaskId: "task-1",
-      sessionsByTask: {
-        "task-1": [
-          { localId: AGENT_TAB, kind: "agent", status: "running", title: "Claude", backendId: "agent-b" },
-          { localId: "shell-1", kind: "shell", status: "running", title: "shell", backendId: "shell-b" },
-        ],
-      },
-      activeTabByTask: { "task-1": AGENT_TAB },
-    });
-    stopSession.mockResolvedValue(undefined);
-    invokeMock.mockResolvedValue(undefined);
-
-    render(<TaskDetail />);
-    fireEvent.click(screen.getByRole("button", { name: /finish task/i }));
-    fireEvent.click(screen.getByRole("button", { name: /keep branch/i }));
-
-    await waitFor(() => {
-      expect(useVigieStore.getState().selectedTaskId).toBeNull();
-    });
-
-    // Both backend sessions must have been stopped
-    expect(stopSession).toHaveBeenCalledWith("agent-b");
-    expect(stopSession).toHaveBeenCalledWith("shell-b");
-    // And finish_task must have been called after
-    expect(invokeMock).toHaveBeenCalledWith("finish_task", { taskId: "task-1", mode: "keep" });
-    // stop calls must precede finish_task in the invokeMock call list
-    const calls = invokeMock.mock.calls.map((c) => c[0]).filter((c) => c !== "get_pr_status");
-    const lastStopIdx = Math.max(
-      calls.lastIndexOf("stop_session"),
-      // stopSession routes through invokeMock so stop_session appears there
-    );
-    expect(lastStopIdx).toBeLessThan(calls.indexOf("finish_task"));
   });
 });
 
@@ -1248,5 +1187,103 @@ describe("TaskDetail — queued placeholder for pending tasks (TASK-90)", () => 
     expect(placeholder).toHaveTextContent("Build the API");
     // A dangling blocker with no title falls back to its id.
     expect(placeholder).toHaveTextContent("b2");
+  });
+});
+
+describe("TaskDetail — ACP surface (TASK-244)", () => {
+  const acpTask: Task = {
+    id: "task-1",
+    repoId: "repo-1",
+    title: "ACP task",
+    worktreePath: "/tmp/wt/acp",
+    branch: "acp",
+    baseBranch: "main",
+    status: "idle",
+    createdAt: 1,
+    updatedAt: 1,
+    inPlace: false,
+    agent: "claude-acp",
+  };
+
+  beforeEach(() => {
+    invokeMock.mockReset();
+    localStorage.clear();
+    useVigieStore.setState({
+      repos: [],
+      tasks: [acpTask],
+      selectedTaskId: "task-1",
+      sessionsByTask: {},
+      activeTabByTask: { "task-1": AGENT_TAB },
+      errorByTask: {},
+    });
+  });
+
+  const acpSession = () => ({
+    localId: AGENT_TAB,
+    kind: "agent" as const,
+    status: "running" as const,
+    title: "Claude Code (ACP)",
+    backendId: "acp-1",
+    engine: "acp" as const,
+  });
+
+  it("renders the AcpSurface for a live ACP agent session (agent tab active)", () => {
+    useVigieStore.setState({ sessionsByTask: { "task-1": [acpSession()] } });
+    render(<TaskDetail />);
+    expect(screen.getByTestId("acp-surface")).toBeInTheDocument();
+    expect(screen.getByTestId("acp-surface").dataset.taskId).toBe("task-1");
+  });
+
+  it("renders NO AcpSurface for a PTY agent session", () => {
+    useVigieStore.setState({
+      sessionsByTask: {
+        "task-1": [{ localId: AGENT_TAB, kind: "agent", status: "running", title: "Claude", backendId: "a1", engine: "pty" }],
+      },
+    });
+    render(<TaskDetail />);
+    expect(screen.queryByTestId("acp-surface")).toBeNull();
+  });
+
+  it("TerminalHost DOM node is NOT remounted when the ACP surface appears and disappears (keep-alive)", () => {
+    render(<TaskDetail />);
+    const hostBefore = screen.getByTestId("terminal-host");
+    expect(screen.queryByTestId("acp-surface")).toBeNull();
+
+    // ACP agent session starts → surface mounts as a SIBLING of the host.
+    act(() => {
+      useVigieStore.setState({ sessionsByTask: { "task-1": [acpSession()] } });
+    });
+    expect(screen.getByTestId("acp-surface")).toBeInTheDocument();
+    expect(screen.getByTestId("terminal-host")).toBe(hostBefore);
+
+    // Session removed (exit) → surface unmounts; host identity unchanged.
+    act(() => {
+      useVigieStore.getState().removeAgentSession("task-1");
+    });
+    expect(screen.queryByTestId("acp-surface")).toBeNull();
+    expect(screen.getByTestId("terminal-host")).toBe(hostBefore);
+  });
+
+  it("switching to a shell tab swaps the ACP surface out without remounting TerminalHost (keep-alive)", () => {
+    useVigieStore.setState({
+      sessionsByTask: {
+        "task-1": [acpSession(), { localId: "sh1", kind: "shell", status: "running", title: "shell" }],
+      },
+    });
+    render(<TaskDetail />);
+    const hostBefore = screen.getByTestId("terminal-host");
+    expect(screen.getByTestId("acp-surface")).toBeInTheDocument();
+
+    act(() => {
+      useVigieStore.getState().setActiveTab("task-1", "sh1");
+    });
+    expect(screen.queryByTestId("acp-surface")).toBeNull();
+    expect(screen.getByTestId("terminal-host")).toBe(hostBefore);
+
+    act(() => {
+      useVigieStore.getState().setActiveTab("task-1", AGENT_TAB);
+    });
+    expect(screen.getByTestId("acp-surface")).toBeInTheDocument();
+    expect(screen.getByTestId("terminal-host")).toBe(hostBefore);
   });
 });

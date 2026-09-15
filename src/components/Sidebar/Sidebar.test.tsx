@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Sidebar } from "./Sidebar";
 import { useVigieStore, AGENT_TAB } from "../../store";
@@ -354,7 +354,7 @@ describe("Sidebar", () => {
     });
 
     it("starts collapsed when store has sidebarCollapsed=true", () => {
-      // The store now owns collapse state; set it directly (simulates what the
+      // The store owns collapse state; set it directly (simulates what the
       // localStorage-initialised store would do on first load).
       useVigieStore.setState({
         sidebarCollapsed: true,
@@ -413,6 +413,26 @@ describe("Sidebar", () => {
       expect(screen.getByRole("dialog")).toBeTruthy();
       fireEvent.click(screen.getByRole("button", { name: "Delete" }));
       expect(deleteTask).toHaveBeenCalledWith("t1", false);
+    });
+
+    it("choosing 'Finish…' opens the shared FinishTaskModal (TASK-39)", () => {
+      render(<Sidebar />);
+      fireEvent.contextMenu(screen.getByText("Fix login"));
+      fireEvent.click(screen.getByRole("menuitem", { name: /finish/i }));
+      const dialog = screen.getByRole("dialog", { name: /finish/i });
+      expect(dialog).toBeTruthy();
+      expect(within(dialog).getByRole("button", { name: /keep branch/i })).toBeTruthy();
+    });
+
+    it("a pending (queued) task has no 'Finish…' item", () => {
+      useVigieStore.setState({
+        tasks: [{ id: "t1", repoId: "r1", title: "Fix login", branch: "b1", status: "pending" } as never],
+      } as never);
+      render(<Sidebar />);
+      fireEvent.contextMenu(screen.getByText("Fix login"));
+      expect(screen.queryByRole("menuitem", { name: /finish/i })).toBeNull();
+      // Delete stays available.
+      expect(screen.getByRole("menuitem", { name: "Delete" })).toBeTruthy();
     });
   });
 

@@ -32,7 +32,7 @@ export function isWithinRect(physical: DropPoint, rect: DOMRect, dpr: number): b
 // undefined if there is no selection / no spawned session. The selected surface is
 // the orchestrator chat (`orchestrator:{repoId}`) if one is selected, else the task
 // — mirroring TerminalHost's `selectedSurfaceId` precedence so a drop over the
-// orchestrator terminal resolves its PTY too (TASK-221).
+// orchestrator terminal resolves its PTY too.
 export function resolveActiveBackendId(state: VigieState): string | undefined {
   const surfaceId = state.selectedOrchestratorRepoId
     ? orchestratorSurfaceId(state.selectedOrchestratorRepoId)

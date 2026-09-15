@@ -1,7 +1,8 @@
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { Sidebar } from "./components/Sidebar/Sidebar";
 import { TaskDetail } from "./components/TaskDetail/TaskDetail";
 import { TitleBar } from "./components/TitleBar/TitleBar";
+import { Tour } from "./components/Tour/Tour";
 import { useAgentStatus } from "./hooks/useAgentStatus";
 import { useAgentConsole } from "./hooks/useAgentConsole";
 import { useFocusRefresh } from "./hooks/useFocusRefresh";
@@ -28,6 +29,13 @@ function App() {
   useTaskCreated();
   useTraySelect();
   useFocusRefresh();
+
+  // Load the agent-spec catalog up front: engine routing (PTY vs ACP) in
+  // startAgentSession resolves against it, including for agents started via
+  // task_launched events before any picker has mounted.
+  useEffect(() => {
+    void useVigieStore.getState().loadAgents();
+  }, []);
 
   const sidebarCollapsed = useVigieStore((state) => state.sidebarCollapsed);
   const setSidebarWidth = useVigieStore((state) => state.setSidebarWidth);
@@ -65,6 +73,9 @@ function App() {
         )}
         <TaskDetail />
       </div>
+      {/* Portaled to document.body — a sibling of the app, ancestor of nothing.
+          Never wraps <TerminalHost/> (KEEP-ALIVE). */}
+      <Tour />
     </div>
   );
 }

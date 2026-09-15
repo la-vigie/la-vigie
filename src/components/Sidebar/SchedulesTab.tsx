@@ -32,7 +32,7 @@ export function SchedulesTab({
   const [editing, setEditing] = useState<Schedule | null>(null);
   const [scheduleType, setScheduleType] = useState<"recurring" | "once">("recurring");
   const [inHours, setInHours] = useState("3");
-  // TASK-181: skip prepending the repo's initial prompt when this schedule fires.
+  // Skip prepending the repo's initial prompt when this schedule fires.
   // Defaults to true — a scheduled prompt is usually self-contained.
   const [skipRepoPrompt, setSkipRepoPrompt] = useState(true);
 

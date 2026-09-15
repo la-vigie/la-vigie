@@ -2,8 +2,8 @@ import { useEffect } from "react";
 import { onTaskRemoved } from "../api";
 import { useVigieStore } from "../store";
 
-/// Listen for `task_removed` events (TASK-139: the backend tore down a task,
-/// e.g. via self-teardown) and reproduce the GUI finish/delete behavior —
+/// Listen for `task_removed` events (the backend tore down a task, e.g. via
+/// self-teardown) and reproduce the GUI finish/delete behavior —
 /// deselect-if-selected + refresh — so the sidebar drops it live.
 export function useTaskRemoved() {
   const handleTaskRemoved = useVigieStore((s) => s.handleTaskRemoved);

@@ -5,10 +5,10 @@ import { throttleLeading } from "../lib/debounce";
 
 const FOCUS_THROTTLE_MS = 5000;
 
-/// TASK-120: refresh data-bearing views when the window regains focus / becomes
-/// visible — the cheap catch for out-of-band changes made while the app was in
-/// the background (e.g. a PR merged on GitHub). Throttled so focus-flapping
-/// doesn't spam git/gh.
+/// Refresh data-bearing views when the window regains focus / becomes
+/// visible — the cheap catch for out-of-band changes made while the app was
+/// in the background (e.g. a PR merged on GitHub). Throttled so
+/// focus-flapping doesn't spam git/gh.
 export function useFocusRefresh(): void {
   useEffect(() => {
     let cancelled = false;

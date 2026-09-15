@@ -47,7 +47,7 @@ const {
 
 // A hand-built PaneMetrics (the invariant `.terminal-pane__body` in production).
 // Tests drive terminal sizing through this stub instead of a real
-// ResizeObserver, exercising the deterministic pane-derived path (TASK-227).
+// ResizeObserver, exercising the deterministic pane-derived path.
 function makeStubPaneMetrics(initial: PaneSize) {
   let size = initial;
   const subs = new Set<PaneSubscriber>();
@@ -158,6 +158,10 @@ describe("TerminalView", () => {
       selectedTaskId: null,
       sessionsByTask: {},
       activeTabByTask: {},
+      // startAgentSession routes synchronously when the catalog is
+      // already loaded (otherwise it awaits it); these mount tests rely on the
+      // session existing at render time.
+      agentsLoaded: true,
     });
     vi.stubGlobal("ResizeObserver", ResizeObserverStub);
   });
@@ -469,8 +473,8 @@ describe("TerminalView", () => {
     const term = terminalInstances[0];
 
     // A pane resize lands BEFORE the session is live: it sizes xterm (98×30) but
-    // cannot sync the PTY yet (no id). This is the ordering that previously let a
-    // combined dedup swallow the first PTY sync.
+    // cannot sync the PTY yet (no id). Without separate PTY-grid tracking, a
+    // combined dedup would swallow the first PTY sync once the session goes live.
     act(() => emit({ width: 800, height: 480 }));
     expect(term.resize).toHaveBeenCalledWith(98, 30);
     expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "resize_session")).toHaveLength(0);
@@ -623,10 +627,10 @@ describe("TerminalView", () => {
     invokeMock.mockResolvedValue(undefined);
     setCachedCell({ width: 8, height: 16 });
     // A pane that hasn't been laid out reports 0×0. computeGrid returns null for
-    // it, so no degenerate size ever reaches xterm or the PTY. This replaces the
-    // TASK-220 MIN_PTY_COLS floor: instead of rejecting "suspiciously narrow"
-    // fits by a magic column count, we never compute a grid from an unmeasured
-    // pane in the first place (and never measure the collapsing child at all).
+    // it, so no degenerate size ever reaches xterm or the PTY — rather than
+    // rejecting "suspiciously narrow" fits by a magic column count, no grid is
+    // ever computed from an unmeasured pane in the first place (and the
+    // collapsing child is never measured at all).
     const { metrics } = makeStubPaneMetrics({ width: 0, height: 0 });
 
     const { rerender } = render(

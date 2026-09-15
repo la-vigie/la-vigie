@@ -1,6 +1,6 @@
 [package]
 name = "vigie"
-version = "0.4.0"
+version = "0.5.0"
 description = "Local desktop app to manage parallel AI coding agents and their git worktrees"
 authors = ["evermax"]
 edition = "2021"
@@ -24,12 +24,32 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
+# Single-instance guard (TASK-225): the fixed data dir (~/Library/Application
+# Support/com.lavigie/) means two instances would co-mutate one DB and
+# double-run the 60s schedule poller. This plugin makes a second launch hand
+# its argv to the primary and exit; the callback raises+focuses the existing
+# window. Registered FIRST (before setup) and ONLY in release builds — dev
+# builds skip it and use a separate `<identifier>.dev` data dir so `tauri dev`
+# can run beside an installed copy (see src/lib.rs).
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
-tokio = { version = "1", features = ["process", "rt", "macros", "rt-multi-thread", "net"] }
+tokio = { version = "1", features = ["process", "rt", "macros", "rt-multi-thread", "net", "io-util"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+# ACP (Agent Client Protocol, agentclientprotocol.com) backend engine: runs
+# Claude/Mistral ACP agents side-by-side with the PTY backend. Org rewrite
+# (2026-07-07), runtime-agnostic and `Send` (verified: no LocalSet/!Send
+# constraint like the older `agent-client-protocol-tokio` crate, which is
+# stale and stays unused). The schema crate is pinned `=1.7.0` transitively —
+# do not add a second pin here.
+agent-client-protocol = "2.1.0"
+# Channel/oneshot primitives for the ACP driver's command queue and permission
+# round-trip (`agent-client-protocol` already depends on this internally, so
+# this adds no new major version to the dependency tree).
+futures = "0.3"
 portable-pty = "0.9"
 base64 = "0.22"
 axum = { version = "0.8", features = ["macros"] }
@@ -39,6 +59,29 @@ tauri-plugin-notification = "2.3.3"
 keepawake = "0.6"
 croner = "3"
 chrono = "0.4"
+# WebAuthn/passkey ceremonies for durable remote auth (TASK-240). Register/
+# authenticate against the Tailscale MagicDNS name as the RP ID. In-progress
+# ceremony state is held in-memory (ActiveRemote), so no state-serialisation
+# feature is needed; the stored `Passkey` serialises unconditionally.
+webauthn-rs = "0.5"
+# Embedded WebDriver bridge for GUI-verification e2e (TASK-142/TASK-245). Its
+# init() is registered only under #[cfg(debug_assertions)] in lib.rs, so it never
+# *runs* in a shipped app. It's an unconditional dependency (not feature-gated) so
+# its ACL permission manifest resolves in every build profile — the crate is still
+# compiled/linked into release, only its plugin registration is compiled out.
+tauri-plugin-wdio-webdriver = "1"
+
+# macOS only: statically link OpenSSL. webauthn-rs pulls in `openssl` (transitively via
+# webauthn-attestation-ca), which by default dynamically links the host's OpenSSL — on
+# macOS that's Homebrew's ad-hoc-signed libssl.3.dylib. The packaged .app is signed with
+# a hardened runtime (dev-signing, TASK-241/#171), whose library validation rejects a dylib
+# with a different Team ID, so the app aborts at launch ("Library not loaded ... different
+# Team IDs"). Forcing the `vendored` feature statically links a bundled OpenSSL into our own
+# signed binary — self-contained, portable, and library-validation clean. Cargo feature-
+# unifies this onto the transitive dep. Scoped to macOS so Linux/CI keep using system
+# OpenSSL (no source build, no slowdown; the crash is macOS-hardened-runtime-specific).
+[target.'cfg(target_os = "macos")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
 
 [dev-dependencies]
 tempfile = "3"

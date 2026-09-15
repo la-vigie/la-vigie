@@ -1,4 +1,4 @@
-//! Agent-session core (TASK-108/TASK-111): parse Claude Code's JSONL transcript
+//! Agent-session core: parse Claude Code's JSONL transcript
 //! into chat-shaped messages, frame a reply for the PTY, resolve a task to its
 //! live agent, and provide the shared `read_session` service consumed by both
 //! the remote HTTP handler and the MCP `get_task_activity` tool. Glue (handlers,
@@ -8,8 +8,8 @@ use serde::Serialize;
 
 pub mod question;
 
-/// A chat-shaped item distilled from one transcript content block. Kept loose on
-/// purpose — the real mobile UI lands with TASK-107. Serialized camelCase; `None`
+/// A chat-shaped item distilled from one transcript content block. Kept loose
+/// by design — this is what the mobile UI reads. Serialized camelCase; `None`
 /// fields are omitted.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -123,7 +123,7 @@ pub struct SessionRead {
     pub cursor: usize,
 }
 
-/// Shared task-session read service (TASK-111): resolve a task's captured
+/// Shared task-session read service: resolve a task's captured
 /// transcript path, read it, and parse from byte offset `since`. Consumed by
 /// the remote HTTP `GET /api/tasks/:id/session` handler AND the MCP
 /// `get_task_activity` tool. An absent transcript (no hook yet) is NOT an
@@ -140,8 +140,8 @@ pub fn read_session(state: &AppState, task_id: &str, since: usize) -> Result<Ses
     };
     // Seek to `since` instead of reading the whole file: a long-running agent's
     // transcript grows to many MB and the phone re-polls every ~2s, so a
-    // whole-file read made per-poll I/O O(filesize) forever. We now read only the
-    // bytes after the cursor (TASK-116).
+    // whole-file read would make per-poll I/O O(filesize) forever. Only the
+    // bytes after the cursor are read.
     let mut file = std::fs::File::open(&path).map_err(|e| format!("{e:#}"))?;
     let len = file.metadata().map_err(|e| format!("{e:#}"))?.len();
     read_delta_from(&mut file, len, since).map_err(|e| format!("{e:#}"))

@@ -57,6 +57,12 @@ export async function sendToAgent(taskId: string, prompt: string): Promise<void>
   const agentId = await waitForAgentReady(taskId);
   // Re-fetch session after wait (it may have changed)
   const updatedSession = useVigieStore.getState().sessionsByTask[taskId]?.find((s) => s.kind === "agent");
+  // ACP sessions take prompts over acp_prompt, never PTY bytes —
+  // writeSession rejects them backend-side by design.
+  if (updatedSession?.engine === "acp") {
+    await useVigieStore.getState().sendAcpPrompt(taskId, prompt);
+    return;
+  }
   const data = shouldUseBracketedPaste(updatedSession) ? wrapBracketedPaste(prompt) : prompt;
   await writeSession(agentId, data);
 }

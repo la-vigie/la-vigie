@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { updateRepo, listRepoBranches, setRepoDefaultModel } from "../../api";
+import { updateRepo, listRepoBranches, setRepoDefaultModel, setRepoRoutingPolicy } from "../../api";
+import { validateRoutingPolicy } from "../../routing/validatePolicy";
 import { useVigieStore } from "../../store";
 import type { Repo } from "../../store";
 import { SOUND_PALETTE, SOUND_EVENTS, DEFAULT_SOUND_SETTINGS, soundLabel } from "../../sound/types";
@@ -49,6 +50,7 @@ export function RepoSettingsModal({ repo, onClose }: RepoSettingsModalProps) {
     repo.autoApprove ?? null,
   );
   const [inPlaceDefault, setInPlaceDefault] = useState(repo.inPlaceDefault ?? false);
+  const [routingPolicy, setRoutingPolicy] = useState(repo.routingPolicy ?? "");
 
   // Populate the base-branch dropdown from the repo's local branches. Merge the
   // stored value in (it may be a branch that no longer exists locally) so it's
@@ -144,6 +146,25 @@ export function RepoSettingsModal({ repo, onClose }: RepoSettingsModalProps) {
     if (typeof picked === "string") setWorktreeRoot(picked);
   };
 
+  // Live validation shown under the routing textarea (null ⇒ valid /
+  // empty). Cheap + pure, so recompute each render rather than track extra state.
+  const routingLiveError =
+    routingPolicy.trim() === "" ? null : validateRoutingPolicy(routingPolicy);
+
+  // Pretty-print the routing JSON in place. Reformats any parseable JSON
+  // (not just a valid policy) so a user can tidy a draft; a parse error surfaces
+  // in the header error slot instead of mangling their text.
+  const beautifyRoutingPolicy = () => {
+    const raw = routingPolicy.trim();
+    if (raw === "") return;
+    try {
+      setRoutingPolicy(JSON.stringify(JSON.parse(raw), null, 2));
+      if (error?.startsWith("Routing policy")) setError(null);
+    } catch (e) {
+      setError(`Routing policy: not valid JSON — ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -161,6 +182,11 @@ export function RepoSettingsModal({ repo, onClose }: RepoSettingsModalProps) {
     }
     if (!trimmedBranch) {
       setError("Default base branch cannot be empty.");
+      return;
+    }
+    const routingError = validateRoutingPolicy(routingPolicy);
+    if (routingError) {
+      setError(`Routing policy: ${routingError}`);
       return;
     }
     setSaving(true);
@@ -185,6 +211,7 @@ export function RepoSettingsModal({ repo, onClose }: RepoSettingsModalProps) {
         inPlaceDefault,
       );
       await setRepoDefaultModel(repo.id, defaultModel);
+      await setRepoRoutingPolicy(repo.id, routingPolicy.trim() || null);
       await refresh();
       onClose();
     } catch (err) {
@@ -471,6 +498,61 @@ export function RepoSettingsModal({ repo, onClose }: RepoSettingsModalProps) {
                 </span>
               </span>
             </label>
+          </div>
+
+          <div className="repo-settings__divider" />
+
+          <div className="repo-settings__field">
+            <div className="repo-settings__routing-head">
+              <span className="repo-settings__label">Auto-routing policy</span>
+              <button
+                type="button"
+                className="repo-settings__link"
+                onClick={beautifyRoutingPolicy}
+                disabled={routingPolicy.trim() === ""}
+              >
+                Format
+              </button>
+            </div>
+            <textarea
+              className="field mono"
+              aria-label="Auto-routing policy"
+              rows={8}
+              spellCheck={false}
+              placeholder={
+                '{\n  "enabled": true,\n  "rules": [\n    { "when": { "difficulty": ["hard"] }, "target": { "agent": "claude", "model": "opus" } }\n  ],\n  "fallback": { "agent": "codex" }\n}'
+              }
+              value={routingPolicy}
+              onChange={(e) => setRoutingPolicy(e.target.value)}
+            />
+            {routingPolicy.trim() === "" ? (
+              <span className="repo-settings__routing-status" role="status">
+                Routing off — new tasks use the default agent.
+              </span>
+            ) : routingLiveError ? (
+              <span
+                className="repo-settings__routing-status repo-settings__routing-status--err"
+                role="status"
+              >
+                ✕ {routingLiveError}
+              </span>
+            ) : (
+              <span
+                className="repo-settings__routing-status repo-settings__routing-status--ok"
+                role="status"
+              >
+                ✓ Valid policy
+              </span>
+            )}
+            <span className="repo-settings__hint">
+              JSON policy that picks the engine (and model) for new tasks with no explicit
+              agent, from a quick difficulty/kind classification of the task. A per-task
+              agent choice always overrides it. Leave empty (or set <code>enabled: false</code>)
+              to route by the default agent. Rules match first-to-last;
+              <code>difficulty</code> ∈ easy|medium|hard, <code>kind</code> ∈
+              refactor|greenfield|debug|ui|docs|other, <code>titleContains</code> is a
+              case-insensitive substring.
+            </span>
           </div>
 
           <div className="repo-settings__divider" />

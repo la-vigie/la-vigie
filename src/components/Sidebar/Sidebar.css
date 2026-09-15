@@ -694,6 +694,27 @@
   font-size: 12px;
 }
 
+/* TASK-58: routing-policy editor header (label + Format) and live status line. */
+.repo-settings__routing-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.repo-settings__routing-status {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  word-break: break-word;
+}
+.repo-settings__routing-status--ok {
+  color: var(--green, #3fb950);
+}
+.repo-settings__routing-status--err {
+  color: var(--red);
+}
+
 /* ── Footer ──────────────────────────────────────────────────────────────── */
 .repo-settings__footer {
   display: flex;
